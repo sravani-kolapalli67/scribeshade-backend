@@ -1,0 +1,14 @@
+node_modules
+dist
+.env
+.env.*
+*.log
+.git
+.gitignore
+.dockerignore
+.github
+coverage
+**/*.test.ts
+**/*.spec.ts
+README.md
+pnpm-workspace.yaml
