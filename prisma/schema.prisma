@@ -8,10 +8,23 @@ datasource db {
 }
 
 model User {
-  id        String   @id @default(cuid())
+  id    String   @id @default(uuid())
   clerkId   String   @unique
-  email     String?
+  email     String  @unique
   name      String?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+
+  resumes   Resume[]
+}
+
+
+model Resume {
+  id         String      @id @default(uuid())
+  filename   String
+  path       String
+  uploadedAt DateTime @default(now())
+
+  userId     String
+  user      User    @relation(fields: [userId], references: [id], onDelete: Cascade)
 }

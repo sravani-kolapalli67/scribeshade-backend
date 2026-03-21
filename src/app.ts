@@ -13,10 +13,14 @@ export const createApp = () => {
   app.use(cors());
   app.use(express.json());
   app.use(express.urlencoded({ extended: true }));
+  app.use("/uploads", express.static("uploads"));
 
   // Clerk authentication middleware (global)
   app.use(clerkAuth);
 
+  //   app.get("/api/protected", requireAuth(), async (req, res) => {
+  //     res.json({ userId: req.auth.isAuthenticated });
+  //   });
   // API Routes
   app.use("/api", router);
 

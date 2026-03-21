@@ -1,12 +1,12 @@
-import { Router } from "express";
-import { requireAuth } from "../auth/auth.middleware";
-import { UserController } from "./user.controller";
+// import { Router } from "express";
+// // import { requireAuth } from "../auth/auth.middleware";
+// import { UserController } from "./user.controller";
 
-const router = Router();
+// const router = Router();
 
-// All user routes require authentication
-router.use(requireAuth);
+// // All user routes require authentication
+// // router.use(requireAuth);
 
-router.get("/me", UserController.getMe);
+// router.get("/me", UserController.getMe);
 
-export { router as userRouter };
+// export { router as userRouter };

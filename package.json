@@ -20,12 +20,15 @@
     "dotenv": "^16.4.7",
     "express": "^5.0.0",
     "morgan": "^1.10.0",
+    "multer": "^2.1.1",
+    "svix": "^1.88.0",
     "zod": "^3.24.2"
   },
   "devDependencies": {
     "@types/cors": "^2.8.17",
     "@types/express": "^5.0.6",
     "@types/morgan": "^1.9.9",
+    "@types/multer": "^2.1.0",
     "@types/node": "^20.17.19",
     "prisma": "^6.4.1",
     "tsup": "^8.3.6",
