@@ -12,3 +12,6 @@ coverage
 **/*.spec.ts
 README.md
 pnpm-workspace.yaml
+
+Dockerfile
+docker-compose.yml

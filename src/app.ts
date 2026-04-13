@@ -1,3 +1,4 @@
+import { Express } from "express";
 import cors from "cors";
 import express from "express";
 import morgan from "morgan";
@@ -5,7 +6,7 @@ import { clerkAuth } from "./features/auth/auth.middleware";
 import { router } from "./routes";
 import { errorMiddleware } from "./shared/middleware/error.middleware";
 
-export const createApp = () => {
+export const createApp: () => Express = () => {
   const app = express();
 
   // Standard middleware

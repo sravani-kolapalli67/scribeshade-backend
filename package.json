@@ -5,7 +5,7 @@
   "main": "dist/server.js",
   "scripts": {
     "dev": "tsx watch src/server.ts",
-    "build": "tsup src/server.ts --format cjs --dts --out-dir dist --clean",
+    "build": "tsup src/server.ts --format cjs --out-dir dist --clean",
     "start": "node dist/server.js",
     "type-check": "tsc --noEmit",
     "db:generate": "prisma generate",
@@ -18,14 +18,12 @@
     "@deepgram/sdk": "^5.0.0",
     "@google/genai": "^1.46.0",
     "@prisma/client": "^6.4.1",
-    "@types/ws": "^8.18.1",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
     "express": "^5.0.0",
     "mammoth": "^1.12.0",
     "morgan": "^1.10.0",
     "multer": "^2.1.1",
-    "pdf-extract": "^1.0.11",
     "pdf-parse": "^2.4.5",
     "sharp": "^0.34.5",
     "svix": "^1.88.0",
@@ -38,6 +36,7 @@
     "@types/morgan": "^1.9.9",
     "@types/multer": "^2.1.0",
     "@types/node": "^20.17.19",
+    "@types/ws": "^8.18.1",
     "prisma": "^6.4.1",
     "tsup": "^8.3.6",
     "tsx": "^4.19.3",
@@ -52,7 +51,12 @@
       "@clerk/shared",
       "@prisma/client",
       "@prisma/engines",
-      "prisma"
-    ]
+      "prisma",
+      "sharp"
+    ],
+    "supportedArchitectures": {
+      "os": ["current"],
+      "cpu": ["current"]
+    }
   }
 }
