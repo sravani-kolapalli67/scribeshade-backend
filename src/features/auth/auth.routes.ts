@@ -2,6 +2,7 @@ import { NextFunction, Request, Response, Router } from "express";
 import { clerkAuth, getCurrentUserId, requireAuth } from "./auth.middleware";
 import { getUserByClerkId, handleWebhook, syncUser } from "./auth.service";
 import express from "express";
+import { clerkClient } from "@clerk/express";
 
 const router = Router();
 
@@ -27,9 +28,19 @@ const router = Router();
 
 router.get("/me", async (req: Request, res: Response, next: NextFunction) => {
   try {
-    console.log(req);
     const clerkId = getCurrentUserId(req);
-    const user = await getUserByClerkId(clerkId);
+    let user = await getUserByClerkId(clerkId);
+
+    if (!user) {
+      console.log(`User ${clerkId} not found in DB. Syncing from Clerk...`);
+      // Fetch user from Clerk
+      const clerkUser = await clerkClient.users.getUser(clerkId);
+      const email = clerkUser.emailAddresses[0]?.emailAddress;
+      const name = `${clerkUser.firstName || ""} ${clerkUser.lastName || ""}`.trim() || undefined;
+
+      user = await syncUser(clerkId, email, name);
+    }
+
     console.log("🚀 ~ user:", user);
     res.json(user);
   } catch (error) {

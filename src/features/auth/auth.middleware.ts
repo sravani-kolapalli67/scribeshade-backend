@@ -13,7 +13,7 @@ export const requireAuth = (
 ) => {
   try {
     const { userId } = getAuth(req);
-    console.log("🚀 ~ userId:", userId);
+    // console.log("🚀 ~ userId:", userId);
     if (!userId) {
       return next(new AppError(401, "Unauthorized: Authentication required"));
     }

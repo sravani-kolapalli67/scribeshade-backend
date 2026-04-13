@@ -13,9 +13,8 @@ export async function syncUser(clerkId: string, email?: string, name?: string) {
     throw new Error("Missing clerkId");
   }
 
-  // Optional: skip if no email
   if (!email) {
-    console.warn("No email found for user:", clerkId);
+    throw new AppError(400, "Email is required for user synchronization");
   }
 
   const user = await prisma.user.upsert({
@@ -44,9 +43,6 @@ export async function getUserByClerkId(clerkId: string) {
   const user = await prisma.user.findUnique({
     where: { clerkId },
   });
-  if (!user) {
-    throw new AppError(404, "User not found in database. Please sync first.");
-  }
   return user;
 }
 

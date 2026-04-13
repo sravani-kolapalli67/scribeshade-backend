@@ -1,24 +1,33 @@
-import { Router, Request, Response } from "express";
+import { Router } from "express";
 import multer, { StorageEngine, FileFilterCallback } from "multer";
 import path from "path";
 import fs from "fs";
-import { prisma } from "../../shared/lib/prisma";
+import { Request } from "express";
 
-const router = Router();
+import { UPLOAD_DIR, ALLOWED_EXTENSIONS } from "./resume.service";
+import {
+  addTemplate,
+  coverLetter,
+  listAtsResumes,
+  listResumes,
+  listTemplates,
+  removeResume,
+  scoreAts,
+  uploadResume,
+} from "./resume.controller";
 
-// ── Ensure upload directory exists ───────────────────────────
-const uploadDir = "uploads/resumes";
-if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir, { recursive: true });
+// ─────────────────────────────────────────────────────────────────────────────
+// Multer (File Upload Middleware)
+// ─────────────────────────────────────────────────────────────────────────────
+
+if (!fs.existsSync(UPLOAD_DIR)) {
+  fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 }
 
-// ── Multer config ─────────────────────────────────────────────
 const storage: StorageEngine = multer.diskStorage({
-  destination: (_req, _file, cb) => cb(null, uploadDir),
-  filename: (req: Request, file: Express.Multer.File, cb) => {
-    const unique = `resume_${req.body.userId}_${Date.now()}${path.extname(
-      file.originalname,
-    )}`;
+  destination: (_req, _file, cb) => cb(null, UPLOAD_DIR),
+  filename: (_req, file, cb) => {
+    const unique = `resume_${Date.now()}${path.extname(file.originalname)}`;
     cb(null, unique);
   },
 });
@@ -27,63 +36,35 @@ const fileFilter = (
   _req: Request,
   file: Express.Multer.File,
   cb: FileFilterCallback,
-) => {
-  const allowed = [".pdf", ".doc", ".docx"];
+): void => {
   const ext = path.extname(file.originalname).toLowerCase();
-  if (allowed.includes(ext)) {
+  if (ALLOWED_EXTENSIONS.includes(ext)) {
     cb(null, true);
   } else {
-    cb(new Error("Only PDF, DOC, DOCX files are allowed"));
+    cb(new Error("Only PDF, DOC, and DOCX files are allowed"));
   }
 };
 
 const upload = multer({ storage, fileFilter });
 
-// ── POST /resume/upload ───────────────────────────────────────
-router.post(
-  "/upload",
-  upload.single("resume"),
-  async (req: Request, res: Response): Promise<void> => {
-    const { userId } = req.body as { userId: string };
+const router = Router();
 
-    if (!req.file) {
-      res.status(400).json({ error: "No file uploaded" });
-      return;
-    }
+// Resume CRUD
+router.post("/upload", upload.single("resume"), uploadResume);
+router.get("/list", listResumes);
+router.delete("/:id", removeResume);
 
-    if (!userId) {
-      res.status(400).json({ error: "Missing userId" });
-      return;
-    }
+// ATS Analysis
+router.post("/ats-score", scoreAts);
+router.get("/all-ats", listAtsResumes);
 
-    try {
-      const resume = await prisma.resume.create({
-        data: {
-          filename: req.file.filename,
-          path: `${uploadDir}/${req.file.filename}`,
-          userId,
-        },
-      });
+// Cover Letter
+router.post("/generate-cover-letter", coverLetter);
 
-      res.json(resume);
-    } catch (err) {
-      const error = err as Error;
-      res.status(500).json({ error: error.message });
-    }
-  },
-);
+// Templates
+router.post("/create-template", addTemplate);
+router.get("/all-templates", listTemplates);
 
-router.get("/list", async (req: Request, res: Response) => {
-  try {
-    const { userId } = req.query as { userId: string };
-    const resumes = await prisma.resume.findMany({
-      where: { userId },
-    });
-    res.json(resumes);
-  } catch (err) {
-    const error = err as Error;
-    res.status(500).json({ error: error.message });
-  }
-});
+// ─────────────────────────────────────────────────────────────────────────────
 
 export { router as resumeRouter };
