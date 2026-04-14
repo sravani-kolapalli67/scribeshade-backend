@@ -51,10 +51,7 @@ function getStatusCode(err: unknown): number {
  * POST /resume/upload
  * Accepts a multipart file upload, validates it is a resume, then persists it.
  */
-export async function uploadResume(
-  req: Request,
-  res: Response,
-): Promise<void> {
+export async function uploadResume(req: Request, res: Response): Promise<void> {
   if (!req.file) {
     res.status(400).json({ error: "No file uploaded" });
     return;
@@ -227,7 +224,8 @@ export async function coverLetter(req: Request, res: Response): Promise<void> {
  * Creates a new resume template.
  */
 export async function addTemplate(req: Request, res: Response): Promise<void> {
-  const { category, thumbnail, code } = req.body as Partial<CreateTemplateRequest>;
+  const { category, thumbnail, code } =
+    req.body as Partial<CreateTemplateRequest>;
 
   if (!category || !thumbnail || !code) {
     res
@@ -270,6 +268,7 @@ export async function removeResume(req: Request, res: Response): Promise<void> {
   const { id } = req.params;
 
   try {
+    console.log(id);
     await deleteResume(id);
     res.json({ message: "Resume deleted successfully" });
   } catch (err) {

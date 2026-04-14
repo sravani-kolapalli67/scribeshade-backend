@@ -1,27 +1,20 @@
 # --- Dependency Stage ---
 FROM node:20-alpine AS deps
 
-RUN corepack enable && corepack prepare pnpm@10.4.1 --activate
+RUN corepack enable && corepack prepare pnpm@10.4.1 --activate && \
+    apk add --no-cache curl
+
 WORKDIR /app
 
 COPY package.json pnpm-lock.yaml ./
 
-# KEY OPTIMIZATIONS:
-# 1. node-linker=hoisted → flat node_modules, no .pnpm store (~800MB saved)
-# 2. PRISMA_SKIP_POSTINSTALL → skip downloading engines (copied from builder instead)
-# 3. Strip docs/tests/changelogs/sourcemaps from every package
+# 1. Install only production dependencies
+# 2. Use node-prune to clean up bloat
 RUN echo "node-linker=hoisted" > .npmrc && \
     PRISMA_SKIP_POSTINSTALL=1 pnpm install --frozen-lockfile --prod && \
-    # Remove junk files from node_modules
-    find node_modules \( \
-      -name "*.md" -o -name "*.map" -o -name "CHANGELOG*" -o \
-      -name "LICENSE*" -o -name ".npmignore" -o -name "Makefile" \
-    \) -type f -delete 2>/dev/null; \
-    find node_modules -type d \( \
-      -name "test" -o -name "tests" -o -name "__tests__" -o \
-      -name "docs" -o -name "doc" -o -name "example" -o -name "examples" \
-    \) -exec rm -rf {} + 2>/dev/null; \
-    true
+    curl -sf https://gobinaries.com/tj/node-prune | sh && \
+    node-prune && \
+    rm -rf node_modules/**/README.md node_modules/**/*.map 2>/dev/null
 
 # --- Builder Stage ---
 FROM node:20-alpine AS builder
@@ -30,18 +23,38 @@ RUN corepack enable && corepack prepare pnpm@10.4.1 --activate
 WORKDIR /app
 
 COPY package.json pnpm-lock.yaml ./
-RUN pnpm install --frozen-lockfile
+RUN echo "node-linker=hoisted" > .npmrc && pnpm install --frozen-lockfile
 
 # Copy Prisma schema and generate client
 COPY prisma ./prisma/
 RUN pnpm run db:generate
 
-# Copy source code and config
+# Copy source code and build
 COPY tsconfig.json ./
 COPY src ./src/
+RUN pnpm run build && \
+    # Clean builder node_modules too to keep intermediate layers sane
+    apk add --no-cache curl && \
+    curl -sf https://gobinaries.com/tj/node-prune | sh && \
+    node-prune node_modules
 
-# Build the application
-RUN pnpm run build
+# --- Staging Stage (Merge everything for final COPY) ---
+FROM node:20-alpine AS staging
+WORKDIR /app
+
+# 1. Copy prod node_modules from deps
+COPY --from=deps /app/node_modules ./node_modules
+COPY --from=deps /app/package.json ./package.json
+
+# 2. Overwrite prisma client with the generated one from builder
+# Doing this in a separate stage ensures the final runner only gets one layer.
+COPY --from=builder /app/node_modules/@prisma ./node_modules/@prisma
+COPY --from=builder /app/node_modules/.prisma ./node_modules/.prisma
+COPY --from=builder /app/prisma ./prisma
+COPY --from=builder /app/dist ./dist
+
+# 3. Final engine cleanup (only keep musl engine for alpine)
+RUN find node_modules/.prisma/client -name "query-engine-*" ! -name "*musl*" -delete 2>/dev/null || true
 
 # --- Production Stage ---
 FROM node:20-alpine AS runner
@@ -49,31 +62,15 @@ FROM node:20-alpine AS runner
 WORKDIR /app
 ENV NODE_ENV=production
 
-# Create a non-root user for security
+# Create a non-root user
 RUN addgroup -S appgroup && adduser -S appuser -G appgroup
 
-COPY package.json ./
-COPY prisma ./prisma/
+# COPY EVERYTHING IN ONE GO WITH CORRECT PERMISSIONS
+# This prevents the layer blowup caused by "chown -R"
+COPY --from=staging --chown=appuser:appgroup /app /app
 
-# Copy flat production node_modules (no .pnpm store!)
-COPY --from=deps /app/node_modules ./node_modules
-
-# Replace the stub @prisma from deps with the fully generated one from builder.
-# Must delete first — deps (hoisted) creates a directory, builder (symlinks) creates a file,
-# and Docker COPY can't overwrite a directory with a file.
-RUN rm -rf node_modules/@prisma
-COPY --from=builder /app/node_modules/@prisma ./node_modules/@prisma
-
-# Copy compiled files from builder
-COPY --from=builder /app/dist ./dist
-
-# Final permissions for the non-root user
-RUN chown -R appuser:appgroup /app
 USER appuser
+EXPOSE 3000
 
-# Runtime env vars: DATABASE_URL, CLERK_PUBLISHABLE_KEY, CLERK_SECRET_KEY, PORT (default 3001)
-EXPOSE 3001
+# Runtime env vars: DATABASE_URL, etc.
 CMD ["node", "dist/server.js"]
-
-# NOTE: Database migrations (prisma migrate deploy) should be run at deployment time,
-# not during the image build process, to ensure they run against the live database.

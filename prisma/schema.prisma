@@ -1,5 +1,6 @@
 generator client {
-  provider = "prisma-client-js"
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
 }
 
 datasource db {
@@ -8,80 +9,151 @@ datasource db {
 }
 
 model User {
-  id    String   @id @default(uuid())
+  id        String   @id @default(uuid())
   clerkId   String   @unique
-  email     String  @unique
+  email     String   @unique
   name      String?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  resumes   Resume[]
-  sessions  Session[]
+  resumes  Resume[]
+  sessions Session[]
 }
 
+
 model Resume {
-  id            String      @id @default(uuid())
+  id            String   @id @default(uuid())
   filename      String
   path          String
   size          Int?
   resumeContext String?
-  uploadedAt    DateTime    @default(now())
+  uploadedAt    DateTime @default(now())
 
-  userId        String
-  user          User        @relation(fields: [userId], references: [id], onDelete: Cascade)
-  ats           Boolean @default(false)
-  atsAnalysis   ATSAnalysis?
+  userId String
+  user   User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  ats        Boolean      @default(false)
+  atsAnalysis ATSAnalysis?
 }
 
 model ATSAnalysis {
-  id        String   @id @default(uuid())
-  score     Int
-  summary   String
-  strengths String[]
-  weaknesses String[]
+  id              String   @id @default(uuid())
+  score           Int
+  summary         String
+  strengths       String[]
+  weaknesses      String[]
   missingKeywords String[]
-  suggestions String[]
+  suggestions     String[]
+  createdAt       DateTime @default(now())
 
-  createdAt DateTime @default(now())
-
-  resumeId  String  @unique
-  resume    Resume   @relation(fields: [resumeId], references: [id], onDelete: Cascade)
+  resumeId String @unique
+  resume   Resume  @relation(fields: [resumeId], references: [id], onDelete: Cascade)
 }
 
 model ResumeTemplate {
-    id        String @id @default(uuid())
-    category  String
-    thumbnail String
-    code      String @db.Text
-    createdAt DateTime @default(now())
+  id        String   @id @default(uuid())
+  category  String
+  thumbnail String
+  code      String   @db.Text
+  createdAt DateTime @default(now())
+}
+
+model Company {
+  id          String   @id @default(uuid())
+  name        String   @unique
+  slug        String   @unique
+  description String?
+  logo        String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  sessions  Session[]
+  questions QA[]
 }
 
 model Session {
-    id                      String @id @default(uuid())
-    company                 String
-    jobDescription          String
-    resumeId                String
-    DocumentId              String
-    language                String
-    simpleLanguage          Boolean
-    extraContext            String
-    autoGenerateResponse    Boolean
-    saveTranscription       Boolean
-    free                    Boolean
-    mode                    String
+  id                   String   @id @default(uuid())
 
-    isActive                Boolean @default(false)
-    startedAt               DateTime?
-    endedAt                 DateTime?
-    
-    
-    messages                Json @default("[]")
-    
-    userId                  String
-    user                    User @relation(fields: [userId], references: [id], onDelete: Cascade)
-    createdAt               DateTime @default(now())
-    updatedAt               DateTime @updatedAt
+  companyId            String
+  company              Company  @relation(fields: [companyId], references: [id], onDelete: Restrict)
+
+  jobDescription       String
+  resumeId             String
+  DocumentId           String
+  language             String
+  simpleLanguage       Boolean
+  extraContext         String
+  autoGenerateResponse Boolean
+  saveTranscription    Boolean
+  free                 Boolean
+  mode                 String
+
+  isActive  Boolean   @default(false)
+  startedAt DateTime?
+  endedAt   DateTime?
+
+  messages Json @default("[]")
+
+  userId String
+  user   User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  questions QA[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+  @@index([companyId])
 }
 
+enum Difficulty {
+  Easy
+  Medium
+  Hard
+}
 
+enum Industry {
+  DSA
+  Full_Stack
+  Data_Science
+  DevOps
+  System_Design
+  Mobile
+  Cloud
+}
 
+enum Language {
+  JavaScript
+  TypeScript
+  Python
+  Java
+  C_Plus_Plus
+  C
+  C_Sharp
+  Go
+  General
+}
+
+model QA {
+  id String @id @default(uuid())
+
+  companyId String
+  company   Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  sessionId String?
+  session   Session? @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  ques       String
+  answer     String?
+  difficulty Difficulty @default(Easy)
+  industry   Industry   @default(DSA)
+  language   Language   @default(General)
+  isShared   Boolean    @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([companyId])
+  @@index([sessionId])
+  @@index([isShared])
+}
