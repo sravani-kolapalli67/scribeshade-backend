@@ -1,7 +1,7 @@
 import path from "path";
 import fs from "fs";
 
-import { GoogleGenAI, createPartFromUri, Part } from "@google/genai";
+import { OpenRouter } from "@openrouter/sdk";
 import mammoth from "mammoth";
 import { PDFParse } from "pdf-parse";
 
@@ -19,16 +19,19 @@ import {
 export const UPLOAD_DIR = "uploads/resumes";
 export const ALLOWED_EXTENSIONS = [".pdf", ".doc", ".docx"];
 
-const GEMINI_POLL_INTERVAL_MS = 3_000;
-const GEMINI_MODEL = "gemini-3-flash-preview";
+const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL;
 
-// Gemini AI Client
+// OpenRouter AI Client
 
-if (!process.env.GEMINI_API_KEY) {
-  throw new Error("GEMINI_API_KEY environment variable is not defined");
+if (!process.env.OPENROUTER_API_KEY) {
+  throw new Error("OPENROUTER_API_KEY environment variable is not defined");
 }
 
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+const ai = new OpenRouter({
+  apiKey: process.env.OPENROUTER_API_KEY,
+  //   httpReferer: "https://scribeshade.com",
+  //   appTitle: "ScribeShade",
+});
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Internal Utilities (not exported — used only within this service)
@@ -54,38 +57,7 @@ function parseJsonResponse<T>(text: string): T | null {
   }
 }
 
-/**
- * Uploads a local file to Gemini and polls until it is fully processed.
- * Throws if the file enters a FAILED state.
- */
-async function uploadAndWaitForGeminiFile(
-  filePath: string,
-  displayName: string,
-): Promise<Awaited<ReturnType<typeof ai.files.get>>> {
-  const uploaded = await ai.files.upload({
-    file: filePath,
-    config: { displayName },
-  });
-
-  if (!uploaded.name) {
-    throw new Error("Gemini file upload returned no file name");
-  }
-
-  let file = await ai.files.get({ name: uploaded.name });
-
-  while (file.state === "PROCESSING") {
-    await new Promise((resolve) =>
-      setTimeout(resolve, GEMINI_POLL_INTERVAL_MS),
-    );
-    file = await ai.files.get({ name: uploaded.name });
-  }
-
-  if (file.state === "FAILED") {
-    throw new Error("Gemini file processing failed");
-  }
-
-  return file;
-}
+// uploadAndWaitForGeminiFile removed - no longer needed with OpenRouter
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Exported Service Functions
@@ -134,12 +106,15 @@ Text to analyze:
 ${text.substring(0, 3_000)}
   `.trim();
 
-  const response = await ai.models.generateContent({
-    model: GEMINI_MODEL,
-    contents: [prompt],
+  const response = await ai.chat.send({
+    chatRequest: {
+      model: OPENROUTER_MODEL,
+      messages: [{ role: "user", content: prompt }],
+    },
   });
 
-  const parsed = parseJsonResponse<{ isResume: boolean }>(response.text ?? "");
+  const aiText = response.choices[0]?.message?.content || "";
+  const parsed = parseJsonResponse<{ isResume: boolean }>(aiText);
   return parsed?.isResume === true;
 }
 
@@ -207,10 +182,8 @@ export async function runAtsAnalysis(
     });
   }
 
-  const processedFile = await uploadAndWaitForGeminiFile(
-    absolutePath,
-    resume.filename,
-  );
+  const ext = path.extname(resume.path).toLowerCase();
+  const resumeText = await extractTextFromFile(resume.path, ext);
 
   const prompt = `
 You are an ATS (Applicant Tracking System) expert.
@@ -231,17 +204,24 @@ Rules:
 - Return ONLY the JSON — no markdown, no extra text
   `.trim();
 
-  const contents: (string | Part)[] = [prompt];
-  if (processedFile.uri && processedFile.mimeType) {
-    contents.push(createPartFromUri(processedFile.uri, processedFile.mimeType));
-  }
-
-  const response = await ai.models.generateContent({
-    model: GEMINI_MODEL,
-    contents,
+  const response = await ai.chat.send({
+    chatRequest: {
+      model: OPENROUTER_MODEL,
+      messages: [
+        {
+          role: "system",
+          content: "You are an ATS (Applicant Tracking System) expert.",
+        },
+        {
+          role: "user",
+          content: `${prompt}\n\nRESUME CONTENT:\n${resumeText}`,
+        },
+      ],
+    },
   });
 
-  const parsed = parseJsonResponse<AtsAnalysisResult>(response.text ?? "");
+  const aiText = response.choices[0]?.message?.content || "";
+  const parsed = parseJsonResponse<AtsAnalysisResult>(aiText);
   if (!parsed) {
     throw new Error("Failed to parse ATS response from AI");
   }
@@ -286,10 +266,8 @@ export async function generateCoverLetter(
     throw Object.assign(new Error("Resume not found"), { statusCode: 404 });
   }
 
-  const processedFile = await uploadAndWaitForGeminiFile(
-    resume.path,
-    resume.filename,
-  );
+  const ext = path.extname(resume.path).toLowerCase();
+  const resumeText = await extractTextFromFile(resume.path, ext);
 
   const prompt = `
 Generate a ${tone ?? "professional"} cover letter.
@@ -301,23 +279,22 @@ Job Description:
 ${jobDescription ?? "Not provided"}
 
 Instructions:
-- Use the attached resume content to tailor the letter
+- Use the provided resume content to tailor the letter
 - Keep it between 100 and 250 words
 - Write naturally — avoid corporate clichés
 - Do NOT include a subject line or email headers
   `.trim();
 
-  const contents: (string | Part)[] = [prompt];
-  if (processedFile.uri && processedFile.mimeType) {
-    contents.push(createPartFromUri(processedFile.uri, processedFile.mimeType));
-  }
+  const finalPrompt = `${prompt}\n\nRESUME CONTENT:\n${resumeText}`;
 
-  const response = await ai.models.generateContent({
-    model: GEMINI_MODEL,
-    contents,
+  const response = await ai.chat.send({
+    chatRequest: {
+      model: OPENROUTER_MODEL,
+      messages: [{ role: "user", content: finalPrompt }],
+    },
   });
 
-  return response.text ?? "";
+  return response.choices[0]?.message?.content || "";
 }
 
 /**

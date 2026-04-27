@@ -27,7 +27,9 @@ if (!fs.existsSync(UPLOAD_DIR)) {
 const storage: StorageEngine = multer.diskStorage({
   destination: (_req, _file, cb) => cb(null, UPLOAD_DIR),
   filename: (_req, file, cb) => {
-    const unique = `resume_${Date.now()}${path.extname(file.originalname)}`;
+    const ext = path.extname(file.originalname);
+    const basename = path.basename(file.originalname, ext);
+    const unique = `${basename}_${Date.now()}${ext}`;
     cb(null, unique);
   },
 });

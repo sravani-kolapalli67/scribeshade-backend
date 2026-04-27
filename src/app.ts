@@ -11,7 +11,7 @@ export const createApp: () => Express = () => {
 
   // Standard middleware
   app.use(morgan("dev"));
-  app.use(cors());
+  app.use(cors({ origin: "*", credentials: true }));
   app.use(express.json());
   app.use(express.urlencoded({ extended: true }));
   app.use("/uploads", express.static("uploads"));
@@ -19,10 +19,6 @@ export const createApp: () => Express = () => {
   // Clerk authentication middleware (global)
   app.use(clerkAuth);
 
-  //   app.get("/api/protected", requireAuth(), async (req, res) => {
-  //     res.json({ userId: req.auth.isAuthenticated });
-  //   });
-  // API Routes
   app.use("/api", router);
 
   // Global Error Handler (must be last)

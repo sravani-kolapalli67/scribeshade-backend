@@ -8,6 +8,34 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+enum Difficulty {
+  Easy
+  Medium
+  Hard
+}
+
+enum Industry {
+  DSA
+  Full_Stack
+  Data_Science
+  DevOps
+  System_Design
+  Mobile
+  Cloud
+}
+
+enum Language {
+  JavaScript
+  TypeScript
+  Python
+  Java
+  C_Plus_Plus
+  C
+  C_Sharp
+  Go
+  General
+}
+
 model User {
   id        String   @id @default(uuid())
   clerkId   String   @unique
@@ -16,10 +44,12 @@ model User {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  resumes  Resume[]
-  sessions Session[]
+  resumes   Resume[]
+  sessions  Session[]
+  documents Document[]
+  questions QA[]
+  projects  Project[]
 }
-
 
 model Resume {
   id            String   @id @default(uuid())
@@ -34,6 +64,17 @@ model Resume {
 
   ats        Boolean      @default(false)
   atsAnalysis ATSAnalysis?
+}
+
+model Document {
+  id         String   @id @default(uuid())
+  filename   String
+  path       String
+  size       Int?
+  uploadedAt DateTime @default(now())
+
+  userId String
+  user   User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 }
 
 model ATSAnalysis {
@@ -75,13 +116,14 @@ model Session {
   id                   String   @id @default(uuid())
 
   companyId            String
+  companyName          String
   company              Company  @relation(fields: [companyId], references: [id], onDelete: Restrict)
 
   jobDescription       String
   resumeId             String
   DocumentId           String
   language             String
-  simpleLanguage       Boolean
+  simpleLanguage       Boolean @default(true)
   extraContext         String
   autoGenerateResponse Boolean
   saveTranscription    Boolean
@@ -92,7 +134,10 @@ model Session {
   startedAt DateTime?
   endedAt   DateTime?
 
-  messages Json @default("[]")
+  aiUsage Int @default(0)
+
+  messages   Json @default("[]")
+  transcript Json @default("[]")
 
   userId String
   user   User     @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -102,36 +147,10 @@ model Session {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  feedback SessionFeedback?
+
   @@index([userId])
   @@index([companyId])
-}
-
-enum Difficulty {
-  Easy
-  Medium
-  Hard
-}
-
-enum Industry {
-  DSA
-  Full_Stack
-  Data_Science
-  DevOps
-  System_Design
-  Mobile
-  Cloud
-}
-
-enum Language {
-  JavaScript
-  TypeScript
-  Python
-  Java
-  C_Plus_Plus
-  C
-  C_Sharp
-  Go
-  General
 }
 
 model QA {
@@ -150,10 +169,63 @@ model QA {
   language   Language   @default(General)
   isShared   Boolean    @default(false)
 
+  userId String?
+  user   User?  @relation(fields: [userId], references: [id], onDelete: Cascade)
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   @@index([companyId])
   @@index([sessionId])
+  @@index([userId])
   @@index([isShared])
+}
+
+model Project {
+  id              String   @id @default(uuid())
+  position        String
+  jobDescription  String   @db.Text
+  resumeId        String?
+  
+  projects        Json     // Stores the array of generated projects
+  
+  userId          String
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([userId])
+}
+
+model SessionFeedback {
+  id              String   @id @default(uuid())
+  sessionId       String   @unique
+  session         Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  
+  // High-level Metrics
+  score           Int      
+  confidence      Int      
+  sessionQuality  String   
+  verdict         String   
+  
+  // Detailed Scores
+  communication   Int
+  interactivity   Int
+  technicalDepth  Int
+  conciseness     Int
+  
+  // Stats
+  avgResponseLen  Int      
+  answeredCount   Int      
+  aiAssistsCount  Int      
+  avgResponseTime Float    
+  
+  // Qualitative Feedback
+  strengths       String[] 
+  improvements    String[] 
+  interviewerMood String   
+  
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
 }

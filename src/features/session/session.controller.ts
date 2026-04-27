@@ -1,5 +1,6 @@
 import { Request, Response } from "express";
 import * as sessionService from "./session.service";
+import { prisma } from "../../shared/lib/prisma";
 
 /**
  * Handles the creation of a new session.
@@ -8,20 +9,20 @@ export async function createSession(req: Request, res: Response) {
   try {
     const body = req.body || {};
 
-    // Map fields from the request body (handles FormData string-to-boolean conversion)
+    // Map fields from the request body (handles FormData string-to-boolean conversion as well as raw JSON)
     const data = {
       userId: body.userId,
-      companyName: body.companyName,
+      companyName: body.companyName || body.company,
       jobDescription: body.jobDescription,
       resumeId: body.resumeId,
       language: body.language,
-      extraContext: body.extraContext,
-      simpleLanguage: body.simpleLanguage === "true",
-      autoGenerateResponse: body.autoGenerateAI === "true",
-      saveTranscription: body.saveTranscript === "true",
+      extraContext: `${body.instructions || ""}\n${body.extraContext || ""}`.trim(),
+      simpleLanguage: body.simpleLanguage === "true" || body.simpleLanguage === true,
+      autoGenerateResponse: body.autoGenerateAI === "true" || body.autoGenerateAI === true,
+      saveTranscription: body.saveTranscript === "true" || body.saveTranscript === true,
       mode: body.jobInputMode || "manual",
-      free: body.free === "true",
-      DocumentId: "", // Update if you implement doc storage
+      free: body.free === "true" || body.free === true,
+      DocumentId: body.DocumentId || body.documentId || "", 
     };
 
     if (!data.userId) {
@@ -136,7 +137,16 @@ export async function activateSession(req: Request, res: Response) {
 export async function deactivateSession(req: Request, res: Response) {
   try {
     const id = req.params.id as string;
-    await sessionService.deactivateSession(id);
+    const { aiUsage, transcript } = req.body;
+    await sessionService.deactivateSession(id, aiUsage, transcript);
+    
+    // Auto-trigger analytics generation in the background
+    if (transcript) {
+      sessionService.generateSessionFeedback(id, transcript).catch((err) => {
+        console.error(`Background analytics generation failed for session ${id}:`, err);
+      });
+    }
+
     return res.json({ success: true });
   } catch (error: any) {
     console.error("Deactivate Session Error:", error);
@@ -147,38 +157,34 @@ export async function deactivateSession(req: Request, res: Response) {
 }
 
 /**
- * Analyzes a screen screenshot and streams the AI response.
+ * Analyzes a screen screenshot and streams the raw AI response.
  */
 export async function analyzeScreen(req: Request, res: Response) {
   try {
     const id = req.params.id as string;
     const file = req.file;
+    const aiModel = req.body.aiModel;
 
     if (!file) {
       return res.status(400).json({ error: "No screenshot provided" });
     }
 
-    const result = await sessionService.analyzeScreen(id, file);
+    const result = await sessionService.analyzeScreen(id, file, aiModel);
 
-    // If we hit the rate limit fallback, it returns an object with a text string
-    // if (result && !(Symbol.asyncIterator in Object(result)) && (result as any).text) {
-    //   res.setHeader("Content-Type", "text/plain; charset=utf-8");
-    //   return res.send((result as any).text);
-    // }
-
+    // Set streaming headers (Plain text for easier frontend consumption)
     res.setHeader("Content-Type", "text/plain; charset=utf-8");
     res.setHeader("Transfer-Encoding", "chunked");
+    res.setHeader("X-Accel-Buffering", "no");
 
-    let fullResponse = "";
     for await (const chunk of result as any) {
       if (chunk.text) {
-        fullResponse += chunk.text;
+        // Send raw text tokens directly
         res.write(chunk.text);
+        
+        if ((res as any).flush) {
+          (res as any).flush();
+        }
       }
-    }
-
-    if (fullResponse) {
-      await sessionService.appendMessage(id, "AI_ASSISTANT", fullResponse);
     }
 
     res.end();
@@ -209,33 +215,32 @@ export async function transcribe(req: Request, res: Response) {
 }
 
 /**
- * Generates an AI answer based on a transcript and streams the response.
+ * Generates an AI answer based on a transcript and streams the raw AI response.
  */
 export async function getAIAnswer(req: Request, res: Response) {
   try {
     const id = req.params.id as string;
-    const { transcript } = req.body;
+    const { transcript, isCustomQuery, aiModel } = req.body;
 
     if (!transcript) {
       return res.status(400).json({ error: "No transcript provided" });
     }
 
-    const result = await sessionService.getAIAnswer(id, transcript);
+    const result = await sessionService.getAIAnswer(id, transcript, !!isCustomQuery, aiModel);
 
-    // Set headers for streaming
+    // Set streaming headers
     res.setHeader("Content-Type", "text/plain; charset=utf-8");
     res.setHeader("Transfer-Encoding", "chunked");
+    res.setHeader("X-Accel-Buffering", "no");
 
-    let fullResponse = "";
     for await (const chunk of result as any) {
       if (chunk.text) {
-        fullResponse += chunk.text;
         res.write(chunk.text);
+        
+        if ((res as any).flush) {
+          (res as any).flush();
+        }
       }
-    }
-
-    if (fullResponse) {
-      await sessionService.appendMessage(id, "AI_ASSISTANT", fullResponse);
     }
 
     res.end();
@@ -255,16 +260,18 @@ export async function getAIAnswer(req: Request, res: Response) {
 export async function saveMessage(req: Request, res: Response) {
   try {
     const id = req.params.id as string;
-    const { role, content } = req.body;
+    const { role, question, answer, time } = req.body;
 
-    if (!role || !content) {
-      return res.status(400).json({ error: "role and content are required" });
+    if (!role || !question) {
+      return res.status(400).json({ error: "role and question are required" });
     }
 
     const updatedSession = await sessionService.appendMessage(
       id,
       role as any,
-      content,
+      question,
+      answer ?? "",
+      time
     );
     return res.json({ success: true, messages: updatedSession.messages });
   } catch (error: any) {
@@ -275,3 +282,63 @@ export async function saveMessage(req: Request, res: Response) {
   }
 }
 
+/**
+ * Gets or generates analytics for a specific session.
+ */
+export async function getSessionAnalytics(req: Request, res: Response) {
+  try {
+    const id = req.params.id as string;
+    const force = req.query.force === "true";
+
+    if (!id) {
+      return res.status(400).json({ error: "id is required" });
+    }
+
+    if (!force) {
+      // 1. Check if SessionFeedback already exists
+      const existingFeedback = await prisma.sessionFeedback.findUnique({
+        where: { sessionId: id },
+      });
+
+      if (existingFeedback) {
+        return res.json(existingFeedback);
+      }
+    }
+
+    // 2. Generate new feedback if it doesn't exist or force is true
+    const newFeedback = await sessionService.generateSessionFeedback(id);
+    return res.json(newFeedback);
+
+  } catch (error: any) {
+    console.error("Get Session Analytics Error:", error);
+    return res
+      .status(500)
+      .json({ error: error.message || "Internal server error" });
+  }
+}
+
+/**
+ * Explicitly triggers the generation of analytics for a session.
+ * Allows passing a transcript in the body for immediate analysis.
+ */
+export async function generateSessionAnalytics(req: Request, res: Response) {
+  try {
+    const id = req.params.id as string;
+    const { transcript } = req.body;
+
+    if (!id) {
+      return res.status(400).json({ error: "id is required" });
+    }
+
+    const feedback = await sessionService.generateSessionFeedback(id, transcript);
+    return res.json({
+      success: true,
+      data: feedback
+    });
+  } catch (error: any) {
+    console.error("Generate Session Analytics Error:", error);
+    return res
+      .status(500)
+      .json({ error: error.message || "Internal server error" });
+  }
+}

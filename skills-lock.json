@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "skills": {
+    "create-agent": {
+      "source": "openrouterteam/agent-skills",
+      "sourceType": "github",
+      "computedHash": "7232cfa7d012008bf12fa33815af49db10e7ddd5549c75c501168875a5334e11"
+    }
+  }
+}

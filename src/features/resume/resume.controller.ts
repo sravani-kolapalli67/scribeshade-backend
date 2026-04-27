@@ -269,7 +269,7 @@ export async function removeResume(req: Request, res: Response): Promise<void> {
 
   try {
     console.log(id);
-    await deleteResume(id);
+    await deleteResume(id as string);
     res.json({ message: "Resume deleted successfully" });
   } catch (err) {
     console.error("[resume/delete]", err);

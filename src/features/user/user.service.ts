@@ -10,7 +10,11 @@ export async function syncUser(clerkId: string, email?: string, name?: string) {
   return prisma.user.upsert({
     where: { clerkId },
     update: { email, name },
-    create: { clerkId, email, name },
+    create: { 
+      clerkId, 
+      email: email || "", 
+      name: name || "" 
+    },
   });
 }
 

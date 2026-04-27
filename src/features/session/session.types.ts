@@ -1,7 +1,7 @@
 export interface Session {
   id: string;
   userId: string;
-  company: string;
+  companyId: string;
   jobDescription: string;
   resumeId: string;
   DocumentId: string;

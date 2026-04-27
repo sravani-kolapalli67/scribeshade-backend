@@ -5,40 +5,30 @@ import * as sessionController from "./session.controller";
 const router = Router();
 const upload = multer(); // memory storage
 
-// ─────────────────────────────────────────────────────────────────────────────
 // Session Routes
-// ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * @route POST /features/session/create-session
- * @desc Create a new interview session
- * @access Private
+ * @route POST /session/create-session
  */
 router.post("/create-session", upload.any(), sessionController.createSession);
 
 /**
- * @route GET /features/session/list
- * @desc List all sessions for a user
- * @access Private
+ * @route GET /session/list
  */
 router.get("/list", sessionController.listSessions);
 
 /**
- * @route GET /features/session/:id
- * @desc Get a specific session by ID
- * @access Private
+ * @route GET /session/:id
  */
 router.get("/:id", sessionController.getSession);
 
 /**
- * @route DELETE /features/session/:id
- * @desc Delete a session
- * @access Private
+ * @route DELETE /session/:id
  */
 router.delete("/:id", sessionController.deleteSession);
 
 /**
- * @route POST /features/session/:id/activate
+ * @route POST /session/:id/activate
  * @desc Activate a session
  * @access Private
  */
@@ -62,14 +52,29 @@ router.post(
   sessionController.analyzeScreen,
 );
 
-router.post(
-  "/transcribe",
-  upload.single("audio"),
-  sessionController.transcribe,
-);
-
+/**
+ * @route POST /session/:id/ai-answer
+ * @desc Get AI answer for a session
+ * @access Private
+ */
 router.post("/:id/ai-answer", sessionController.getAIAnswer);
 
+/**
+ * @route POST /session/:id/save-message
+ * @desc Save a message to a session
+ * @access Private
+ */
 router.post("/:id/save-message", sessionController.saveMessage);
+
+/**
+ * @route GET /session/:id/analytics
+ */
+router.get("/:id/analytics", sessionController.getSessionAnalytics);
+
+/**
+ * @route POST /session/:id/analytics
+ * @desc Force generate session analytics
+ */
+router.post("/:id/analytics", sessionController.generateSessionAnalytics);
 
 export { router as sessionRouter };
