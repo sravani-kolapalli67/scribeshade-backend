@@ -21,7 +21,7 @@ export async function listCompanies(req: Request, res: Response) {
  */
 export async function getCompany(req: Request, res: Response) {
   try {
-    const { identifier } = req.params;
+    const identifier = req.params.identifier as string;
 
     // Try by ID first, then by Slug
     let company = await companyService.getCompanyById(identifier);

@@ -3,9 +3,12 @@ import { OpenRouter } from "@openrouter/sdk";
 import { CreateSessionData } from "./session.types";
 import * as qaService from "../qa/qa.service";
 import sharp from "sharp";
-import { Language, Industry } from "@prisma/client";
+import { Language, Industry, SessionStatus, Prisma } from "@prisma/client";
 import * as documentService from "../document/document.service";
 import path from "path";
+import { AppError } from "../../shared/middleware/error.middleware";
+import * as creditsService from "../credits/credits.service";
+import { creditDeductionQueue } from "../../jobs/queue";
 
 const ai = new OpenRouter({
   apiKey: process.env.OPENROUTER_API_KEY || "",
@@ -14,6 +17,24 @@ const ai = new OpenRouter({
 });
 
 const model = process.env.OPENROUTER_MODEL;
+
+/** Normalize human-readable model names sent by frontend to valid OpenRouter slugs */
+const MODEL_ID_MAP: Record<string, string> = {
+  "gemini 2.0 flash": "google/gemini-2.0-flash-001",
+  "gemini 2.0 flash exp": "google/gemini-2.0-flash-exp:free",
+  "gemini 1.5 flash": "google/gemini-flash-1.5",
+  "gemini 1.5 pro": "google/gemini-pro-1.5",
+  "gpt-4o": "openai/gpt-4o",
+  "gpt-4o mini": "openai/gpt-4o-mini",
+  "claude 3.5 sonnet": "anthropic/claude-3.5-sonnet",
+  "claude 3 haiku": "anthropic/claude-3-haiku",
+};
+
+function resolveModelId(id: string | undefined): string | undefined {
+  if (!id) return id;
+  const normalized = id.toLowerCase().trim();
+  return MODEL_ID_MAP[normalized] ?? id;
+}
 
 /**
  * Maps a session language string to a Prisma Language enum value.
@@ -136,16 +157,38 @@ export async function createSession(data: CreateSessionData) {
       saveTranscription: data.saveTranscription,
       mode: data.mode,
       free: data.free,
+      status: SessionStatus.PRE_CHECK,
     },
   });
 }
 
 /**
- * Returns all sessions for a specific user.
+ * Returns all sessions for a specific user with optional filters.
  */
-export async function getSessionsByUser(userId: string) {
+export async function getSessionsByUser(
+  userId: string,
+  filters?: { search?: string; from_date?: string; to_date?: string }
+) {
+  const where: any = { userId };
+
+  if (filters?.search) {
+    where.companyName = { contains: filters.search, mode: "insensitive" };
+  }
+
+  if (filters?.from_date || filters?.to_date) {
+    where.createdAt = {};
+    if (filters.from_date) {
+      where.createdAt.gte = new Date(filters.from_date);
+    }
+    if (filters.to_date) {
+      const to = new Date(filters.to_date);
+      to.setHours(23, 59, 59, 999);
+      where.createdAt.lte = to;
+    }
+  }
+
   return prisma.session.findMany({
-    where: { userId },
+    where,
     include: { feedback: true },
     orderBy: { createdAt: "desc" },
   });
@@ -165,27 +208,72 @@ export async function getSessionById(id: string) {
  * Deletes a session by ID.
  */
 export async function deleteSession(id: string) {
+  // Release hold if session is still in PRE_CHECK (never activated)
+  const session = await prisma.session.findUnique({ where: { id } });
+  if (
+    session &&
+    session.status === SessionStatus.PRE_CHECK &&
+    new Prisma.Decimal(session.creditsHeld.toString()).gt(0)
+  ) {
+    await prisma.$transaction(async (tx) => {
+      await creditsService.releaseHold(
+        session.userId,
+        new Prisma.Decimal(session.creditsHeld.toString()),
+        tx,
+      );
+    });
+  }
+
   return prisma.session.delete({
     where: { id },
   });
 }
 
 /**
- * Activates a session (sets isActive to true and records start time).
+ * Activates a session (sets status to ACTIVE, places a credit hold, records start time).
+ * Runs inside a $transaction to atomically update both balance and session.
  */
 export async function activateSession(id: string) {
-  return prisma.session.update({
-    where: { id },
-    data: {
-      isActive: true,
-      startedAt: new Date(),
-    },
-    include: { user: true },
+  return prisma.$transaction(async (tx) => {
+    const session = await tx.session.findUnique({ where: { id } });
+    if (!session) throw new AppError(404, "Session not found");
+
+    // Idempotent — already ACTIVE
+    if (session.status === SessionStatus.ACTIVE) {
+      return session;
+    }
+
+    if (session.status !== SessionStatus.PRE_CHECK) {
+      throw new AppError(409, `Cannot activate session in status ${session.status}`);
+    }
+
+    let creditsHeld: Prisma.Decimal = new Prisma.Decimal(0);
+    let maxAllowedMinutes: number | null = null;
+    let bracketConfigSnapshot: unknown = null;
+
+    // Place credit hold for paid sessions only
+    if (!session.free) {
+      const holdResult = await creditsService.placeHold(session.userId, tx);
+      creditsHeld = new Prisma.Decimal(holdResult.creditsHeld);
+      maxAllowedMinutes = holdResult.maxAllowedMinutes;
+      bracketConfigSnapshot = holdResult.snapshot;
+    }
+
+    return tx.session.update({
+      where: { id },
+      data: {
+        status: SessionStatus.ACTIVE,
+        startedAt: new Date(),
+        creditsHeld,
+        maxAllowedMinutes,
+        bracketConfigSnapshot: bracketConfigSnapshot as any,
+      },
+    });
   });
 }
 
 /**
- * Deactivates a session (sets isActive to false and records end time).
+ * Deactivates a session (sets status to COMPLETING, records end time, enqueues deduction job).
  */
 export async function deactivateSession(
   id: string,
@@ -195,16 +283,81 @@ export async function deactivateSession(
   const usageCount =
     typeof aiUsage === "number" ? aiUsage : parseInt(aiUsage as any, 10);
 
-  return prisma.session.update({
-    where: { id },
-    data: {
-      isActive: false,
-      endedAt: new Date(),
-      ...(transcript ? { extraContext: transcript } : {}), // Using extraContext as a fallback storage for the full text blob if needed, or we could add a dedicated field
-      ...(!isNaN(usageCount) && usageCount > 0
-        ? { aiUsage: { increment: usageCount } }
-        : {}),
-    },
+  const { session, didTransition } = await prisma.$transaction(async (tx) => {
+    const s = await tx.session.findUnique({ where: { id } });
+    if (!s) throw new Error("Session not found");
+
+    // Idempotency guard — already closed or in-flight
+    if (
+      s.status === SessionStatus.COMPLETED ||
+      s.status === SessionStatus.COMPLETING ||
+      s.status === SessionStatus.CREDIT_EXHAUSTED ||
+      s.status === SessionStatus.FORCE_ENDED
+    ) {
+      return { session: s, didTransition: false };
+    }
+
+    if (s.status !== SessionStatus.ACTIVE && s.status !== SessionStatus.PAUSED) {
+      throw new AppError(409, `Cannot deactivate session in status ${s.status}`);
+    }
+
+    const updated = await tx.session.update({
+      where: { id },
+      data: {
+        status: SessionStatus.COMPLETING,
+        endedAt: new Date(),
+        ...(!isNaN(usageCount) && usageCount > 0
+          ? { aiUsage: { increment: usageCount } }
+          : {}),
+      },
+    });
+    return { session: updated, didTransition: true };
+  });
+
+  // Enqueue deduction job only when we actually transitioned to COMPLETING
+  if (didTransition && session.status === SessionStatus.COMPLETING) {
+    if (session.bracketConfigSnapshot) {
+      await creditDeductionQueue.add("credit-deduction", {
+        sessionId: id,
+        userId: session.userId,
+      });
+    } else {
+      // Free session — mark COMPLETED synchronously
+      await prisma.session.update({
+        where: { id },
+        data: { status: SessionStatus.COMPLETED },
+      });
+    }
+  }
+
+  return session;
+}
+
+/**
+ * Force-closes a session as CREDIT_EXHAUSTED and enqueues a deduction job with the exhausted flag.
+ * Called by the heartbeat endpoint or session watchdog.
+ * @param sessionId Session UUID
+ * @param dbUserId  Internal (DB) user UUID — not Clerk ID
+ */
+export async function creditExhaustionClose(sessionId: string, dbUserId: string) {
+  await prisma.$transaction(async (tx) => {
+    const s = await tx.session.findUnique({ where: { id: sessionId } });
+    if (!s || s.status !== SessionStatus.ACTIVE) return;
+
+    await tx.session.update({
+      where: { id: sessionId },
+      data: {
+        status: SessionStatus.CREDIT_EXHAUSTED,
+        endedAt: new Date(),
+        creditExhaustedAt: new Date(),
+      },
+    });
+  });
+
+  await creditDeductionQueue.add("credit-deduction", {
+    sessionId,
+    userId: dbUserId,
+    isExhausted: true,
   });
 }
 
@@ -430,7 +583,7 @@ export async function analyzeScreen(
   const context = await getSessionFullContext(id);
 
   try {
-    const targetModel = aiModel || model;
+    const targetModel = resolveModelId(aiModel) || model;
     const result = ai.callModel({
       model: targetModel,
       input: [
@@ -493,7 +646,7 @@ export async function getAIAnswer(
   const context = await getSessionFullContext(id);
 
   try {
-    const targetModel = aiModel || model;
+    const targetModel = resolveModelId(aiModel) || model;
     const result = ai.callModel({
       model: targetModel,
       input: [

@@ -6,6 +6,7 @@ import { documentRouter } from "../features/document/document.router";
 import { qaRouter } from "../features/qa/qa.router";
 import { companyRouter } from "../features/company/company.router";
 import { projectsRouter } from "../features/projects/projects.router";
+import { creditsRouter } from "../features/credits/credits.router";
 
 const router = Router();
 
@@ -17,6 +18,7 @@ router.use("/document", documentRouter);
 router.use("/qa", qaRouter);
 router.use("/company", companyRouter);
 router.use("/projects", projectsRouter);
+router.use("/credits", creditsRouter);
 
 // Health check
 router.get("/health", (req, res) => {

@@ -36,6 +36,42 @@ enum Language {
   General
 }
 
+// ─── Credit system enums ──────────────────────────────────────────────────────
+
+enum SessionStatus {
+  PRE_CHECK
+  ACTIVE
+  PAUSED
+  COMPLETING
+  COMPLETED
+  ABANDONED
+  FORCE_ENDED
+  CREDIT_EXHAUSTED
+}
+
+enum LedgerType {
+  DEBIT
+  PURCHASE
+  REFUND
+  EARN
+}
+
+enum DeductionReason {
+  FREE_ZONE
+  HALF_BRACKET
+  FULL_BRACKET
+  EXHAUSTED
+  FORCE_ENDED
+  REFUND
+  BRACKET_OVERFLOW
+}
+
+enum PurchaseStatus {
+  PENDING
+  CONFIRMED
+  REFUNDED
+}
+
 model User {
   id        String   @id @default(uuid())
   clerkId   String   @unique
@@ -49,6 +85,11 @@ model User {
   documents Document[]
   questions QA[]
   projects  Project[]
+
+  // Credit system relations
+  creditBalance UserCreditBalance?
+  ledgerEntries CreditLedger[]
+  purchases     CreditPurchase[]
 }
 
 model Resume {
@@ -130,9 +171,22 @@ model Session {
   free                 Boolean
   mode                 String
 
-  isActive  Boolean   @default(false)
-  startedAt DateTime?
-  endedAt   DateTime?
+  // ── status (replaces isActive Boolean) ───────────────────────────────────
+  status                SessionStatus @default(PRE_CHECK)
+
+  // ── timing ────────────────────────────────────────────────────────────────
+  startedAt             DateTime?
+  endedAt               DateTime?
+  durationSeconds       Int?
+  pausedDurationSeconds Int           @default(0)
+
+  // ── credit fields ──────────────────────────────────────────────────────────
+  creditsHeld           Decimal       @db.Decimal(10, 2) @default(0)
+  creditsDeducted       Decimal?      @db.Decimal(10, 2)
+  deductionReason       DeductionReason?
+  bracketConfigSnapshot Json?
+  maxAllowedMinutes     Int?
+  creditExhaustedAt     DateTime?
 
   aiUsage Int @default(0)
 
@@ -151,6 +205,7 @@ model Session {
 
   @@index([userId])
   @@index([companyId])
+  @@index([status])
 }
 
 model QA {
@@ -228,4 +283,60 @@ model SessionFeedback {
   
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
+}
+
+// ─── Credit system models ─────────────────────────────────────────────────────
+
+model CreditConfig {
+  id               String   @id @default(uuid())
+  bracketMinutes   Int      @unique
+  creditsFull      Decimal  @db.Decimal(10, 2)
+  creditsHalf      Decimal  @db.Decimal(10, 2)
+  freeZoneMinutes  Int      @default(5)
+  graceZoneMinutes Int      @default(5)
+  isActive         Boolean  @default(true)
+  updatedAt        DateTime @updatedAt
+}
+
+model UserCreditBalance {
+  userId           String   @id
+  user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  purchasedCredits Decimal  @db.Decimal(10, 2) @default(0)
+  earnedCredits    Decimal  @db.Decimal(10, 2) @default(0)
+  heldCredits      Decimal  @db.Decimal(10, 2) @default(0)
+  totalAvailable   Decimal  @db.Decimal(10, 2) @default(0)
+  lastUpdated      DateTime @updatedAt
+}
+
+model CreditLedger {
+  id            String     @id @default(uuid())
+  userId        String
+  user          User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  sessionId     String?
+  type          LedgerType
+  amount        Decimal    @db.Decimal(10, 2)
+  balanceBefore Decimal    @db.Decimal(10, 2)
+  balanceAfter  Decimal    @db.Decimal(10, 2)
+  reason        String
+  createdAt     DateTime   @default(now())
+
+  @@index([userId])
+  @@index([sessionId])
+}
+
+model CreditPurchase {
+  id                     String         @id @default(uuid())
+  userId                 String
+  user                   User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  packName               String
+  creditsPurchased       Decimal        @db.Decimal(10, 2)
+  creditsRemaining       Decimal        @db.Decimal(10, 2)
+  paymentProviderEventId String         @unique
+  amountPaid             Decimal        @db.Decimal(10, 2)
+  currency               String         @default("USD")
+  status                 PurchaseStatus @default(PENDING)
+  createdAt              DateTime       @default(now())
+  confirmedAt            DateTime?
+
+  @@index([userId])
 }

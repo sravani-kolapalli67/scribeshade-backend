@@ -42,6 +42,13 @@ router.post("/:id/activate", sessionController.activateSession);
 router.post("/:id/deactivate", sessionController.deactivateSession);
 
 /**
+ * @route POST /session/:id/heartbeat
+ * @desc Tick every 60 s; enforces maxAllowedMinutes and returns NONE | CREDIT_WARNING | CREDIT_EXHAUSTED
+ * @access Private
+ */
+router.post("/:id/heartbeat", sessionController.sessionHeartbeat);
+
+/**
  * @route POST /features/session/:id/analyze-screen
  * @desc Analyze a screenshot and stream the AI response
  * @access Private

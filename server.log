@@ -1,0 +1,87 @@
+
+> scribeshade-backend@1.0.0 dev /Users/hiddenmindsolutions/Projects/scribeshade-01-backend
+> tsx watch src/server.ts
+
+🚀 Server ready at: http://localhost:3200
+📡 Environment: development
+⚙️  BullMQ workers started
+[0mGET /api/health [32m200[0m 16.701 ms - 54[0m
+[0mGET /api/credits/brackets [32m200[0m 137.755 ms - 428[0m
+[Error] AppError: Unauthorized: Authentication required
+[0mGET /api/credits/balance [33m401[0m 1.633 ms - 49[0m
+[Error] AppError: Unauthorized: Authentication required
+[0mGET /api/credits/ledger [33m401[0m 0.749 ms - 49[0m
+[Error] AppError: Unauthorized: Authentication required
+[0mGET /api/credits/purchases [33m401[0m 0.754 ms - 49[0m
+Activate Session Error: AppError: Session not found
+    at <anonymous> (/Users/hiddenmindsolutions/Projects/scribeshade-01-backend/src/features/session/session.service.ts:239:25)
+    at async Proxy._transactionWithCallback (/Users/hiddenmindsolutions/Projects/scribeshade-01-backend/node_modules/.pnpm/@prisma+client@6.19.2_prisma@6.19.2_typescript@5.9.3__typescript@5.9.3/node_modules/@prisma/client/src/runtime/getPrismaClient.ts:722:18)
+    at async activateSession (/Users/hiddenmindsolutions/Projects/scribeshade-01-backend/src/features/session/session.controller.ts:125:21) {
+  statusCode: 404
+}
+[0mPOST /api/session/00000000-0000-0000-0000-000000000000/activate [33m404[0m 211.338 ms - 29[0m
+[0mPOST /api/session/f7b9fe03-bbe8-401e-9224-adc9ac50f7ce/activate [32m200[0m 815.491 ms - 157[0m
+[0mPOST /api/session/f7b9fe03-bbe8-401e-9224-adc9ac50f7ce/heartbeat [32m200[0m 43.597 ms - 39[0m
+[0mPOST /api/session/f7b9fe03-bbe8-401e-9224-adc9ac50f7ce/heartbeat [32m200[0m 40.695 ms - 48[0m
+[0mPOST /api/session/f7b9fe03-bbe8-401e-9224-adc9ac50f7ce/deactivate [32m200[0m 271.086 ms - 89[0m
+[0mPOST /api/session/f7b9fe03-bbe8-401e-9224-adc9ac50f7ce/deactivate [32m200[0m 146.004 ms - 89[0m
+[credit-deduction] job 10 completed for session f7b9fe03-bbe8-401e-9224-adc9ac50f7ce
+[0mPOST /api/session/939e3a92-0ad1-48d9-9b6c-790a965488e8/activate [32m200[0m 165.241 ms - 159[0m
+[0mPOST /api/session/939e3a92-0ad1-48d9-9b6c-790a965488e8/deactivate [32m200[0m 317.491 ms - 89[0m
+[0mPOST /api/session/6170df08-3db9-4811-9bf0-fdcdac343686/activate [32m200[0m 270.356 ms - 157[0m
+[0mDELETE /api/session/6170df08-3db9-4811-9bf0-fdcdac343686 [32m200[0m 530.519 ms - 929[0m
+Activate Session Error: AppError: INSUFFICIENT_CREDITS
+    at computeMaxAllowedMinutes (/Users/hiddenmindsolutions/Projects/scribeshade-01-backend/src/features/credits/credits.service.ts:69:11)
+    at async Object.placeHold (/Users/hiddenmindsolutions/Projects/scribeshade-01-backend/src/features/credits/credits.service.ts:103:5)
+    at async <anonymous> (/Users/hiddenmindsolutions/Projects/scribeshade-01-backend/src/features/session/session.service.ts:256:26)
+    at async Proxy._transactionWithCallback (/Users/hiddenmindsolutions/Projects/scribeshade-01-backend/node_modules/.pnpm/@prisma+client@6.19.2_prisma@6.19.2_typescript@5.9.3__typescript@5.9.3/node_modules/@prisma/client/src/runtime/getPrismaClient.ts:722:18)
+    at async activateSession (/Users/hiddenmindsolutions/Projects/scribeshade-01-backend/src/features/session/session.controller.ts:125:21) {
+  statusCode: 402
+}
+[0mPOST /api/session/3d5dd611-b15c-44a7-ba14-b511e46f342c/activate [33m402[0m 231.583 ms - 32[0m
+[0mPOST /api/session/00000000-0000-0000-0000-000000000001/heartbeat [32m200[0m 40.024 ms - 17[0m
+[0mPOST /api/session/01ae3453-855d-4c1f-a587-1fa3a8f715c9/activate [32m200[0m 337.880 ms - 157[0m
+[0mPOST /api/session/01ae3453-855d-4c1f-a587-1fa3a8f715c9/activate [32m200[0m 124.475 ms - 157[0m
+[0mPOST /api/session/01ae3453-855d-4c1f-a587-1fa3a8f715c9/deactivate [32m200[0m 220.245 ms - 89[0m
+[credit-deduction] job 11 completed for session 01ae3453-855d-4c1f-a587-1fa3a8f715c9
+[0mGET /api/health [32m200[0m 2.445 ms - 54[0m
+[0mGET /api/credits/brackets [32m200[0m 97.483 ms - 428[0m
+[Error] AppError: Unauthorized: Authentication required
+[0mGET /api/credits/balance [33m401[0m 0.836 ms - 49[0m
+[Error] AppError: Unauthorized: Authentication required
+[0mGET /api/credits/ledger [33m401[0m 0.505 ms - 49[0m
+[Error] AppError: Unauthorized: Authentication required
+[0mGET /api/credits/purchases [33m401[0m 0.686 ms - 49[0m
+Activate Session Error: AppError: Session not found
+    at <anonymous> (/Users/hiddenmindsolutions/Projects/scribeshade-01-backend/src/features/session/session.service.ts:239:25)
+    at async Proxy._transactionWithCallback (/Users/hiddenmindsolutions/Projects/scribeshade-01-backend/node_modules/.pnpm/@prisma+client@6.19.2_prisma@6.19.2_typescript@5.9.3__typescript@5.9.3/node_modules/@prisma/client/src/runtime/getPrismaClient.ts:722:18)
+    at async activateSession (/Users/hiddenmindsolutions/Projects/scribeshade-01-backend/src/features/session/session.controller.ts:125:21) {
+  statusCode: 404
+}
+[0mPOST /api/session/00000000-0000-0000-0000-000000000000/activate [33m404[0m 128.083 ms - 29[0m
+[0mPOST /api/session/889c3a09-c6fe-41ec-ae05-84959de76057/activate [32m200[0m 399.318 ms - 157[0m
+[0mPOST /api/session/889c3a09-c6fe-41ec-ae05-84959de76057/heartbeat [32m200[0m 40.791 ms - 39[0m
+[0mPOST /api/session/889c3a09-c6fe-41ec-ae05-84959de76057/heartbeat [32m200[0m 43.767 ms - 48[0m
+[0mPOST /api/session/889c3a09-c6fe-41ec-ae05-84959de76057/deactivate [32m200[0m 168.330 ms - 89[0m
+[0mPOST /api/session/889c3a09-c6fe-41ec-ae05-84959de76057/deactivate [32m200[0m 180.047 ms - 89[0m
+[credit-deduction] job 12 completed for session 889c3a09-c6fe-41ec-ae05-84959de76057
+[0mPOST /api/session/361637b1-dabf-43bb-a901-e36164f34c27/activate [32m200[0m 237.117 ms - 159[0m
+[0mPOST /api/session/361637b1-dabf-43bb-a901-e36164f34c27/deactivate [32m200[0m 207.977 ms - 89[0m
+[0mPOST /api/session/7118fc5c-8842-46e1-8237-7d3f465224f5/activate [32m200[0m 351.915 ms - 157[0m
+[0mDELETE /api/session/7118fc5c-8842-46e1-8237-7d3f465224f5 [32m200[0m 311.766 ms - 929[0m
+Activate Session Error: AppError: INSUFFICIENT_CREDITS
+    at computeMaxAllowedMinutes (/Users/hiddenmindsolutions/Projects/scribeshade-01-backend/src/features/credits/credits.service.ts:69:11)
+    at async Object.placeHold (/Users/hiddenmindsolutions/Projects/scribeshade-01-backend/src/features/credits/credits.service.ts:103:5)
+    at async <anonymous> (/Users/hiddenmindsolutions/Projects/scribeshade-01-backend/src/features/session/session.service.ts:256:26)
+    at async Proxy._transactionWithCallback (/Users/hiddenmindsolutions/Projects/scribeshade-01-backend/node_modules/.pnpm/@prisma+client@6.19.2_prisma@6.19.2_typescript@5.9.3__typescript@5.9.3/node_modules/@prisma/client/src/runtime/getPrismaClient.ts:722:18)
+    at async activateSession (/Users/hiddenmindsolutions/Projects/scribeshade-01-backend/src/features/session/session.controller.ts:125:21) {
+  statusCode: 402
+}
+[0mPOST /api/session/3367be94-abfe-43fe-9de2-eb0f4539c431/activate [33m402[0m 201.295 ms - 32[0m
+[0mPOST /api/session/00000000-0000-0000-0000-000000000001/heartbeat [32m200[0m 41.121 ms - 17[0m
+[0mPOST /api/session/ea176d0b-b194-4438-a3f7-d4850aeb6e52/activate [32m200[0m 278.412 ms - 157[0m
+[0mPOST /api/session/ea176d0b-b194-4438-a3f7-d4850aeb6e52/activate [32m200[0m 240.143 ms - 157[0m
+[0mPOST /api/session/ea176d0b-b194-4438-a3f7-d4850aeb6e52/deactivate [32m200[0m 169.500 ms - 89[0m
+[credit-deduction] job 13 completed for session ea176d0b-b194-4438-a3f7-d4850aeb6e52
+1:58:56 PM [tsx] change in ./src/server.ts Restarting...
+1:59:01 PM [tsx] Process didn't exit in 5s. Force killing...

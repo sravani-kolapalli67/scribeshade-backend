@@ -1,3 +1,5 @@
+import { SessionStatus, DeductionReason } from "@prisma/client";
+
 export interface Session {
   id: string;
   userId: string;
@@ -12,10 +14,17 @@ export interface Session {
   saveTranscription: boolean;
   free: boolean;
   mode: string;
-  isActive: boolean;
+  status: SessionStatus;
   createdAt: Date;
   startedAt?: Date;
   endedAt?: Date;
+  durationSeconds?: number;
+  pausedDurationSeconds: number;
+  creditsHeld: string;
+  creditsDeducted?: string;
+  deductionReason?: DeductionReason;
+  maxAllowedMinutes?: number;
+  creditExhaustedAt?: Date;
 }
 
 export interface CreateSessionData {

@@ -1,6 +1,7 @@
 import { Request, Response } from "express";
 import * as sessionService from "./session.service";
 import { prisma } from "../../shared/lib/prisma";
+import { SessionStatus } from "@prisma/client";
 
 /**
  * Handles the creation of a new session.
@@ -55,7 +56,13 @@ export async function listSessions(req: Request, res: Response) {
       return res.status(400).json({ error: "userId is required" });
     }
 
-    const sessions = await sessionService.getSessionsByUser(userId);
+    const filters = {
+      search: req.query.search as string | undefined,
+      from_date: req.query.from_date as string | undefined,
+      to_date: req.query.to_date as string | undefined,
+    };
+
+    const sessions = await sessionService.getSessionsByUser(userId, filters);
     return res.json(sessions);
   } catch (error: any) {
     console.error("List Sessions Error:", error);
@@ -117,17 +124,22 @@ export async function activateSession(req: Request, res: Response) {
     const id = req.params.id as string;
     const session = await sessionService.activateSession(id);
 
+    if (!session) {
+      return res.status(404).json({ error: "Session not found" });
+    }
+
     return res.json({
       success: true,
       sessionId: session.id,
       startedAt: session.startedAt,
+      creditsHeld: session.creditsHeld,
+      maxAllowedMinutes: session.maxAllowedMinutes,
       timer: 0,
     });
   } catch (error: any) {
     console.error("Activate Session Error:", error);
-    return res
-      .status(500)
-      .json({ error: error.message || "Internal server error" });
+    const status = error?.statusCode ?? 500;
+    return res.status(status).json({ error: error.message || "Internal server error" });
   }
 }
 
@@ -137,9 +149,9 @@ export async function activateSession(req: Request, res: Response) {
 export async function deactivateSession(req: Request, res: Response) {
   try {
     const id = req.params.id as string;
-    const { aiUsage, transcript } = req.body;
-    await sessionService.deactivateSession(id, aiUsage, transcript);
-    
+    const { aiUsage, transcript } = req.body ?? {};
+    const session = await sessionService.deactivateSession(id, aiUsage, transcript);
+
     // Auto-trigger analytics generation in the background
     if (transcript) {
       sessionService.generateSessionFeedback(id, transcript).catch((err) => {
@@ -147,9 +159,46 @@ export async function deactivateSession(req: Request, res: Response) {
       });
     }
 
-    return res.json({ success: true });
+    return res.json({ success: true, sessionId: id, status: session.status });
   } catch (error: any) {
     console.error("Deactivate Session Error:", error);
+    const status = error?.statusCode ?? 500;
+    return res.status(status).json({ error: error.message || "Internal server error" });
+  }
+}
+
+/**
+ * POST /api/session/:id/heartbeat
+ * Body: { elapsedMinutes: number }
+ * Frontend calls this every 60 s while session is ACTIVE to enforce maxAllowedMinutes.
+ */
+export async function sessionHeartbeat(req: Request, res: Response) {
+  try {
+    const id = req.params.id as string;
+    const { elapsedMinutes } = (req.body ?? {}) as { elapsedMinutes: number };
+
+    const session = await prisma.session.findUnique({ where: { id } });
+    if (!session || session.status !== SessionStatus.ACTIVE) {
+      return res.json({ action: "NONE" });
+    }
+
+    const max = session.maxAllowedMinutes ?? Infinity;
+
+    if (elapsedMinutes >= max) {
+      await sessionService.creditExhaustionClose(id, session.userId);
+      return res.json({ action: "CREDIT_EXHAUSTED" });
+    }
+
+    if (elapsedMinutes >= max - 1) {
+      return res.json({
+        action: "CREDIT_WARNING",
+        remainingMinutes: max - elapsedMinutes,
+      });
+    }
+
+    return res.json({ action: "NONE", remainingMinutes: max - elapsedMinutes });
+  } catch (error: any) {
+    console.error("Heartbeat Error:", error);
     return res
       .status(500)
       .json({ error: error.message || "Internal server error" });

@@ -161,7 +161,7 @@ export async function listProjectsByUser(
   res: Response,
 ): Promise<void> {
   try {
-    const { userId } = req.params;
+    const userId = req.params.userId as string;
     if (!userId) {
       res.status(400).json({ error: "userId is required" });
       return;
@@ -180,7 +180,7 @@ export async function listProjectsByUser(
  */
 export async function getProject(req: Request, res: Response): Promise<void> {
   try {
-    const { id } = req.params;
+    const id = req.params.id as string;
     if (!id) {
       res.status(400).json({ error: "Project ID is required" });
       return;

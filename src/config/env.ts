@@ -7,6 +7,9 @@ const envSchema = z.object({
   DATABASE_URL: z.string().url(),
   CLERK_PUBLISHABLE_KEY: z.string().min(1),
   CLERK_SECRET_KEY: z.string().min(1),
+  REDIS_URL: z.string().default("redis://localhost:6379"),
+  RAZORPAY_KEY_ID: z.string().optional(),
+  RAZORPAY_KEY_SECRET: z.string().optional(),
 });
 
 const _env = envSchema.safeParse(process.env);
