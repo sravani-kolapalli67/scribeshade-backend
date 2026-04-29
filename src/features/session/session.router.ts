@@ -47,6 +47,7 @@ router.post("/:id/deactivate", sessionController.deactivateSession);
  * @access Private
  */
 router.post("/:id/heartbeat", sessionController.sessionHeartbeat);
+router.get("/:id/events", sessionController.subscribeToEvents);
 
 /**
  * @route POST /features/session/:id/analyze-screen

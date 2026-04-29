@@ -2,9 +2,9 @@ import http from "http";
 import WebSocket, { WebSocketServer } from "ws";
 import { createApp } from "./app";
 import { env } from "./config/env";
-import { creditDeductionWorker } from "./jobs/credit-deduction.job";
-import { sessionWatchdogWorker, scheduleWatchdog } from "./jobs/session-watchdog.job";
-import { holdExpiryWorker } from "./jobs/hold-expiry.job";
+import { creditDeductionWorker } from "./features/jobs/credit-deduction.job";
+import { sessionWatchdogWorker, scheduleWatchdog } from "./features/jobs/session-watchdog.job";
+import { holdExpiryWorker } from "./features/jobs/hold-expiry.job";
 
 const startServer = async () => {
   const app = createApp();

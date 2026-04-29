@@ -1,18 +1,27 @@
 import { Worker } from "bullmq";
 import { redisConnection } from "./queue";
-import { prisma } from "../shared/lib/prisma";
-import * as creditsService from "../features/credits/credits.service";
+import { prisma } from "../../shared/lib/prisma";
+import * as creditsService from "../credits/credits.service";
 import { SessionStatus } from "@prisma/client";
 import { Prisma } from "@prisma/client";
+
+console.log("⚡ [credit-deduction.job.ts] File loaded");
 
 export const creditDeductionWorker = new Worker(
   "credit-deduction",
   async (job) => {
-    const { sessionId, userId, isExhausted = false } = job.data as {
+    const {
+      sessionId,
+      userId,
+      isExhausted = false,
+    } = job.data as {
       sessionId: string;
       userId: string;
       isExhausted?: boolean;
     };
+    console.log(
+      `[credit-deduction] Starting job ${job.id} for session ${sessionId} (exhausted=${isExhausted})`,
+    );
 
     await prisma.$transaction(async (tx) => {
       const session = await tx.session.findUnique({ where: { id: sessionId } });
@@ -76,5 +85,7 @@ creditDeductionWorker.on("failed", (job, err) => {
 });
 
 creditDeductionWorker.on("completed", (job) => {
-  console.log(`[credit-deduction] job ${job.id} completed for session ${job.data.sessionId}`);
+  console.log(
+    `[credit-deduction] job ${job.id} completed for session ${job.data.sessionId}`,
+  );
 });

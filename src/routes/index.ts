@@ -11,7 +11,6 @@ import { creditsRouter } from "../features/credits/credits.router";
 const router = Router();
 
 router.use("/auth", authRouter);
-// router.use("/users", userRouter);
 router.use("/resume", resumeRouter);
 router.use("/session", sessionRouter);
 router.use("/document", documentRouter);

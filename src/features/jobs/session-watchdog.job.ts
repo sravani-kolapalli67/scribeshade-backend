@@ -1,7 +1,7 @@
 import { Worker } from "bullmq";
 import { redisConnection, sessionWatchdogQueue } from "./queue";
-import { prisma } from "../shared/lib/prisma";
-import { creditExhaustionClose } from "../features/session/session.service";
+import { prisma } from "../../shared/lib/prisma";
+import { creditExhaustionClose } from "../session/session.service";
 import { SessionStatus } from "@prisma/client";
 
 /**
@@ -22,7 +22,7 @@ export const sessionWatchdogWorker = new Worker(
     const now = new Date();
 
     // Find ACTIVE / PAUSED sessions that have blown past their time limit
-    const staleSessions = await prisma.session.findMany({
+    const activeSessions = await prisma.session.findMany({
       where: {
         status: { in: [SessionStatus.ACTIVE, SessionStatus.PAUSED] },
         maxAllowedMinutes: { not: null },
@@ -33,18 +33,24 @@ export const sessionWatchdogWorker = new Worker(
         userId: true,
         startedAt: true,
         maxAllowedMinutes: true,
+        pausedDurationSeconds: true,
       },
     });
 
-    for (const session of staleSessions) {
+    for (const session of activeSessions) {
       if (!session.startedAt || !session.maxAllowedMinutes) continue;
 
-      // 2-minute buffer beyond maxAllowedMinutes before watchdog intervenes
-      const deadlineMs =
-        session.startedAt.getTime() +
-        (session.maxAllowedMinutes + 2) * 60 * 1_000;
+      const nowMs = now.getTime();
+      const startedAtMs = session.startedAt.getTime();
+      const pausedMs = session.pausedDurationSeconds * 1000;
+      
+      const activeMs = Math.max(0, nowMs - startedAtMs - pausedMs);
+      const activeMinutes = Math.floor(activeMs / 60000);
 
-      if (now.getTime() >= deadlineMs) {
+      // watchdog intervenes if session has exceeded its limit.
+      // We still give a small 1-minute grace to allow heartbeat to handle it gracefully first.
+      if (activeMinutes >= session.maxAllowedMinutes + 1) {
+        console.log(`[session-watchdog] Auto-closing session ${session.id} for exhaustion. Active: ${activeMinutes}m, Max: ${session.maxAllowedMinutes}m`);
         await creditExhaustionClose(session.id, session.userId).catch((err) => {
           console.error(
             `[session-watchdog] creditExhaustionClose failed for ${session.id}:`,

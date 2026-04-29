@@ -15,4 +15,5 @@ router.get("/purchases", requireAuth, creditsController.getPurchases);
 router.post("/purchase/order", requireAuth, creditsController.createPurchaseOrder);
 router.post("/purchase/verify", requireAuth, creditsController.verifyPurchase);
 
+
 export { router as creditsRouter };

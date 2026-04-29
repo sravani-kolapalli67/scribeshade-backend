@@ -175,34 +175,81 @@ export async function deactivateSession(req: Request, res: Response) {
 export async function sessionHeartbeat(req: Request, res: Response) {
   try {
     const id = req.params.id as string;
-    const { elapsedMinutes } = (req.body ?? {}) as { elapsedMinutes: number };
 
     const session = await prisma.session.findUnique({ where: { id } });
     if (!session || session.status !== SessionStatus.ACTIVE) {
       return res.json({ action: "NONE" });
     }
 
+    // 1. Calculate actual elapsed minutes on the backend to prevent frontend manipulation
+    const now = new Date();
+    const startedAt = session.startedAt || session.createdAt;
+    
+    // total duration in seconds since start
+    const totalElapsedSeconds = Math.floor((now.getTime() - startedAt.getTime()) / 1000);
+    // subtract paused time
+    const activeSeconds = Math.max(0, totalElapsedSeconds - session.pausedDurationSeconds);
+    const backendElapsedMinutes = Math.floor(activeSeconds / 60);
+
+    // 2. We can still accept elapsedMinutes from frontend as a secondary signal, but trust backend more
+    const { elapsedMinutes } = (req.body ?? {}) as { elapsedMinutes?: number };
+    const effectiveElapsed = Math.max(backendElapsedMinutes, elapsedMinutes || 0);
+
     const max = session.maxAllowedMinutes ?? Infinity;
 
-    if (elapsedMinutes >= max) {
+    // 3. Enforce exhaustion
+    if (effectiveElapsed >= max) {
+      console.log(`[Heartbeat] Session ${id} exhausted. Elapsed: ${effectiveElapsed}, Max: ${max}`);
       await sessionService.creditExhaustionClose(id, session.userId);
-      return res.json({ action: "CREDIT_EXHAUSTED" });
+      return res.json({ action: "CREDIT_EXHAUSTED", elapsedMinutes: effectiveElapsed });
     }
 
-    if (elapsedMinutes >= max - 1) {
+    // 4. Send warning if 1 minute remaining
+    if (effectiveElapsed >= max - 1) {
+      const { sseManager } = await import("../../shared/lib/sse");
+      sseManager.notify(id, "CREDIT_WARNING", {
+        remainingMinutes: max - effectiveElapsed,
+        sessionId: id,
+      });
+
       return res.json({
         action: "CREDIT_WARNING",
-        remainingMinutes: max - elapsedMinutes,
+        remainingMinutes: max - effectiveElapsed,
+        elapsedMinutes: effectiveElapsed,
       });
     }
 
-    return res.json({ action: "NONE", remainingMinutes: max - elapsedMinutes });
+    return res.json({ 
+      action: "NONE", 
+      remainingMinutes: max - effectiveElapsed,
+      elapsedMinutes: effectiveElapsed
+    });
   } catch (error: any) {
     console.error("Heartbeat Error:", error);
     return res
       .status(500)
       .json({ error: error.message || "Internal server error" });
   }
+}
+
+/**
+ * GET /api/session/:id/events
+ * Establishes an SSE connection for real-time session updates.
+ */
+export async function subscribeToEvents(req: Request, res: Response) {
+  const id = req.params.id as string;
+
+  // Set SSE headers
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no"); // Disable proxy buffering
+
+  // Send initial keep-alive
+  res.write(": connected\n\n");
+
+  const { sseManager } = await import("../../shared/lib/sse");
+  sseManager.addClient(id, res);
 }
 
 /**

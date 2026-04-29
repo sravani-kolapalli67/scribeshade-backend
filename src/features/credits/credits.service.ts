@@ -28,13 +28,48 @@ const INTERVIEW_PACKS: Array<{
   credits: string;
   prices: Record<SupportedCurrency, string>;
 }> = [
-  { code: "quick_5", name: "Quick 5", credits: "5", prices: { INR: "99.00", USD: "2.99", GBP: "2.49" } },
-  { code: "starter_10", name: "Starter", credits: "10", prices: { INR: "149.00", USD: "3.99", GBP: "3.49" } },
-  { code: "basic_25", name: "Basic", credits: "25", prices: { INR: "349.00", USD: "9.99", GBP: "8.99" } },
-  { code: "standard_60", name: "Standard", credits: "60", prices: { INR: "699.00", USD: "19.99", GBP: "17.99" } },
-  { code: "professional_120", name: "Professional", credits: "120", prices: { INR: "1299.00", USD: "39.99", GBP: "34.99" } },
-  { code: "power_300", name: "Power", credits: "300", prices: { INR: "2999.00", USD: "89.99", GBP: "79.99" } },
-  { code: "mega_600", name: "Mega", credits: "600", prices: { INR: "4999.00", USD: "149.99", GBP: "129.99" } },
+  {
+    code: "quick_5",
+    name: "Quick 5",
+    credits: "5",
+    prices: { INR: "99.00", USD: "2.99", GBP: "2.49" },
+  },
+  {
+    code: "starter_10",
+    name: "Starter",
+    credits: "10",
+    prices: { INR: "149.00", USD: "3.99", GBP: "3.49" },
+  },
+  {
+    code: "basic_25",
+    name: "Basic",
+    credits: "25",
+    prices: { INR: "349.00", USD: "9.99", GBP: "8.99" },
+  },
+  {
+    code: "standard_60",
+    name: "Standard",
+    credits: "60",
+    prices: { INR: "699.00", USD: "19.99", GBP: "17.99" },
+  },
+  {
+    code: "professional_120",
+    name: "Professional",
+    credits: "120",
+    prices: { INR: "1299.00", USD: "39.99", GBP: "34.99" },
+  },
+  {
+    code: "power_300",
+    name: "Power",
+    credits: "300",
+    prices: { INR: "2999.00", USD: "89.99", GBP: "79.99" },
+  },
+  {
+    code: "mega_600",
+    name: "Mega",
+    credits: "600",
+    prices: { INR: "4999.00", USD: "149.99", GBP: "129.99" },
+  },
 ];
 
 const MINOR_UNIT_MULTIPLIER: Record<SupportedCurrency, number> = {
@@ -49,7 +84,10 @@ function normalizeCurrency(input?: string): SupportedCurrency {
   return "INR";
 }
 
-function toMinorUnits(amountMajor: string, currency: SupportedCurrency): number {
+function toMinorUnits(
+  amountMajor: string,
+  currency: SupportedCurrency,
+): number {
   const multiplier = MINOR_UNIT_MULTIPLIER[currency];
   return Math.round(Number(amountMajor) * multiplier);
 }
@@ -99,7 +137,9 @@ function assertValidRazorpaySignature(
   }
 }
 
-export function getInterviewCreditPlans(currencyInput?: string): CreditPackPlan[] {
+export function getInterviewCreditPlans(
+  currencyInput?: string,
+): CreditPackPlan[] {
   const currency = normalizeCurrency(currencyInput);
   return INTERVIEW_PACKS.map((pack) => toPlanDTO(pack, currency));
 }
@@ -239,30 +279,37 @@ export async function getActiveBrackets() {
  */
 export async function computeMaxAllowedMinutes(
   availableCredits: Prisma.Decimal,
-): Promise<{ maxMinutes: number; creditsToHold: Prisma.Decimal; snapshot: BracketSnapshot }> {
+): Promise<{
+  maxMinutes: number;
+  creditsToHold: Prisma.Decimal;
+  snapshot: BracketSnapshot;
+}> {
   const brackets = await getActiveBrackets();
 
   if (!brackets.length) {
     throw new AppError(500, "No active credit brackets configured");
   }
 
-  // Walk ascending — keep last bracket still affordable
-  let chosen = brackets[0];
-  for (const b of brackets) {
-    if (d(b.creditsFull.toString()).lte(availableCredits)) {
-      chosen = b;
-    }
-  }
+  // We use the first bracket for configuration defaults (like freeZoneMinutes)
+  const chosen = brackets[0];
+  const ratePerMin = 0.5;
+  const freeMins = chosen.freeZoneMinutes;
 
-  // Minimum required = creditsHalf of cheapest bracket
-  const minRequired = d(brackets[0].creditsHalf.toString());
-  if (availableCredits.lt(minRequired)) {
+  // Calculate how many paid minutes they can afford: max = freeMins + (available / 0.5)
+  const affordablePaidMinutes = Math.floor(availableCredits.toNumber() / ratePerMin);
+  
+  if (affordablePaidMinutes < 1 && availableCredits.toNumber() < ratePerMin) {
     throw new AppError(402, "INSUFFICIENT_CREDITS");
   }
 
+  const maxMinutes = freeMins + affordablePaidMinutes;
+  
+  // Hold the entire available balance since we are in a linear model
+  const creditsToHold = availableCredits;
+
   const snapshot: BracketSnapshot = {
     id: chosen.id,
-    bracketMinutes: chosen.bracketMinutes,
+    bracketMinutes: maxMinutes,
     creditsFull: chosen.creditsFull.toString(),
     creditsHalf: chosen.creditsHalf.toString(),
     freeZoneMinutes: chosen.freeZoneMinutes,
@@ -270,8 +317,8 @@ export async function computeMaxAllowedMinutes(
   };
 
   return {
-    maxMinutes: chosen.bracketMinutes,
-    creditsToHold: d(chosen.creditsFull.toString()),
+    maxMinutes,
+    creditsToHold,
     snapshot,
   };
 }
@@ -355,8 +402,13 @@ export async function deductCredits(
   isExhausted: boolean,
   tx: Prisma.TransactionClient,
 ): Promise<DeductionResult> {
-  const { freeZoneMinutes, graceZoneMinutes, bracketMinutes, creditsFull, creditsHalf } =
-    snapshot;
+  const {
+    freeZoneMinutes,
+    graceZoneMinutes,
+    bracketMinutes,
+    creditsFull,
+    creditsHalf,
+  } = snapshot;
 
   // ── Decision tree ──────────────────────────────────────────────────────────
   let deductAmount: Prisma.Decimal;
@@ -368,27 +420,39 @@ export async function deductCredits(
   } else if (isExhausted) {
     deductAmount = creditsHeld; // consume entire hold
     reason = "EXHAUSTED";
-  } else if (activeDurationMinutes >= bracketMinutes - graceZoneMinutes) {
-    deductAmount = d(creditsFull);
-    reason = "FULL_BRACKET";
   } else {
-    deductAmount = d(creditsHalf);
-    reason = "HALF_BRACKET";
+    // Linear deduction: 0.5 credits per minute after free zone
+    const paidMinutes = Math.max(0, activeDurationMinutes - freeZoneMinutes);
+    deductAmount = d(paidMinutes).mul(0.5);
+    reason = "PER_MINUTE_DEDUCTION";
+
+    // Safety: don't deduct more than what was held
+    if (deductAmount.gt(creditsHeld)) {
+      deductAmount = creditsHeld;
+      reason = "CAP_REACHED";
+    }
   }
 
   // ── Fetch balance ──────────────────────────────────────────────────────────
   const balance = await tx.userCreditBalance.findUnique({ where: { userId } });
-  if (!balance) throw new AppError(500, "Credit balance not found for deduction");
+  if (!balance)
+    throw new AppError(500, "Credit balance not found for deduction");
 
   const purchasedDec = d(balance.purchasedCredits.toString());
   const earnedDec = d(balance.earnedCredits.toString());
   const balanceBefore = purchasedDec.add(earnedDec);
 
+  console.log(
+    `[CREDIT_DEDUCTION] Session=${sessionId} User=${userId} Duration=${activeDurationMinutes}m. ` +
+      `Hold=${creditsHeld} Deduct=${deductAmount} Reason=${reason}. ` +
+      `Balance (P/E): ${purchasedDec}/${earnedDec}`,
+  );
+
   // ── Negative balance guard ─────────────────────────────────────────────────
   if (balanceBefore.lt(deductAmount)) {
     console.error(
       `[DEDUCTION_ANOMALY] userId=${userId} sessionId=${sessionId} ` +
-      `before=${balanceBefore} deduct=${deductAmount}`,
+        `before=${balanceBefore} deduct=${deductAmount}`,
     );
     // Clamp — never write a negative balance
     deductAmount = balanceBefore.gt(0) ? balanceBefore : d(0);
@@ -396,16 +460,42 @@ export async function deductCredits(
 
   const balanceAfter = balanceBefore.sub(deductAmount);
 
-  // Release hold + apply deduction against purchasedCredits first
-  const newHeld = d(balance.heldCredits.toString()).sub(creditsHeld);
-  const newPurchased = purchasedDec.sub(deductAmount);
+  // ── Apply deduction across pools ──────────────────────────────────────────
+  let remainingDeduct = deductAmount;
+  let nextPurchased = purchasedDec;
+  let nextEarned = earnedDec;
+
+  // Deduct from purchased pool first
+  if (nextPurchased.gte(remainingDeduct)) {
+    nextPurchased = nextPurchased.sub(remainingDeduct);
+    remainingDeduct = d(0);
+  } else {
+    remainingDeduct = remainingDeduct.sub(nextPurchased);
+    nextPurchased = d(0);
+  }
+
+  // Deduct remainder from earned pool
+  if (remainingDeduct.gt(0)) {
+    nextEarned = nextEarned.sub(remainingDeduct);
+    if (nextEarned.lt(0)) nextEarned = d(0);
+  }
+
+  // ── Release hold ────────────────────────────────────────────────────────────
+  const currentHeld = d(balance.heldCredits.toString());
+  const nextHeld = currentHeld.sub(creditsHeld);
+  const finalHeld = nextHeld.lt(0) ? d(0) : nextHeld;
+
+  // ── Calculate final availability ───────────────────────────────────────────
+  // Formula: totalAvailable = (purchased + earned) - remaining holds
+  const nextTotalAvailable = nextPurchased.add(nextEarned).sub(finalHeld);
 
   await tx.userCreditBalance.update({
     where: { userId },
     data: {
-      purchasedCredits: newPurchased.lt(0) ? d(0) : newPurchased,
-      heldCredits: newHeld.lt(0) ? d(0) : newHeld,
-      totalAvailable: balanceAfter.lt(0) ? d(0) : balanceAfter,
+      purchasedCredits: nextPurchased,
+      earnedCredits: nextEarned,
+      heldCredits: finalHeld,
+      totalAvailable: nextTotalAvailable.lt(0) ? d(0) : nextTotalAvailable,
     },
   });
 
@@ -478,9 +568,15 @@ export async function confirmPurchase(
     }
 
     // Add to balance
-    const balance = await tx.userCreditBalance.findUnique({ where: { userId } });
-    const currentPurchased = balance ? d(balance.purchasedCredits.toString()) : d(0);
-    const currentAvailable = balance ? d(balance.totalAvailable.toString()) : d(0);
+    const balance = await tx.userCreditBalance.findUnique({
+      where: { userId },
+    });
+    const currentPurchased = balance
+      ? d(balance.purchasedCredits.toString())
+      : d(0);
+    const currentAvailable = balance
+      ? d(balance.totalAvailable.toString())
+      : d(0);
     const credits = d(creditsPurchased);
 
     await tx.userCreditBalance.upsert({
@@ -499,8 +595,12 @@ export async function confirmPurchase(
     });
 
     // Ledger entry
-    const updatedBalance = await tx.userCreditBalance.findUnique({ where: { userId } });
-    const newAvailable = updatedBalance ? d(updatedBalance.totalAvailable.toString()) : credits;
+    const updatedBalance = await tx.userCreditBalance.findUnique({
+      where: { userId },
+    });
+    const newAvailable = updatedBalance
+      ? d(updatedBalance.totalAvailable.toString())
+      : credits;
     await tx.creditLedger.create({
       data: {
         userId,

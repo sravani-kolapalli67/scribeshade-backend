@@ -64,6 +64,8 @@ enum DeductionReason {
   FORCE_ENDED
   REFUND
   BRACKET_OVERFLOW
+  PER_MINUTE_DEDUCTION
+  CAP_REACHED
 }
 
 enum PurchaseStatus {
@@ -84,8 +86,8 @@ model User {
   sessions  Session[]
   documents Document[]
   questions QA[]
-  projects  Project[]
 
+  projects  Project[]
   // Credit system relations
   creditBalance UserCreditBalance?
   ledgerEntries CreditLedger[]

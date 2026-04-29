@@ -8,7 +8,12 @@ import * as documentService from "../document/document.service";
 import path from "path";
 import { AppError } from "../../shared/middleware/error.middleware";
 import * as creditsService from "../credits/credits.service";
-import { creditDeductionQueue } from "../../jobs/queue";
+import { creditDeductionQueue } from "../jobs/queue";
+import { buildSystemMessage } from "../../shared/lib/prompt";
+import {
+  ANALYTICS_SYSTEM_PROMPT,
+  buildAnalyticsUserPrompt,
+} from "../../shared/prompts/analytics";
 
 const ai = new OpenRouter({
   apiKey: process.env.OPENROUTER_API_KEY || "",
@@ -167,7 +172,7 @@ export async function createSession(data: CreateSessionData) {
  */
 export async function getSessionsByUser(
   userId: string,
-  filters?: { search?: string; from_date?: string; to_date?: string }
+  filters?: { search?: string; from_date?: string; to_date?: string },
 ) {
   const where: any = { userId };
 
@@ -244,7 +249,10 @@ export async function activateSession(id: string) {
     }
 
     if (session.status !== SessionStatus.PRE_CHECK) {
-      throw new AppError(409, `Cannot activate session in status ${session.status}`);
+      throw new AppError(
+        409,
+        `Cannot activate session in status ${session.status}`,
+      );
     }
 
     let creditsHeld: Prisma.Decimal = new Prisma.Decimal(0);
@@ -297,8 +305,14 @@ export async function deactivateSession(
       return { session: s, didTransition: false };
     }
 
-    if (s.status !== SessionStatus.ACTIVE && s.status !== SessionStatus.PAUSED) {
-      throw new AppError(409, `Cannot deactivate session in status ${s.status}`);
+    if (
+      s.status !== SessionStatus.ACTIVE &&
+      s.status !== SessionStatus.PAUSED
+    ) {
+      throw new AppError(
+        409,
+        `Cannot deactivate session in status ${s.status}`,
+      );
     }
 
     const updated = await tx.session.update({
@@ -339,7 +353,10 @@ export async function deactivateSession(
  * @param sessionId Session UUID
  * @param dbUserId  Internal (DB) user UUID — not Clerk ID
  */
-export async function creditExhaustionClose(sessionId: string, dbUserId: string) {
+export async function creditExhaustionClose(
+  sessionId: string,
+  dbUserId: string,
+) {
   await prisma.$transaction(async (tx) => {
     const s = await tx.session.findUnique({ where: { id: sessionId } });
     if (!s || s.status !== SessionStatus.ACTIVE) return;
@@ -352,6 +369,13 @@ export async function creditExhaustionClose(sessionId: string, dbUserId: string)
         creditExhaustedAt: new Date(),
       },
     });
+  });
+
+  // Notify frontend via SSE
+  const { sseManager } = await import("../../shared/lib/sse");
+  sseManager.notify(sessionId, "SESSION_CLOSED", {
+    reason: "CREDIT_EXHAUSTED",
+    sessionId,
   });
 
   await creditDeductionQueue.add("credit-deduction", {
@@ -420,58 +444,6 @@ export async function getSessionFullContext(sessionId: string) {
     document: documentText ? documentText.substring(0, 5000) : "None",
     history: recentHistory || "No previous interactions in this session.",
   };
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// SYSTEM PROMPT — shared across all interview AI calls.
-// Passed as role:"system" so the model treats it as a hard behavioral constraint.
-// ─────────────────────────────────────────────────────────────────────────────
-/**
- * Builds the dynamic system prompt combining static rules with session context.
- */
-function buildSystemMessage(context: any) {
-  return [
-    "You are an expert AI Interview Assistant embedded inside a live interview tool.",
-    "Your role is to silently help the candidate by identifying questions and providing precise, natural, well-structured answers tailored to their background.",
-    "",
-    "### Session Context:",
-    `- Company: ${context?.company}`,
-    `- Role: ${context?.role}`,
-    `- Technical Stack: ${context?.language}`,
-    `- Simple Language Mode: ${context?.simpleLanguage ? "ENABLED (Use clear, plain English)" : "DISABLED"}`,
-    "",
-    "### Recent Conversation History:",
-    context?.history || "No previous interactions.",
-    "",
-    "### Candidate Background (Resume):",
-    context?.resume || "No resume provided.",
-    "",
-    "### Supporting Material (Documents):",
-    context?.document || "None provided.",
-    "",
-    "### User's Special Instructions:",
-    context?.instructions || "None.",
-    "",
-    "### Formatting Rules (STRICT):",
-    "- Start answers with a natural paragraph (like a human speaking), especially for introductions, explanations, and conceptual answers.",
-    "- NEVER use bullet points for introductions, definitions, or high-level explanations.",
-    "- Use bullet points ONLY when listing items, steps, comparisons, or multiple distinct points.",
-    "- If the answer can be explained clearly in 1–2 paragraphs, DO NOT use bullets at all.",
-    "- Maintain a conversational, interview-ready tone (similar to how a strong candidate would respond verbally).",
-    "- Avoid over-structuring; do NOT force bullets unless necessary.",
-    "- Minimize bold: only use **double asterisks** for the single most critical technical term per paragraph or section.",
-    "- **Code Implementation**: If the question is technical or asks for logic, ALWAYS provide a clean, high-quality code implementation.",
-    "- **Code Block Formatting**: Use Markdown code blocks with the correct language tag (e.g., ```javascript or ```python).",
-    '- Do NOT include meta sections like "Summary", "Conclusion", or "Complexity Analysis" unless explicitly asked.',
-    '- Do NOT include question numbers or labels (e.g. "1.", "Q:", "Question 1") in the extracted question.',
-    "",
-    "### Response Format (ALWAYS use this exact structure):",
-    "**QUESTION:**",
-    "[the interview question, without any numbering or prefix]",
-    "",
-    "**ANSWER:**",
-    "[your answer — natural paragraphs, selective bullets, and mandatory code blocks for technical questions]",
-  ].join("\n");
 }
 
 /**
@@ -870,69 +842,27 @@ export async function generateSessionFeedback(
     )
     .join("\n\n");
 
-  const prompt = `
-    You are an expert technical interviewer and behavioral analyst.
-    Analyze the following interview session data and provide a deep "Gap Analysis" feedback.
-
-    ### Session Context:
-    - Company: ${session.companyName || session.company?.name || "Unknown"}
-    - Target Role: ${session.jobDescription || "Not specified"}
-    - Technical Stack: ${session.language || "General"}
-    - AI Assists Used: ${session.aiUsage}
-    - Candidate Resume Summary: ${resumeContext || "No resume context provided."}
-    - Additional Document Content: ${documentContext.substring(0, 5000) || "None"}
-    - Language Preference: ${session.simpleLanguage ? "Simple/Plain English" : "Technical/Professional"}
-    - Session Mode: ${session.mode}
-    - Extra Context provided by user: ${session.extraContext || "None"}
-
-    ### Data Sources:
-    1. Transcript (Conversational Flow):
-    ${formattedTranscript || "No transcript available."}
-
-    2. Technical QA (Screen Analysis & Problem Solving):
-    ${formattedQA || "No specific technical questions recorded."}
-
-    3. Session Messages (AI Assisted Answers & Saved QA):
-    ${formattedMessages || "No additional messages recorded."}
-
-    ### Instructions & Evaluation Tasks:
-    1. **Question-Answer Gap Analysis**: 
-       - Identify every question asked by the interviewer (found in the Transcript or QA/Messages).
-       - Compare these questions with the "AI Suggested Answer" provided to the user.
-       - Evaluate how well the AI-generated responses matched the technical and professional requirements of the interviewer's questions.
-       - **TIME GAP ANALYSIS**: Pay close attention to the time gap between when a question was asked (in the transcript) and when the AI provided the answer (in QA/Messages). Timely responses are critical.
-       - **IMPORTANT (Microphone/Transcript Constraint)**: The transcript might only contain the interviewer's voice if the user's microphone was disabled. DO NOT penalize the user or state they "didn't answer properly" or "remained silent" solely based on the absence of user speech in the transcript. Assume the candidate might have answered verbally even if it wasn't captured. Focus your feedback on the quality of the technical exchange and the utility of the AI suggestions.
-
-    2. **Technical Depth**: Evaluate the technical accuracy and relevance of the AI-generated answers in the context of the Job Description and the interviewer's prompts.
-
-    3. **Soft Skills & Interactivity**: Assess the flow of the session. Even if user speech is missing, look for signs of interactivity (e.g., follow-up questions from the interviewer triggered by AI suggestions).
-
-    4. **Improvements with Priority**: For each area of improvement, assign a priority: HIGH, MEDIUM, or LOW. Focus on how the candidate can better leverage AI or improve their own technical depth and response timing.
-
-    ### Output Format:
-    You MUST return a JSON object with this exact structure:
-    {
-      "score": number (0-100),
-      "confidence": number (0-100),
-      "sessionQuality": "Excellent" | "Good" | "Average" | "Needs Improvement",
-      "verdict": "Strong Pass" | "Pass" | "Fail" | "Inconclusive",
-      "communication": number (0-100),
-      "interactivity": number (0-100),
-      "technicalDepth": number (0-100),
-      "conciseness": number (0-100),
-      "avgResponseLen": number (approx words per answer),
-      "answeredCount": number (total questions answered),
-      "avgResponseTime": number (approx seconds per answer),
-      "strengths": string[],
-      "improvements": string[], (Note: Each improvement MUST start with [HIGH], [MEDIUM], or [LOW])
-      "interviewerMood": string
-    }
-  `.trim();
+  const userPrompt = buildAnalyticsUserPrompt({
+    company: session.companyName || session.company?.name || "Unknown",
+    role: session.jobDescription || "Not specified",
+    language: session.language || "General",
+    aiUsage: session.aiUsage || 0,
+    resumeContext,
+    documentContext: documentContext.substring(0, 5000),
+    mode: session.mode,
+    extraContext: session.extraContext || "None",
+    transcript: formattedTranscript,
+    qa: formattedQA,
+    messages: formattedMessages,
+  });
 
   try {
     const result = ai.callModel({
       model,
-      input: [{ role: "user", type: "message", content: prompt }],
+      input: [
+        { role: "system", type: "message", content: ANALYTICS_SYSTEM_PROMPT },
+        { role: "user", type: "message", content: userPrompt },
+      ],
       text: {
         format: { type: "json_object" },
       },

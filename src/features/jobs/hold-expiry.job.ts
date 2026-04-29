@@ -1,7 +1,7 @@
 import { Worker } from "bullmq";
 import { redisConnection } from "./queue";
-import { prisma } from "../shared/lib/prisma";
-import * as creditsService from "../features/credits/credits.service";
+import { prisma } from "../../shared/lib/prisma";
+import * as creditsService from "../credits/credits.service";
 import { SessionStatus } from "@prisma/client";
 import { Prisma } from "@prisma/client";
 
