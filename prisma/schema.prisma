@@ -204,6 +204,7 @@ model Session {
   updatedAt DateTime @updatedAt
 
   feedback SessionFeedback?
+  notes    SessionNotes?
 
   @@index([userId])
   @@index([companyId])
@@ -287,6 +288,20 @@ model SessionFeedback {
   updatedAt       DateTime @updatedAt
 }
 
+model SessionNotes {
+  id              String   @id @default(uuid())
+  sessionId       String   @unique
+  session         Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  
+  companyName     String
+  jobDescription  String   @db.Text
+  summary         String   @db.Text
+  questions       Json     // Array of questions asked in the session
+  
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
+
 // ─── Credit system models ─────────────────────────────────────────────────────
 
 model CreditConfig {
@@ -341,4 +356,11 @@ model CreditPurchase {
   confirmedAt            DateTime?
 
   @@index([userId])
+}
+
+model Policy {
+    id String @id @default(uuid())
+    privacyPolicy String @db.Text
+    termsAndConditions String @db.Text
+    updatedAt DateTime @default(now())
 }

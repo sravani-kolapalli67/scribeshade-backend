@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { env } from "../config/env";
 import { authRouter } from "../features/auth/auth.routes";
 import { resumeRouter } from "../features/resume/resume.router";
 import { sessionRouter } from "../features/session/session.router";
@@ -7,6 +8,8 @@ import { qaRouter } from "../features/qa/qa.router";
 import { companyRouter } from "../features/company/company.router";
 import { projectsRouter } from "../features/projects/projects.router";
 import { creditsRouter } from "../features/credits/credits.router";
+import { policyRouter } from "../features/policy/policy.router";
+import { sessionNotesRouter } from "../features/session-notes/session-notes.router";
 
 const router = Router();
 
@@ -18,10 +21,17 @@ router.use("/qa", qaRouter);
 router.use("/company", companyRouter);
 router.use("/projects", projectsRouter);
 router.use("/credits", creditsRouter);
+router.use("/policy", policyRouter);
+router.use("/session-notes", sessionNotesRouter);
+
 
 // Health check
 router.get("/health", (req, res) => {
-  res.json({ status: "ok", timestamp: new Date().toISOString() });
+  res.json({
+    status: "ok",
+    timestamp: new Date().toISOString(),
+    port: env.PORT,
+  });
 });
 
 export { router };

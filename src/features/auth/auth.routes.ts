@@ -30,13 +30,31 @@ router.get("/me", async (req: Request, res: Response, next: NextFunction) => {
   }
 });
 
-// POST /api/auth/webhook
+// POST /api/auth/tauri-ticket
+router.post(
+  "/tauri-ticket",
+  requireAuth,
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const userId = getCurrentUserId(req);
 
+      const token = await clerkClient.signInTokens.createSignInToken({
+        userId,
+        expiresInSeconds: 60,
+      });
+
+      res.json({ ticket: token.token });
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+
+// POST /api/auth/webhook
 router.post(
   "/webhook",
   express.raw({ type: "application/json" }),
   async (req: Request, res: Response, next: NextFunction) => {
-    // console.log("webhook --------->");
     const result = await handleWebhook(req.body, req.headers);
     res.status(200).json(result);
   },

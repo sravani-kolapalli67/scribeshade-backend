@@ -1,7 +1,7 @@
 # ScribeShade Backend API Reference
 
-Last updated: 2026-04-28
-Document version: v1.2.0
+Last updated: 2026-04-30
+Document version: v1.3.0
 
 Base URL:
 - Local: `http://localhost:3200/api`
@@ -387,6 +387,59 @@ Error examples:
 - `401`
 ```json
 { "error": "Unauthorized: Authentication required" }
+```
+
+---
+
+## Policy APIs
+
+### GET /policy
+Public endpoint. Returns the latest privacy policy and terms and conditions.
+
+Success `200`:
+```json
+{
+  "success": true,
+  "data": {
+    "id": "policy-uuid",
+    "privacyPolicy": "Privacy policy text...",
+    "termsAndConditions": "Terms and conditions text...",
+    "updatedAt": "2026-04-30T11:30:00.000Z"
+  }
+}
+```
+
+### POST /policy
+Creates or updates the privacy policy and terms and conditions.
+
+Request:
+```json
+{
+  "privacyPolicy": "Updated privacy policy...",
+  "termsAndConditions": "Updated T&C..."
+}
+```
+
+Success `201`:
+```json
+{
+  "success": true,
+  "data": {
+    "id": "policy-uuid",
+    "privacyPolicy": "...",
+    "termsAndConditions": "...",
+    "updatedAt": "2026-04-30T11:35:00.000Z"
+  }
+}
+```
+
+Error examples:
+- `400`:
+```json
+{
+  "success": false,
+  "error": "Both privacyPolicy and termsAndConditions are required"
+}
 ```
 
 ---
