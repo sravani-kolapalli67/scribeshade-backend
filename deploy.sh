@@ -30,9 +30,18 @@ if [ "$COPY_ENV" = "true" ] || [ "$COPY_ENV" = "1" ]; then
     fi
 fi
 
-# 2. Build the Docker image locally
-echo "=> Building Docker image (${IMAGE_NAME}:${IMAGE_TAG})..."
-docker build -t ${IMAGE_NAME}:${IMAGE_TAG} .
+# 2. Build the Docker image locally for linux/amd64 (server architecture)
+echo "=> Ensuring buildx builder with cross-platform support exists..."
+docker buildx inspect scribeshade-builder > /dev/null 2>&1 || \
+    docker buildx create --name scribeshade-builder --driver docker-container --bootstrap
+docker buildx use scribeshade-builder
+
+echo "=> Building Docker image (${IMAGE_NAME}:${IMAGE_TAG}) for linux/amd64..."
+docker buildx build \
+    --platform linux/amd64 \
+    --load \
+    -t ${IMAGE_NAME}:${IMAGE_TAG} \
+    .
 if [ $? -ne 0 ]; then
     echo "=> ERROR: Docker build failed. Aborting."
     exit 1
