@@ -4,7 +4,81 @@ export interface GenerateProjectRequest {
   resumeText?: string;
   position: string;
   jobDescription: string;
+  industry?: string;
+  experienceLevel?: string;
+  /**
+   * "new"             — Invent completely new projects; resume skills are used for
+   *                     tech-stack plausibility only, NOT as a source of existing work.
+   * "resume_enhanced" — Deeply analyse the resume and enhance/expand the candidate's
+   *                     EXISTING experience into polished, interview-ready case studies.
+   * Defaults to "new" when omitted.
+   */
+  generationMode?: "new" | "resume_enhanced";
 }
+
+// ── Dynamic Section System ────────────────────────────────────────────────
+
+/**
+ * All supported section rendering types.
+ * The AI picks the right type for each section based on role context.
+ */
+export type SectionType =
+  | "bullets"          // string[] — achievement bullets
+  | "narrative"        // string  — prose paragraph(s)
+  | "how_to_explain"   // { elevatorPitch, detailedExplanation }
+  | "star_story"       // { situation, task, action, result }
+  | "thirty_second_summary" // { hook, mainPoints: string[], closingLine }
+  | "architecture_tree"     // { layers: [{name, color, nodes: [{name, description, tech, children?}]}] }
+  | "metadata"         // { fields: [{label, value}] }
+  | "code_block"       // string  — ASCII diagram / monospace
+  | "tech_tags"        // [{category, tags[]}]
+  | "steps"            // [{step, description}]
+  | "challenge_cards"  // [{challenge, solution}]
+  | "metrics"          // [{metric, value, description, before?, after?}]
+  | "quote_cards"      // string[] — first-person learning quotes
+  | "key_value_pairs"  // [{key, value}]
+  | "comparison_table" // [{decision, winner, loser, rationale}]
+  | "cards"            // [{title, body, badge?}]
+  | "table"            // {headers: string[], rows: string[][]}
+  | "timeline"         // [{date, event, description}]
+  | "code_snippets";   // [{title, language, purpose, code}]
+
+export interface ProjectSection {
+  key: string;
+  title: string;
+  subtitle: string;
+  type: SectionType;
+  content: unknown;
+}
+
+export interface ProjectResponse {
+  projectHeader: {
+    title: string;
+    tagline: string;
+    domain: string;
+    duration: string;
+    teamSize: string;
+    role: string;
+  };
+  sections: ProjectSection[];
+  /** Set to true when generated project scope was limited to user's known skill set */
+  scope_limited?: boolean;
+  /** Set to true when outcome metrics may exceed typical expectations for the experience level */
+  credibility_warning?: boolean;
+}
+
+export interface AIProjectGenerationResponse {
+  id?: string;
+  userId: string;
+  resumeId?: string | null;
+  position: string;
+  jobDescription: string;
+  projects: ProjectResponse[];
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+// ── Legacy types (kept for reference) ────────────────────────────────────
 
 export interface ProjectHeader {
   title: string;
@@ -141,40 +215,4 @@ export interface KeyAchievement {
   value: string;
   description: string;
 }
-
-export interface ProjectResponse {
-  projectHeader: ProjectHeader;
-  introduction: ProjectIntroduction;
-  resumeReadyPoints: string[];
-  howToExplain: HowToExplain;
-  businessPurpose: BusinessPurpose;
-  architecture: Architecture;
-  dataFlow: DataFlowStep[];
-  codeSnippets: CodeSnippet[];
-  clusterAndNodes: ClusterAndNodes;
-  techStack: TechStack;
-  dataCharacteristics: DataCharacteristics;
-  databaseSchema: DatabaseTable[];
-  toolIntegrationMap: ToolIntegration[];
-  whyTheseTools: WhyTool[];
-  methodology: Methodology;
-  ciCdPipeline: CiCdStage[];
-  environmentSetup: EnvironmentSetup;
-  monitoringAndAlerting: MonitoringAlert[];
-  challengesAndResolutions: ChallengeResolution[];
-  productionIssues: ProductionIssue[];
-  performanceOptimization: PerformanceOptimization[];
-  keyAchievements: KeyAchievement[];
-  technicalLearnings: string[];
-}
-
-export interface AIProjectGenerationResponse {
-  id?: string;
-  userId: string;
-  resumeId?: string | null;
-  position: string;
-  jobDescription: string;
-  projects: ProjectResponse[];
-  createdAt?: Date;
-  updatedAt?: Date;
-}
+// Legacy ProjectResponse and AIProjectGenerationResponse removed — see new versions above

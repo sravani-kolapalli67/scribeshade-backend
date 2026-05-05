@@ -1,7 +1,6 @@
 import { Request, Response } from "express";
 import path from "path";
 import fs from "fs";
-
 import {
   createResumeRecord,
   deleteResume,
@@ -43,14 +42,6 @@ function getStatusCode(err: unknown): number {
   return 500;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Controllers
-// ─────────────────────────────────────────────────────────────────────────────
-
-/**
- * POST /resume/upload
- * Accepts a multipart file upload, validates it is a resume, then persists it.
- */
 export async function uploadResume(req: Request, res: Response): Promise<void> {
   if (!req.file) {
     res.status(400).json({ error: "No file uploaded" });
@@ -194,7 +185,7 @@ export async function scoreAts(req: Request, res: Response): Promise<void> {
  * Generates a tailored cover letter based on the resume and job details.
  */
 export async function coverLetter(req: Request, res: Response): Promise<void> {
-  const { resumeId, jobRole, company, jobDescription, tone } =
+  const { resumeId, jobRole, company, jobDescription, tone, userName, userEmail } =
     req.body as CoverLetterRequest & { resumeId?: string };
 
   if (!resumeId) {
@@ -203,15 +194,17 @@ export async function coverLetter(req: Request, res: Response): Promise<void> {
   }
 
   try {
-    const text = await generateCoverLetter({
+    const result = await generateCoverLetter({
       resumeId,
       jobRole,
       company,
       jobDescription,
       tone,
+      userName,
+      userEmail,
     });
 
-    res.json({ coverLetter: text });
+    res.json(result);
   } catch (err) {
     console.error("[resume/generate-cover-letter]", err);
     const status = getStatusCode(err);
@@ -224,18 +217,18 @@ export async function coverLetter(req: Request, res: Response): Promise<void> {
  * Creates a new resume template.
  */
 export async function addTemplate(req: Request, res: Response): Promise<void> {
-  const { category, thumbnail, code } =
+  const { name, category, thumbnail, code } =
     req.body as Partial<CreateTemplateRequest>;
 
-  if (!category || !thumbnail || !code) {
+  if (!name || !category || !thumbnail || !code) {
     res
       .status(400)
-      .json({ error: "category, thumbnail, and code are required" });
+      .json({ error: "name, category, thumbnail, and code are required" });
     return;
   }
 
   try {
-    const template = await createTemplate({ category, thumbnail, code });
+    const template = await createTemplate({ name, category, thumbnail, code });
     res.status(201).json(template);
   } catch (err) {
     console.error("[resume/create-template]", err);

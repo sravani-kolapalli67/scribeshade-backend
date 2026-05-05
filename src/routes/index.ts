@@ -10,6 +10,7 @@ import { projectsRouter } from "../features/projects/projects.router";
 import { creditsRouter } from "../features/credits/credits.router";
 import { policyRouter } from "../features/policy/policy.router";
 import { sessionNotesRouter } from "../features/session-notes/session-notes.router";
+import { aiRouter } from "../features/ai/ai.router";
 
 const router = Router();
 
@@ -23,6 +24,7 @@ router.use("/projects", projectsRouter);
 router.use("/credits", creditsRouter);
 router.use("/policy", policyRouter);
 router.use("/session-notes", sessionNotesRouter);
+router.use("/", aiRouter);
 
 
 // Health check

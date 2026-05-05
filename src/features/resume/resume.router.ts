@@ -15,6 +15,19 @@ import {
   scoreAts,
   uploadResume,
 } from "./resume.controller";
+import {
+  saveBuiltResumeHandler,
+  listBuiltResumesHandler,
+  getBuiltResumeHandler,
+  deleteBuiltResumeHandler,
+  generateResumeHtmlHandler,
+  enhanceSectionHandler,
+  tailorResumeHandler,
+  exportPdfHandler,
+  extractFieldsHandler,
+  markBuiltResumeCompleteHandler,
+} from "./resume.builder.controller";
+import { requireAuth } from "../auth/auth.middleware";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Multer (File Upload Middleware)
@@ -66,6 +79,20 @@ router.post("/generate-cover-letter", coverLetter);
 // Templates
 router.post("/create-template", addTemplate);
 router.get("/all-templates", listTemplates);
+
+// ── Builder (CRUD) ────────────────────────────────────────────────────────────
+router.post("/builder/save", requireAuth, saveBuiltResumeHandler);
+router.get("/builder/list", requireAuth, listBuiltResumesHandler);
+router.get("/builder/:id", requireAuth, getBuiltResumeHandler);
+router.delete("/builder/:id", requireAuth, deleteBuiltResumeHandler);
+
+// ── Builder (AI) ──────────────────────────────────────────────────────────────
+router.post("/builder/generate", requireAuth, generateResumeHtmlHandler);
+router.post("/builder/enhance-section", requireAuth, enhanceSectionHandler);
+router.post("/builder/tailor", requireAuth, tailorResumeHandler);
+router.post("/builder/export-pdf", requireAuth, exportPdfHandler);
+router.post("/builder/extract-fields", requireAuth, extractFieldsHandler);
+router.post("/builder/:id/complete", requireAuth, markBuiltResumeCompleteHandler);
 
 // ─────────────────────────────────────────────────────────────────────────────
 

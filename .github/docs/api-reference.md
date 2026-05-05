@@ -1,7 +1,7 @@
 # ScribeShade Backend API Reference
 
-Last updated: 2026-04-30
-Document version: v1.3.0
+Last updated: 2026-05-04
+Document version: v1.7.0
 
 Base URL:
 - Local: `http://localhost:3200/api`
@@ -88,6 +88,29 @@ Success `200`:
   "createdAt": "2026-04-01T10:00:00.000Z",
   "updatedAt": "2026-04-01T10:00:00.000Z"
 }
+```
+
+Error examples:
+- `401`
+```json
+{ "error": "Unauthorized: Authentication required" }
+```
+- `500`
+```json
+{ "error": "Internal Server Error" }
+```
+
+### POST /auth/tauri-ticket
+Creates a short-lived Clerk sign-in token for Tauri desktop clients that cannot complete the standard browser OAuth flow.
+
+Headers:
+- `Authorization: Bearer <token>`
+
+Auth: Required (`requireAuth`)
+
+Success `200`:
+```json
+{ "ticket": "<clerk_sign_in_token>" }
 ```
 
 Error examples:
@@ -710,6 +733,30 @@ Error examples:
 { "error": "role and question are required" }
 ```
 
+### GET /session/:id/events
+Opens a Server-Sent Events (SSE) stream for real-time session lifecycle notifications.
+
+Headers:
+- `Accept: text/event-stream`
+
+Success: Connection is held open, `Content-Type: text/event-stream`. Events are pushed as they occur.
+
+Initial response:
+```
+: connected
+```
+
+Event format:
+```
+event: <name>
+data: {"..."}
+
+```
+
+Known event names emitted by the server: `session_status_changed`, `credit_warning`, `credit_exhausted`.
+
+Note: No Auth guard on this endpoint — session ID in the path acts as a capability token.
+
 ### GET /session/:id/analytics?force=true|false
 Returns existing analytics or generates if missing/forced.
 
@@ -843,13 +890,21 @@ Success `200` (example):
 ```json
 {
   "score": 78,
+  "grade": "B+",
   "summary": "Good overall profile",
   "strengths": ["Strong backend experience"],
   "weaknesses": ["Missing quantified achievements"],
   "missingKeywords": ["microservices"],
-  "suggestions": ["Add impact metrics"]
+  "suggestions": ["Add impact metrics"],
+  "sectionScores": {
+    "experience": 80,
+    "skills": 75,
+    "education": 70
+  }
 }
 ```
+
+`grade` values: `A+` (95–100), `A` (90–94), `B+` (85–89), `B` (80–84), `C+` (75–79), `C` (70–74), `D` (60–69), `F` (<60).
 
 Error examples:
 - `400`
@@ -869,7 +924,7 @@ Error examples:
 ```
 
 ### POST /resume/generate-cover-letter
-Generates cover letter from resume + job data.
+Generates a cover letter from resume content + job data.
 
 Request:
 ```json
@@ -878,13 +933,20 @@ Request:
   "jobRole": "Backend Engineer",
   "company": "Google",
   "jobDescription": "...",
-  "tone": "professional"
+  "tone": "professional",
+  "userName": "John Doe",
+  "userEmail": "john@example.com"
 }
 ```
 
+`tone` — optional, default `"professional"`. `userName` and `userEmail` are optional and are included in the AI prompt when provided.
+
 Success `200`:
 ```json
-{ "coverLetter": "Dear Hiring Manager, ..." }
+{
+  "coverLetter": "Dear Hiring Manager, ...",
+  "wordCount": 245
+}
 ```
 
 Error examples:
@@ -899,32 +961,404 @@ Creates a resume template.
 Request:
 ```json
 {
+  "name": "Modern",
   "category": "software-engineering",
   "thumbnail": "https://cdn.example.com/template.png",
   "code": "<html>...</html>"
 }
 ```
 
+All four fields are required.
+
 Success `201`:
 ```json
 {
   "id": "template-uuid",
+  "name": "Modern",
   "category": "software-engineering",
   "thumbnail": "https://cdn.example.com/template.png",
-  "code": "<html>...</html>"
+  "code": "<html>...</html>",
+  "createdAt": "2026-05-05T10:00:00.000Z"
 }
 ```
 
 Error examples:
 - `400`
 ```json
-{ "error": "category, thumbnail, and code are required" }
+{ "error": "name, category, thumbnail, and code are required" }
 ```
 
 ### GET /resume/all-templates
-Lists all templates.
+Lists all templates. Three default templates are seeded: **Classic**, **Modern**, **Minimal**.
 
-Success `200`: array of templates.
+Success `200`: array of templates, each with `id`, `name`, `category`, `thumbnail`, `code`, `createdAt`.
+
+### POST /resume/builder/save
+Creates a new built resume draft or updates an existing one. Requires auth.
+
+Headers: `Authorization: Bearer <token>`
+
+Request:
+```json
+{
+  "userId": "db-user-uuid",
+  "resumeId": null,
+  "title": "Frontend – HMS",
+  "templateId": "classic",
+  "fields": {
+    "name": "Tushar Vaghela",
+    "role": "Frontend Engineer",
+    "email": "tusharvaghela601@gmail.com",
+    "phone": "+919587308671",
+    "location": "Mumbai, India",
+    "links": "github.com/tushar",
+    "summary": "3 years experience in React...",
+    "experience": "HMS | Frontend Eng | 2024–Present",
+    "skillsLanguages": "TypeScript, JavaScript",
+    "skillsFrameworks": "React, Tailwind CSS",
+    "skillsDatabases": "PostgreSQL",
+    "skillsTools": "Docker, AWS",
+    "projects": "Zepto Clone\n• Responsive UI",
+    "education": "B.Tech CS\nXYZ University\n2024",
+    "certifications": "",
+    "publications": ""
+  },
+  "sections": [
+    { "id": "personalInfo", "label": "Personal Info", "enabled": true, "required": true }
+  ],
+  "jobDescription": "We are looking for a frontend engineer...",
+  "jobTitle": "Frontend Engineer",
+  "company": "HMS"
+}
+```
+
+Pass `"resumeId": null` to create; pass an existing UUID to update.
+Required fields: `userId`, `title`, `templateId`, `fields`, `sections`.
+
+Success `201` (create) / `200` (update):
+```json
+{
+  "id": "built-resume-uuid",
+  "userId": "db-user-uuid",
+  "title": "Frontend – HMS",
+  "templateId": "classic",
+  "fields": { "...": "..." },
+  "sections": [ "..." ],
+  "jobTitle": "Frontend Engineer",
+  "company": "HMS",
+  "createdAt": "2026-05-04T10:00:00.000Z",
+  "updatedAt": "2026-05-04T10:05:32.000Z"
+}
+```
+
+Error examples:
+- `400`
+```json
+{ "error": "userId, title, templateId, fields and sections are required" }
+```
+- `404`
+```json
+{ "error": "Resume not found" }
+```
+
+### GET /resume/builder/list?userId=<id>
+Lists all built resumes for a user. Requires auth.
+
+Headers: `Authorization: Bearer <token>`
+
+Success `200`:
+```json
+[
+  {
+    "id": "built-resume-uuid",
+    "title": "Frontend – HMS",
+    "templateId": "classic",
+    "jobTitle": "Frontend Engineer",
+    "company": "HMS",
+    "createdAt": "2026-05-04T10:00:00.000Z",
+    "updatedAt": "2026-05-04T10:05:32.000Z"
+  }
+]
+```
+
+Error examples:
+- `400`
+```json
+{ "error": "userId query parameter is required" }
+```
+
+### GET /resume/builder/:id
+Returns a single built resume including all fields and sections. Requires auth.
+
+Headers: `Authorization: Bearer <token>`
+
+Success `200`:
+```json
+{
+  "id": "built-resume-uuid",
+  "userId": "db-user-uuid",
+  "title": "Frontend – HMS",
+  "templateId": "classic",
+  "fields": { "name": "Tushar Vaghela", "...": "..." },
+  "sections": [ "..." ],
+  "jobTitle": "Frontend Engineer",
+  "company": "HMS",
+  "jobDescription": "...",
+  "createdAt": "2026-05-04T10:00:00.000Z",
+  "updatedAt": "2026-05-04T10:05:32.000Z"
+}
+```
+
+Error examples:
+- `404`
+```json
+{ "error": "Resume not found" }
+```
+
+### DELETE /resume/builder/:id
+Deletes a built resume. Requires auth.
+
+Headers: `Authorization: Bearer <token>`
+
+Success `200`:
+```json
+{ "message": "Built resume deleted successfully" }
+```
+
+Error examples:
+- `404`
+```json
+{ "error": "Resume not found" }
+```
+
+### POST /resume/builder/generate
+AI-populates a resume template with user fields and optional JD context. Costs **1 credit**. Requires auth.
+
+Headers: `Authorization: Bearer <token>`
+
+Request:
+```json
+{
+  "userId": "db-user-uuid",
+  "templateCode": "<!DOCTYPE html>...",
+  "fields": { "name": "Tushar Vaghela", "...": "..." },
+  "jobDescription": "We are looking for a frontend engineer...",
+  "jobTitle": "Frontend Engineer",
+  "company": "HMS"
+}
+```
+
+Required: `userId`, `templateCode`, `fields`.
+
+Success `200`:
+```json
+{
+  "populatedHtml": "<!DOCTYPE html>... fully populated HTML ...",
+  "creditsUsed": 1,
+  "creditsRemaining": 14
+}
+```
+
+Error examples:
+- `400`
+```json
+{ "error": "userId, templateCode, and fields are required" }
+```
+- `402`
+```json
+{ "error": "Insufficient credits. Required: 1, Available: 0" }
+```
+
+### POST /resume/builder/enhance-section
+AI-rewrites a single resume section to be more impactful. Costs **0.5 credits**. Requires auth.
+
+Headers: `Authorization: Bearer <token>`
+
+Request:
+```json
+{
+  "userId": "db-user-uuid",
+  "sectionId": "summary",
+  "currentText": "I am a frontend developer with experience in React.",
+  "jobDescription": "We need a senior engineer...",
+  "jobTitle": "Senior Frontend Engineer",
+  "resumeContext": "Tushar Vaghela, Frontend Engineer, 3 years..."
+}
+```
+
+Valid `sectionId` values: `summary` | `experience` | `skills` | `projects` | `education` | `certifications` | `publications`
+
+Required: `userId`, `sectionId`, `currentText`.
+
+Success `200`:
+```json
+{
+  "sectionId": "summary",
+  "enhancedText": "Results-driven Frontend Engineer with 3+ years...",
+  "creditsUsed": 0.5,
+  "creditsRemaining": 13.5
+}
+```
+
+Error examples:
+- `400`
+```json
+{ "error": "userId, sectionId, and currentText are required" }
+```
+- `400`
+```json
+{ "error": "Invalid sectionId" }
+```
+- `402`
+```json
+{ "error": "Insufficient credits. Required: 0.5, Available: 0" }
+```
+
+### POST /resume/builder/tailor
+AI-tailors all resume sections to a target job description. Costs **1 credit**. Requires auth.
+
+Headers: `Authorization: Bearer <token>`
+
+Request:
+```json
+{
+  "userId": "db-user-uuid",
+  "resumeId": "built-resume-uuid",
+  "jobDescription": "We are hiring a Senior Frontend Engineer...",
+  "jobTitle": "Senior Frontend Engineer",
+  "company": "Stripe"
+}
+```
+
+Required: `userId`, `resumeId`, `jobDescription`.
+
+Success `200`:
+```json
+{
+  "tailoredFields": {
+    "summary": "Results-driven Frontend Engineer...",
+    "experience": "HMS | Frontend Engineer | 2024–Present\n...",
+    "skillsLanguages": "TypeScript, JavaScript",
+    "skillsFrameworks": "React 18, Next.js, Node.js",
+    "skillsDatabases": "PostgreSQL, Redis",
+    "skillsTools": "Docker, AWS, Vercel",
+    "projects": "Stripe-style Payment UI\n..."
+  },
+  "keywordsMatched": ["TypeScript", "React 18", "Node.js"],
+  "keywordsMissing": ["mentoring", "WebSockets"],
+  "matchScore": 81,
+  "creditsUsed": 1,
+  "creditsRemaining": 12
+}
+```
+
+Error examples:
+- `400`
+```json
+{ "error": "userId, resumeId, and jobDescription are required" }
+```
+- `402`
+```json
+{ "error": "Insufficient credits. Required: 1, Available: 0" }
+```
+- `404`
+```json
+{ "error": "Resume not found" }
+```
+
+### POST /resume/builder/export-pdf
+Saves the populated resume HTML to disk and returns a static download URL. Requires auth.
+
+Headers: `Authorization: Bearer <token>`
+
+Request:
+```json
+{
+  "userId": "db-user-uuid",
+  "resumeId": "built-resume-uuid",
+  "populatedHtml": "<!DOCTYPE html>... fully populated ..."
+}
+```
+
+Send either `resumeId` (server fetches from DB) **or** `populatedHtml` (client provides rendered HTML).
+
+Success `200`:
+```json
+{
+  "downloadUrl": "/uploads/exports/resume_export_1714290900000.html",
+  "expiresAt": "2026-05-05T10:00:00.000Z"
+}
+```
+
+> Note: The export serves an HTML file. PDF rendering can be done client-side via `window.print()`. A puppeteer-based PDF endpoint can be added when `puppeteer` is installed.
+
+Error examples:
+- `400`
+```json
+{ "error": "resumeId or populatedHtml is required" }
+```
+- `404`
+```json
+{ "error": "Resume not found" }
+```
+
+---
+
+## Session Notes APIs
+
+### POST /session-notes/:sessionId/generate
+AI-generates a structured summary and coaching notes for a completed session. Notes are stored and returned.
+
+No request body required.
+
+Success `201`:
+```json
+{
+  "success": true,
+  "data": {
+    "id": "notes-uuid",
+    "sessionId": "session-uuid",
+    "content": "Session summary and coaching notes...",
+    "createdAt": "2026-05-04T10:00:00.000Z"
+  }
+}
+```
+
+Error examples:
+- `400`
+```json
+{ "error": "sessionId is required" }
+```
+- `404`
+```json
+{ "error": "Session not found" }
+```
+- `500`
+```json
+{ "success": false, "error": "Internal server error" }
+```
+
+### GET /session-notes/:sessionId
+Retrieves the stored notes/summary for a session. Returns `null` data if notes have not been generated yet.
+
+Success `200`:
+```json
+{
+  "success": true,
+  "data": {
+    "id": "notes-uuid",
+    "sessionId": "session-uuid",
+    "content": "Session summary and coaching notes...",
+    "createdAt": "2026-05-04T10:00:00.000Z"
+  }
+}
+```
+
+Error examples:
+- `400`
+```json
+{ "error": "sessionId is required" }
+```
 
 ---
 
@@ -1115,6 +1549,112 @@ Error examples:
 
 ---
 
+## AI APIs
+
+### POST /ai/project-generation
+Generates a single structured AI project response aligned to resume skills, JD, and role type.
+
+Headers:
+- `Authorization: Bearer <clerk_jwt>`
+
+Auth:
+- Required (`requireAuth`)
+
+Request body (`application/json`):
+```json
+{
+  "resume_id": "resume-uuid",
+  "role_type": "Full Stack Developer",
+  "jd_text": "optional JD paste",
+  "experience_level": "mid",
+  "resume_skills": ["React", "Node.js", "PostgreSQL"],
+  "session_key": "optional-client-session-key"
+}
+```
+
+Notes:
+- At least 2 known skills must be available (from `resume_skills` and/or resume `parsedData`/`metadataIndex`).
+- Max 5 generations per session window (rolling 60 minutes) for the same user/session key.
+- Consumes 4 credits and writes usage entry to `CreditUsage`.
+- When `resume_id` is provided, generated output is also appended to `Resume.parsedData.projects[]`.
+
+Success `200`:
+```json
+{
+  "success": true,
+  "data": {
+    "project_title": "Real-Time Order Tracking Dashboard",
+    "narrative": "Built a full-stack order tracking system...",
+    "star_story": {
+      "situation": "E-commerce team lacked shipment visibility",
+      "task": "Design and ship tracking dashboard",
+      "action": "Implemented React UI + Express API + PostgreSQL",
+      "result": "Reduced support tickets by 35%"
+    },
+    "architecture": {
+      "frontend": "React, Tailwind CSS",
+      "backend": "Node.js, Express",
+      "database": "PostgreSQL",
+      "infrastructure": "Docker, Vercel"
+    },
+    "ascii_diagram": "[React UI] -> [Express API] -> [PostgreSQL]",
+    "thirty_sec_summary": "Built a real-time order dashboard...",
+    "memory_hooks": ["REST for simplicity", "Redis as speed layer"],
+    "credibility_score": 82,
+    "credibility_warning": false,
+    "scope_limited": false,
+    "credits_consumed": 4
+  }
+}
+```
+
+Error examples:
+- `400`
+```json
+{ "error": "At least 2 skills are required to generate a project" }
+```
+- `401`
+```json
+{ "error": "Unauthorized: Authentication required" }
+```
+- `402`
+```json
+{ "error": "INSUFFICIENT_CREDITS" }
+```
+- `429`
+```json
+{ "error": "Rate limit exceeded: max 5 generations per session window" }
+```
+- `503`
+```json
+{ "error": "AI model temporarily unavailable" }
+```
+
+### GET /project-categories?role_type=fullstack
+Returns predefined project categories by role type.
+
+Auth:
+- Public
+
+Success `200`:
+```json
+{
+  "success": true,
+  "data": {
+    "role_type": "fullstack",
+    "categories": ["Web App", "API Service", "DevOps/Infrastructure"]
+  }
+}
+```
+
+Error examples:
+- `500`
+```json
+{ "error": "Internal Server Error" }
+```
+
+---
+
 ## Projects APIs
 
 ### POST /projects/generate
@@ -1206,6 +1746,10 @@ Recommended client flow:
 
 | Version | Date | Summary |
 |---|---|---|
+| v1.7.0 | 2026-05-04 | Added 4 previously undocumented endpoints: `POST /auth/tauri-ticket` (Tauri desktop sign-in token), `GET /session/:id/events` (SSE real-time stream), `POST /session-notes/:sessionId/generate` (AI session notes generation), `GET /session-notes/:sessionId` (retrieve notes). Added **Session Notes APIs** section. |
+| v1.6.0 | 2026-05-05 | Updated `POST /resume/ats-score` response to include `grade` (letter grade A+–F) and `sectionScores` (per-section numeric scores). Updated `POST /resume/generate-cover-letter` response to include `wordCount`; request now accepts optional `userName` and `userEmail`. Updated `POST /resume/create-template` to require `name` field; `GET /resume/all-templates` now returns `name`. Three default templates (Classic, Modern, Minimal) seeded via `pnpm seed:templates`. |
+| v1.5.0 | 2026-05-04 | Added 8 Resume Builder endpoints: `POST /resume/builder/save`, `GET /resume/builder/list`, `GET /resume/builder/:id`, `DELETE /resume/builder/:id`, `POST /resume/builder/generate` (1cr), `POST /resume/builder/enhance-section` (0.5cr), `POST /resume/builder/tailor` (1cr), `POST /resume/builder/export-pdf`. Added `BuiltResume` Prisma model and migration. |
+| v1.4.0 | 2026-05-04 | Added AI project generation API (`POST /ai/project-generation`) with auth, credit deduction + usage logging, scope/credibility guards, plus categories API (`GET /project-categories`). |
 | v1.2.0 | 2026-04-28 | Added interview-session credit pack APIs and Razorpay purchase order + verification flow. |
 | v1.1.0 | 2026-04-28 | Added complete endpoint coverage and standardized request/response and error examples across all mounted APIs. |
 

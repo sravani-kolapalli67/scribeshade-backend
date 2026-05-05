@@ -3,6 +3,7 @@ import path from "path";
 import fs from "fs";
 import { UPLOAD_DIR, ALLOWED_EXTENSIONS } from "../resume/resume.service";
 import { Router } from "express";
+import { requireAuth } from "../auth/auth.middleware";
 import * as projectsController from "./projects.controller";
 
 if (!fs.existsSync(UPLOAD_DIR)) {
@@ -40,6 +41,7 @@ const projectsRouter = Router();
  */
 projectsRouter.post(
   "/generate",
+  requireAuth,
   upload.single("resume"),
   projectsController.generateProjects,
 );
@@ -55,5 +57,42 @@ projectsRouter.get("/user/:userId", projectsController.listProjectsByUser);
  * Returns a single project record by its database ID.
  */
 projectsRouter.get("/:id", projectsController.getProject);
+
+/**
+ * DELETE /api/projects/:id
+ * Permanently deletes a project record.
+ */
+projectsRouter.delete("/:id", projectsController.deleteProject);
+
+/**
+ * PATCH /api/projects/:id
+ * Updates mutable fields (position label).
+ */
+projectsRouter.patch("/:id", projectsController.updateProject);
+
+/**
+ * PUT /api/projects/:id/projects
+ * Replaces the projects JSON, saving the old content as a versioned snapshot.
+ * Used by the regen flow so history is never lost.
+ */
+projectsRouter.put("/:id/projects", requireAuth, projectsController.replaceProjects);
+
+/**
+ * GET /api/projects/:id/versions
+ * Lists all version snapshots for a project (newest first).
+ */
+projectsRouter.get("/:id/versions", requireAuth, projectsController.listProjectVersions);
+
+/**
+ * POST /api/projects/:id/versions/:versionId/rollback
+ * Rolls the project back to a specific version snapshot.
+ */
+projectsRouter.post("/:id/versions/:versionId/rollback", requireAuth, projectsController.rollbackProject);
+
+/**
+ * POST /api/projects/:id/edit-component
+ * Regenerates a single project section (1 credit).
+ */
+projectsRouter.post("/:id/edit-component", projectsController.editProjectComponent);
 
 export { projectsRouter };

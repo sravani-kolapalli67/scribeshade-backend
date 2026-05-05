@@ -88,6 +88,8 @@ model User {
   questions QA[]
 
   projects  Project[]
+  creditUsages CreditUsage[]
+  builtResumes BuiltResume[]
   // Credit system relations
   creditBalance UserCreditBalance?
   ledgerEntries CreditLedger[]
@@ -106,6 +108,8 @@ model Resume {
   user   User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   ats        Boolean      @default(false)
+  parsedData Json?
+  metadataIndex Json?
   atsAnalysis ATSAnalysis?
 }
 
@@ -134,8 +138,29 @@ model ATSAnalysis {
   resume   Resume  @relation(fields: [resumeId], references: [id], onDelete: Cascade)
 }
 
+model BuiltResume {
+  id             String   @id @default(uuid())
+  userId         String
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title          String
+  templateId     String
+  fields         Json
+  sections       Json
+  jobDescription String?  @db.Text
+  jobTitle       String?
+  company        String?
+  /// "draft" until saved-clean + downloaded; then "completed"
+  status         String   @default("draft")
+  downloadedAt   DateTime?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([userId])
+}
+
 model ResumeTemplate {
   id        String   @id @default(uuid())
+  name      String
   category  String
   thumbnail String
   code      String   @db.Text
@@ -242,18 +267,38 @@ model QA {
 model Project {
   id              String   @id @default(uuid())
   position        String
+  industry        String?
+  experienceLevel String?
   jobDescription  String   @db.Text
   resumeId        String?
   
-  projects        Json     // Stores the array of generated projects
+  projects        Json     // Stores the array of generated projects (current version)
   
   userId          String
   user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  versions        ProjectVersion[]
 
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
   @@index([userId])
+}
+
+// Immutable snapshot of a Project's `projects` JSON before each regeneration.
+// Version 1 = original, version 2 = after first regen, etc.
+model ProjectVersion {
+  id          String   @id @default(uuid())
+  projectId   String
+  project     Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  versionNumber Int              // 1-based; auto-incremented per projectId
+  projects      Json             // Snapshot of projects array at this point in time
+  label         String?          // Optional human-readable label, e.g. "Before regen 2026-05-05"
+
+  createdAt   DateTime @default(now())
+
+  @@index([projectId])
+  @@unique([projectId, versionNumber])
 }
 
 model SessionFeedback {
@@ -315,6 +360,18 @@ model CreditConfig {
   updatedAt        DateTime @updatedAt
 }
 
+/// Configurable credit cost per product feature.
+/// Update rows here to change pricing without a code deploy.
+model FeatureCost {
+  id         String   @id @default(uuid())
+  featureKey String   @unique  // e.g. "project_generate", "project_edit_component"
+  credits    Decimal  @db.Decimal(10, 2)
+  label      String   // Human-readable description shown in ledger
+  isActive   Boolean  @default(true)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+}
+
 model UserCreditBalance {
   userId           String   @id
   user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -356,6 +413,26 @@ model CreditPurchase {
   confirmedAt            DateTime?
 
   @@index([userId])
+}
+
+model CreditUsage {
+  id          String   @id @default(uuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  resumeId    String?
+  operation   String
+  creditsUsed Decimal  @db.Decimal(10, 2)
+  aiModel     String?
+  aiCostUsd   Decimal? @db.Decimal(10, 4)
+  inputTokens Int?
+  outputTokens Int?
+  cached      Boolean  @default(false)
+  metadata    Json?
+  createdAt   DateTime @default(now())
+
+  @@index([userId])
+  @@index([resumeId])
+  @@index([operation])
 }
 
 model Policy {
