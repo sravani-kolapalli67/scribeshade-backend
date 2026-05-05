@@ -26,6 +26,7 @@ import {
   exportPdfHandler,
   extractFieldsHandler,
   markBuiltResumeCompleteHandler,
+  validateSectionHandler,
 } from "./resume.builder.controller";
 import { requireAuth } from "../auth/auth.middleware";
 
@@ -89,6 +90,7 @@ router.delete("/builder/:id", requireAuth, deleteBuiltResumeHandler);
 // ── Builder (AI) ──────────────────────────────────────────────────────────────
 router.post("/builder/generate", requireAuth, generateResumeHtmlHandler);
 router.post("/builder/enhance-section", requireAuth, enhanceSectionHandler);
+router.post("/builder/validate-section", requireAuth, validateSectionHandler);
 router.post("/builder/tailor", requireAuth, tailorResumeHandler);
 router.post("/builder/export-pdf", requireAuth, exportPdfHandler);
 router.post("/builder/extract-fields", requireAuth, extractFieldsHandler);

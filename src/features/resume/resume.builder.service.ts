@@ -14,6 +14,8 @@ import type {
   ExtractFieldsInput,
   MarkBuiltResumeCompleteInput,
   ResumeFields,
+  ValidateSectionInput,
+  SectionValidationResult,
 } from "./resume.types";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -165,9 +167,10 @@ export async function saveBuiltResume(input: SaveBuiltResumeInput) {
 
 /**
  * Returns all built resumes for a user, ordered newest first (list view — no fields/sections).
+ * Also resolves the human-readable template name from ResumeTemplate.
  */
 export async function listBuiltResumes(userId: string) {
-  return prisma.builtResume.findMany({
+  const resumes = await prisma.builtResume.findMany({
     where: { userId },
     select: {
       id: true,
@@ -175,22 +178,53 @@ export async function listBuiltResumes(userId: string) {
       templateId: true,
       jobTitle: true,
       company: true,
+      status: true,
       createdAt: true,
       updatedAt: true,
     },
     orderBy: { updatedAt: "desc" },
   });
+
+  // Resolve template names in a single query to avoid N+1
+  const templateIds = [...new Set(resumes.map((r) => r.templateId).filter(Boolean))];
+  const templates   = await prisma.resumeTemplate.findMany({
+    where: { id: { in: templateIds } },
+    select: { id: true, name: true },
+  });
+  const templateMap = new Map(templates.map((t) => [t.id, t.name]));
+
+  return resumes.map((r) => ({
+    ...r,
+    templateName: templateMap.get(r.templateId) ?? r.templateId ?? null,
+  }));
 }
 
 /**
  * Returns a single built resume including all fields (used when re-opening the editor).
+ * Also resolves templateCode from ResumeTemplate so the editor has the HTML immediately.
  */
 export async function getBuiltResume(id: string) {
   const resume = await prisma.builtResume.findUnique({ where: { id } });
   if (!resume) {
     throw new AppError(404, "Resume not found");
   }
-  return resume;
+
+  // Resolve template HTML — templateId is either a UUID (from DB) or a slug
+  // like "classic" / "modern" / "minimal" (from the hardcoded fallback).
+  let templateCode: string | null = null;
+  if (resume.templateId) {
+    const byId = await prisma.resumeTemplate.findUnique({ where: { id: resume.templateId } });
+    if (byId) {
+      templateCode = byId.code;
+    } else {
+      // Slug match: "classic" → name "Classic"
+      const slug = resume.templateId.charAt(0).toUpperCase() + resume.templateId.slice(1).toLowerCase();
+      const byName = await prisma.resumeTemplate.findFirst({ where: { name: slug } });
+      if (byName) templateCode = byName.code;
+    }
+  }
+
+  return { ...resume, templateCode };
 }
 
 /**
@@ -340,6 +374,122 @@ Instructions:
     enhancedText,
     creditsUsed: COST_ENHANCE.toNumber(),
     creditsRemaining,
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AI — Validate Section Quality (free, no credits)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * AI-evaluates a single resume section and returns a quality score (0–100),
+ * specific issues, actionable suggestions, and dynamically-determined
+ * min/max word/bullet constraints appropriate for the candidate's seniority
+ * and target role.  No credits are consumed.
+ */
+export async function validateSection(
+  input: ValidateSectionInput,
+): Promise<SectionValidationResult> {
+  const { sectionId, currentText, jobTitle, company, resumeContext } = input;
+
+  if (!(VALID_SECTION_IDS as readonly string[]).includes(sectionId)) {
+    throw new AppError(400, "Invalid sectionId");
+  }
+
+  const wordCount = currentText.trim() === ""
+    ? 0
+    : currentText.trim().split(/\s+/).filter(Boolean).length;
+
+  const prompt = `
+You are an expert resume quality evaluator. Analyse this resume section and return a strict JSON object — no markdown, no extra text.
+
+Section: ${sectionId}
+${resumeContext ? `Candidate context: ${resumeContext}` : ""}
+${jobTitle ? `Target role: ${jobTitle}${company ? ` at ${company}` : ""}` : ""}
+
+Current content (${wordCount} words):
+${currentText.substring(0, 2000)}
+
+Return ONLY valid JSON matching this exact schema:
+{
+  "score": <integer 0–100>,
+  "status": <"excellent" | "good" | "needs_improvement" | "poor">,
+  "issues": [<up to 4 short strings, max 90 chars each — concrete problems found>],
+  "suggestions": [<up to 3 short actionable strings, max 110 chars each>],
+  "constraints": {
+    "minWords": <integer — ideal minimum word count for this section given the candidate's seniority/role>,
+    "maxWords": <integer — ideal maximum word count>,
+    "minBullets": <integer or null — minimum bullet points if bullets apply, else null>,
+    "maxBullets": <integer or null — maximum bullet points if bullets apply, else null>,
+    "reason": <one concise sentence explaining why these constraints fit this role/section>
+  }
+}
+
+Scoring rubric:
+90–100 Excellent  — quantified, action-verb-led, ATS-optimised, perfect length for the role
+70–89  Good       — solid but minor improvements possible
+40–69  Needs work — missing quantification, too brief/long, weak verbs, or generic phrasing
+0–39   Poor       — very thin, placeholder-like, or completely wrong content for the section
+`.trim();
+
+  const response = await ai.chat.send({
+    chatRequest: {
+      model: OPENROUTER_MODEL,
+      messages: [{ role: "user", content: prompt }],
+    },
+  });
+
+  const raw = response.choices[0]?.message?.content?.trim() ?? "{}";
+  const parsed = parseJsonResponse<Record<string, unknown>>(raw);
+
+  // Sensible fallback defaults so the UI always has something to render
+  const DEFAULTS: SectionValidationResult = {
+    score: 50,
+    status: "needs_improvement",
+    issues: [],
+    suggestions: [],
+    constraints: {
+      minWords: 30,
+      maxWords: 300,
+      minBullets: null,
+      maxBullets: null,
+      reason: "Standard resume section length guidelines.",
+    },
+    wordCount,
+  };
+
+  if (!parsed) return DEFAULTS;
+
+  const rawConstraints = (parsed.constraints as Record<string, unknown>) ?? {};
+
+  const score = Math.min(100, Math.max(0, Number(parsed.score) || 50));
+  const statusOptions = ["excellent", "good", "needs_improvement", "poor"] as const;
+  const status = statusOptions.includes(parsed.status as typeof statusOptions[number])
+    ? (parsed.status as typeof statusOptions[number])
+    : score >= 90 ? "excellent"
+    : score >= 70 ? "good"
+    : score >= 40 ? "needs_improvement"
+    : "poor";
+
+  return {
+    score,
+    status,
+    issues: Array.isArray(parsed.issues)
+      ? (parsed.issues as string[]).slice(0, 4)
+      : [],
+    suggestions: Array.isArray(parsed.suggestions)
+      ? (parsed.suggestions as string[]).slice(0, 3)
+      : [],
+    constraints: {
+      minWords: Number(rawConstraints.minWords) || DEFAULTS.constraints.minWords,
+      maxWords: Number(rawConstraints.maxWords) || DEFAULTS.constraints.maxWords,
+      minBullets: rawConstraints.minBullets != null ? Number(rawConstraints.minBullets) : null,
+      maxBullets: rawConstraints.maxBullets != null ? Number(rawConstraints.maxBullets) : null,
+      reason: typeof rawConstraints.reason === "string"
+        ? rawConstraints.reason
+        : DEFAULTS.constraints.reason,
+    },
+    wordCount,
   };
 }
 

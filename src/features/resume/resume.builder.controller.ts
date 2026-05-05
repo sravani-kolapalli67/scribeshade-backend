@@ -12,6 +12,7 @@ import {
   exportResumeHtml,
   extractFields,
   markBuiltResumeComplete,
+  validateSection,
 } from "./resume.builder.service";
 import type {
   SaveBuiltResumeInput,
@@ -21,6 +22,7 @@ import type {
   ExportPdfInput,
   ExtractFieldsInput,
   MarkBuiltResumeCompleteInput,
+  ValidateSectionInput,
 } from "./resume.types";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -84,7 +86,7 @@ export async function listBuiltResumesHandler(
     }
 
     const resumes = await listBuiltResumes(userId);
-    res.json(resumes);
+    res.json({ resumes });
   } catch (err) {
     next(err);
   }
@@ -292,6 +294,39 @@ export async function markBuiltResumeCompleteHandler(
 
     const result = await markBuiltResumeComplete({ resumeId: String(id), userId });
     res.json({ success: true, data: result });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * POST /resume/builder/validate-section
+ * AI-evaluates a single resume section quality. Free — no credits consumed.
+ * Returns score (0–100), status, issues, suggestions, and dynamic min/max constraints.
+ */
+export async function validateSectionHandler(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const { sectionId, currentText, jobTitle, company, resumeContext } =
+      req.body as Partial<ValidateSectionInput>;
+
+    if (!sectionId || typeof currentText !== "string") {
+      res.status(400).json({ error: "sectionId and currentText are required" });
+      return;
+    }
+
+    const result = await validateSection({
+      sectionId,
+      currentText,
+      jobTitle,
+      company,
+      resumeContext,
+    });
+
+    res.json(result);
   } catch (err) {
     next(err);
   }

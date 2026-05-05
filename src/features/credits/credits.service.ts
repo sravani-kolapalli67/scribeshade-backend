@@ -108,14 +108,19 @@ function toPlanDTO(
   };
 }
 
-function getRazorpayClient(): Razorpay {
-  if (!env.RAZORPAY_KEY_ID || !env.RAZORPAY_KEY_SECRET) {
+function getRazorpayKeys(): { keyId: string; keySecret: string } {
+  const isProd = env.NODE_ENV === "production";
+  const keyId     = isProd ? env.RAZORPAY_KEY_ID_PROD     : env.RAZORPAY_KEY_ID;
+  const keySecret = isProd ? env.RAZORPAY_KEY_SECRET_PROD : env.RAZORPAY_KEY_SECRET;
+  if (!keyId || !keySecret) {
     throw new AppError(500, "Razorpay is not configured");
   }
-  return new Razorpay({
-    key_id: env.RAZORPAY_KEY_ID,
-    key_secret: env.RAZORPAY_KEY_SECRET,
-  });
+  return { keyId, keySecret };
+}
+
+function getRazorpayClient(): Razorpay {
+  const { keyId, keySecret } = getRazorpayKeys();
+  return new Razorpay({ key_id: keyId, key_secret: keySecret });
 }
 
 function assertValidRazorpaySignature(
@@ -123,12 +128,10 @@ function assertValidRazorpaySignature(
   paymentId: string,
   signature: string,
 ): void {
-  if (!env.RAZORPAY_KEY_SECRET) {
-    throw new AppError(500, "Razorpay is not configured");
-  }
+  const { keySecret } = getRazorpayKeys();
 
   const expected = crypto
-    .createHmac("sha256", env.RAZORPAY_KEY_SECRET)
+    .createHmac("sha256", keySecret)
     .update(`${orderId}|${paymentId}`)
     .digest("hex");
 
@@ -186,7 +189,7 @@ export async function createPurchaseOrder(
 
   return {
     orderId: order.id,
-    keyId: env.RAZORPAY_KEY_ID!,
+    keyId: getRazorpayKeys().keyId,
     amountMinor: plan.amountMinor,
     amountMajor: plan.amountMajor,
     currency: plan.currency,

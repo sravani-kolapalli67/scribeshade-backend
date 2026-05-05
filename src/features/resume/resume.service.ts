@@ -174,7 +174,7 @@ export async function getResumesByUser(userId: string) {
   // so the frontend list renders them identically.
   const normalizedBuilt = built.map((br) => ({
     id:            br.id,
-    filename:      `${br.title}.html`,
+    filename:      `${br.title}.pdf`,
     path:          "",
     size:          null,
     resumeContext: null,

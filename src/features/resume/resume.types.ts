@@ -115,3 +115,33 @@ export interface ExportPdfInput {
   resumeId?: string;
   populatedHtml?: string;
 }
+
+// ─── Section Validation Types ─────────────────────────────────────────────────
+
+export interface ValidateSectionInput {
+  sectionId: string;
+  currentText: string;
+  jobTitle?: string;
+  company?: string;
+  /** Short context snippet: candidate name + role */
+  resumeContext?: string;
+}
+
+export interface SectionConstraints {
+  minWords: number;
+  maxWords: number;
+  /** null when bullets aren't applicable (e.g. summary) */
+  minBullets: number | null;
+  maxBullets: number | null;
+  /** One-sentence explanation from the AI */
+  reason: string;
+}
+
+export interface SectionValidationResult {
+  score: number; // 0–100
+  status: "excellent" | "good" | "needs_improvement" | "poor";
+  issues: string[];
+  suggestions: string[];
+  constraints: SectionConstraints;
+  wordCount: number;
+}

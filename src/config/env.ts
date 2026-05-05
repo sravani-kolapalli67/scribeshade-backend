@@ -11,6 +11,8 @@ const envSchema = z.object({
   CORS_ORIGINS: z.string().default("http://localhost:3000,http://localhost:1420").transform((val) => val.split(",").map((url) => url.trim())),
   RAZORPAY_KEY_ID: z.string().optional(),
   RAZORPAY_KEY_SECRET: z.string().optional(),
+  RAZORPAY_KEY_ID_PROD: z.string().optional(),
+  RAZORPAY_KEY_SECRET_PROD: z.string().optional(),
 });
 
 const _env = envSchema.safeParse(process.env);
