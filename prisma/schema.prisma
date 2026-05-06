@@ -217,6 +217,9 @@ model Session {
 
   aiUsage Int @default(0)
 
+  // ── optional AI-project context IDs selected at session creation ───────────
+  projectIds Json @default("[]")
+
   messages   Json @default("[]")
   transcript Json @default("[]")
 

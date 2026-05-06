@@ -9,7 +9,7 @@ import path from "path";
 import { AppError } from "../../shared/middleware/error.middleware";
 import * as creditsService from "../credits/credits.service";
 import { creditDeductionQueue } from "../jobs/queue";
-import { buildSystemMessage } from "../../shared/lib/prompt";
+import { buildSystemMessage, buildUserMessage, buildScreenAnalysisMessage } from "../../shared/lib/prompt";
 import {
   ANALYTICS_SYSTEM_PROMPT,
   buildAnalyticsUserPrompt,
@@ -163,6 +163,7 @@ export async function createSession(data: CreateSessionData) {
       mode: data.mode,
       free: data.free,
       status: SessionStatus.PRE_CHECK,
+      projectIds: data.projectIds && data.projectIds.length > 0 ? data.projectIds : [],
     },
   });
 }
@@ -397,13 +398,18 @@ export async function getSessionFullContext(sessionId: string) {
   if (!session) return null;
 
   // Fetch resume + document records in parallel, then extract document text.
-  const [resumeRecord, docRecord] = await Promise.all([
+  const projectIds = Array.isArray(session.projectIds) ? (session.projectIds as string[]) : [];
+
+  const [resumeRecord, docRecord, projectRecords] = await Promise.all([
     session.resumeId
       ? prisma.resume.findUnique({ where: { id: session.resumeId } }).catch((e) => { console.warn("Failed to fetch resume:", e); return null; })
       : Promise.resolve(null),
     session.DocumentId
       ? prisma.document.findUnique({ where: { id: session.DocumentId } }).catch((e) => { console.warn("Failed to fetch document:", e); return null; })
       : Promise.resolve(null),
+    projectIds.length > 0
+      ? prisma.project.findMany({ where: { id: { in: projectIds } } }).catch((e) => { console.warn("Failed to fetch projects:", e); return []; })
+      : Promise.resolve([]),
   ]);
 
   const resumeContext = resumeRecord?.resumeContext || "";
@@ -416,6 +422,123 @@ export async function getSessionFullContext(sessionId: string) {
     } catch (e) {
       console.warn("Failed to extract document text:", e);
     }
+  }
+
+  // Serialize selected AI projects into a rich, readable context string.
+  let projectsText = "";
+  if (projectRecords.length > 0) {
+    projectsText = projectRecords
+      .map((pr) => {
+        const items = Array.isArray(pr.projects) ? (pr.projects as any[]) : [];
+        return items
+          .map((p: any, idx: number) => {
+            const header = p.projectHeader || {};
+            const lines: string[] = [
+              `━━━ PROJECT ${idx + 1}: ${header.title || "Untitled"} ━━━`,
+              header.tagline ? `Tagline: ${header.tagline}` : "",
+              header.domain ? `Domain: ${header.domain}` : "",
+              header.role ? `Your Role: ${header.role}` : "",
+              header.duration ? `Duration: ${header.duration}` : "",
+              header.teamSize ? `Team: ${header.teamSize}` : "",
+            ].filter(Boolean);
+
+            const sections: any[] = Array.isArray(p.sections) ? p.sections : [];
+            for (const sec of sections) {
+              if (!sec?.type || !sec?.content) continue;
+              const sectionTitle = `\n[${sec.title || sec.key}]`;
+
+              switch (sec.type) {
+                case "bullets":
+                  if (Array.isArray(sec.content) && sec.content.length) {
+                    lines.push(sectionTitle);
+                    lines.push(...(sec.content as string[]).map((b) => `  • ${b}`));
+                  }
+                  break;
+
+                case "narrative":
+                  if (typeof sec.content === "string" && sec.content.trim()) {
+                    lines.push(sectionTitle);
+                    lines.push(`  ${sec.content.trim()}`);
+                  }
+                  break;
+
+                case "how_to_explain": {
+                  const h = sec.content as any;
+                  lines.push(sectionTitle);
+                  if (h?.elevatorPitch) lines.push(`  Elevator Pitch: ${h.elevatorPitch}`);
+                  if (h?.detailedExplanation) lines.push(`  Detailed: ${h.detailedExplanation}`);
+                  break;
+                }
+
+                case "thirty_second_summary": {
+                  const t = sec.content as any;
+                  lines.push(sectionTitle);
+                  if (t?.hook) lines.push(`  Hook: ${t.hook}`);
+                  if (Array.isArray(t?.mainPoints)) lines.push(...(t.mainPoints as string[]).map((pt: string) => `  • ${pt}`));
+                  if (t?.closingLine) lines.push(`  Closing: ${t.closingLine}`);
+                  break;
+                }
+
+                case "star_story": {
+                  const s = sec.content as any;
+                  lines.push(sectionTitle);
+                  if (s?.situation) lines.push(`  Situation: ${s.situation}`);
+                  if (s?.task) lines.push(`  Task: ${s.task}`);
+                  if (s?.action) lines.push(`  Action: ${s.action}`);
+                  if (s?.result) lines.push(`  Result: ${s.result}`);
+                  break;
+                }
+
+                case "metrics":
+                  if (Array.isArray(sec.content) && sec.content.length) {
+                    lines.push(sectionTitle);
+                    lines.push(...(sec.content as any[]).map((m) =>
+                      `  • ${m.metric}: ${m.value}${m.description ? ` — ${m.description}` : ""}${m.before ? ` (before: ${m.before}, after: ${m.after || m.value})` : ""}`,
+                    ));
+                  }
+                  break;
+
+                case "tech_tags":
+                  if (Array.isArray(sec.content) && sec.content.length) {
+                    lines.push(sectionTitle);
+                    lines.push(...(sec.content as any[]).map((cat) =>
+                      `  ${cat.category}: ${(cat.tags || []).join(", ")}`,
+                    ));
+                  }
+                  break;
+
+                case "challenge_cards":
+                  if (Array.isArray(sec.content) && sec.content.length) {
+                    lines.push(sectionTitle);
+                    lines.push(...(sec.content as any[]).map((c) =>
+                      `  • Challenge: ${c.challenge} → Solution: ${c.solution}`,
+                    ));
+                  }
+                  break;
+
+                case "key_value_pairs":
+                  if (Array.isArray(sec.content) && sec.content.length) {
+                    lines.push(sectionTitle);
+                    lines.push(...(sec.content as any[]).map((kv) => `  ${kv.key}: ${kv.value}`));
+                  }
+                  break;
+
+                case "steps":
+                  if (Array.isArray(sec.content) && sec.content.length) {
+                    lines.push(sectionTitle);
+                    lines.push(...(sec.content as any[]).map((s, i) => `  ${i + 1}. ${s.step}: ${s.description}`));
+                  }
+                  break;
+
+                default:
+                  break;
+              }
+            }
+            return lines.join("\n");
+          })
+          .join("\n\n");
+      })
+      .join("\n\n════════════════════════════════════════\n\n");
   }
 
   // 3. Fetch recent message history for conversation context
@@ -435,6 +558,7 @@ export async function getSessionFullContext(sessionId: string) {
     instructions: session.extraContext || "None",
     resume: resumeContext || "No resume context provided.",
     document: documentText ? documentText.substring(0, 5000) : "None",
+    projects: projectsText || null,
     history: recentHistory || "No previous interactions in this session.",
   };
 }
@@ -564,7 +688,7 @@ export async function analyzeScreen(
           content: [
             {
               type: "input_text",
-              text: `Task: Identify the interview question visible on the screen and provide a tailored answer. If the question is technical or asks for logic/coding, ALWAYS include a full code implementation in ${context?.language}.`,
+              text: buildScreenAnalysisMessage(context),
             },
             {
               type: "input_image",
@@ -624,9 +748,7 @@ export async function getAIAnswer(
         {
           role: "user",
           type: "message",
-          content: isCustomQuery
-            ? `Task: Answer the user's specific question directly. If the question involves logic or coding, ALWAYS provide a code implementation in ${context?.language}.\n\nQuestion:\n${transcript}`
-            : `Task: Identify the MOST RECENT technical or behavioral question in the transcript and provide an answer. For technical/coding questions, ALWAYS provide a code implementation in ${context?.language}.\n\nTranscript:\n${transcript}`,
+          content: buildUserMessage(transcript, isCustomQuery, context),
         },
       ],
     });

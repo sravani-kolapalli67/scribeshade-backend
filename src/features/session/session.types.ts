@@ -40,4 +40,6 @@ export interface CreateSessionData {
   saveTranscription: boolean;
   mode: string;
   free: boolean;
+  /** IDs of AI-generated Project records to include as context */
+  projectIds?: string[];
 }

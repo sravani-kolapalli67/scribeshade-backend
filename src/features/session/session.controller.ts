@@ -11,6 +11,16 @@ export async function createSession(req: Request, res: Response) {
     const body = req.body || {};
 
     // Map fields from the request body (handles FormData string-to-boolean conversion as well as raw JSON)
+    // Parse projectIds — may arrive as a JSON string (FormData) or array (JSON body)
+    let projectIds: string[] = [];
+    if (body.projectIds) {
+      if (Array.isArray(body.projectIds)) {
+        projectIds = body.projectIds;
+      } else if (typeof body.projectIds === "string") {
+        try { projectIds = JSON.parse(body.projectIds); } catch { /* ignore */ }
+      }
+    }
+
     const data = {
       userId: body.userId,
       companyName: body.companyName || body.company,
@@ -23,7 +33,8 @@ export async function createSession(req: Request, res: Response) {
       saveTranscription: body.saveTranscript === "true" || body.saveTranscript === true,
       mode: body.jobInputMode || "manual",
       free: body.free === "true" || body.free === true,
-      DocumentId: body.DocumentId || body.documentId || "", 
+      DocumentId: body.DocumentId || body.documentId || "",
+      projectIds,
     };
 
     if (!data.userId) {
