@@ -396,32 +396,25 @@ export async function getSessionFullContext(sessionId: string) {
 
   if (!session) return null;
 
-  // 1. Fetch Resume context
-  let resumeContext = "";
-  if (session.resumeId) {
-    try {
-      const resume = await prisma.resume.findUnique({
-        where: { id: session.resumeId },
-      });
-      resumeContext = resume?.resumeContext || "";
-    } catch (e) {
-      console.warn("Failed to fetch resume context:", e);
-    }
-  }
+  // Fetch resume + document records in parallel, then extract document text.
+  const [resumeRecord, docRecord] = await Promise.all([
+    session.resumeId
+      ? prisma.resume.findUnique({ where: { id: session.resumeId } }).catch((e) => { console.warn("Failed to fetch resume:", e); return null; })
+      : Promise.resolve(null),
+    session.DocumentId
+      ? prisma.document.findUnique({ where: { id: session.DocumentId } }).catch((e) => { console.warn("Failed to fetch document:", e); return null; })
+      : Promise.resolve(null),
+  ]);
 
-  // 2. Fetch Document context
+  const resumeContext = resumeRecord?.resumeContext || "";
+
   let documentText = "";
-  if (session.DocumentId) {
+  if (docRecord) {
     try {
-      const doc = await prisma.document.findUnique({
-        where: { id: session.DocumentId },
-      });
-      if (doc) {
-        const ext = path.extname(doc.path).toLowerCase();
-        documentText = await documentService.extractTextFromFile(doc.path, ext);
-      }
+      const ext = path.extname(docRecord.path).toLowerCase();
+      documentText = await documentService.extractTextFromFile(docRecord.path, ext);
     } catch (e) {
-      console.warn("Failed to fetch document context:", e);
+      console.warn("Failed to extract document text:", e);
     }
   }
 
@@ -532,27 +525,28 @@ export async function analyzeScreen(
   file: Express.Multer.File,
   aiModel?: string,
 ) {
-  // Parallelize image compression and DB fetch for lower latency
-  const [compressed, session] = await Promise.all([
-    sharp(file.buffer)
-      .resize({ width: 800 })
-      .jpeg({ quality: 60 })
-      .toBuffer()
-      .catch((err) => {
-        console.error("Sharp compression error:", err);
-        throw err;
-      }),
-    prisma.session.findUnique({
-      where: { id },
-      include: { company: true },
-    }),
+  // Skip recompression if the frontend already sent a pre-compressed JPEG (<= 600 KB).
+  // Otherwise apply sharp to enforce a safe size cap for the LLM vision API.
+  const isPreCompressed = file.mimetype === "image/jpeg" && file.size <= 600 * 1024;
+  const compressPromise = isPreCompressed
+    ? Promise.resolve(file.buffer)
+    : sharp(file.buffer)
+        .resize({ width: 1024 })
+        .jpeg({ quality: 65 })
+        .toBuffer()
+        .catch((err) => { console.error("Sharp compression error:", err); throw err; });
+
+  // Run image compression, session fetch, and full context build in parallel.
+  // Previously context was fetched sequentially after compression, adding 200-400 ms.
+  const [compressed, session, context] = await Promise.all([
+    compressPromise,
+    prisma.session.findUnique({ where: { id }, include: { company: true } }),
+    getSessionFullContext(id),
   ]);
 
   if (!session) {
     throw new Error("Session not found");
   }
-
-  const context = await getSessionFullContext(id);
 
   try {
     const targetModel = resolveModelId(aiModel) || model;
