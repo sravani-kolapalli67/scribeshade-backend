@@ -75,6 +75,12 @@ router.post("/:id/ai-answer", sessionController.getAIAnswer);
 router.post("/:id/save-message", sessionController.saveMessage);
 
 /**
+ * @route GET /session/:id/analytics/existing
+ * @desc Return stored analytics only — no AI generation
+ */
+router.get("/:id/analytics/existing", sessionController.getExistingAnalytics);
+
+/**
  * @route GET /session/:id/analytics
  */
 router.get("/:id/analytics", sessionController.getSessionAnalytics);

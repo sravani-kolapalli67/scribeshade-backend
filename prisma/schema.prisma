@@ -42,11 +42,13 @@ enum SessionStatus {
   PRE_CHECK
   ACTIVE
   PAUSED
+  DISCONNECTED    // Client gone; reconnectable within 5-min window
   COMPLETING
   COMPLETED
   ABANDONED
   FORCE_ENDED
   CREDIT_EXHAUSTED
+  AUTO_ENDED      // Auto-terminated after 5-min disconnection; credits processed
 }
 
 enum LedgerType {
@@ -66,6 +68,8 @@ enum DeductionReason {
   BRACKET_OVERFLOW
   PER_MINUTE_DEDUCTION
   CAP_REACHED
+  ABANDONED
+  AUTO_ENDED
 }
 
 enum PurchaseStatus {
@@ -215,13 +219,15 @@ model Session {
   endedAt               DateTime?
   durationSeconds       Int?
   pausedDurationSeconds Int           @default(0)
+  lastHeartbeatAt       DateTime?     // Updated on every heartbeat ping; used by watchdog to detect stale sessions
+  disconnectedAt        DateTime?     // When the watchdog first detected the client was gone
 
   // ── credit fields ──────────────────────────────────────────────────────────
-  creditsHeld           Decimal       @db.Decimal(10, 2) @default(0)
+  creditsHeld           Decimal       @db.Decimal(10, 2) @default(0)  // Always 0 — hold system removed; kept for backward compat with existing rows
   creditsDeducted       Decimal?      @db.Decimal(10, 2)
   deductionReason       DeductionReason?
-  bracketConfigSnapshot Json?
-  maxAllowedMinutes     Int?
+  bracketConfigSnapshot Json?         // Snapshot of pricing config at activation time
+  maxAllowedMinutes     Int?          // Soft cap computed from balance at activation
   creditExhaustedAt     DateTime?
 
   aiUsage Int @default(0)

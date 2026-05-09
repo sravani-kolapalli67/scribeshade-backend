@@ -2,6 +2,7 @@ import { Request, Response } from "express";
 import * as sessionService from "./session.service";
 import { prisma } from "../../shared/lib/prisma";
 import { SessionStatus } from "@prisma/client";
+import { AppError } from "../../shared/middleware/error.middleware";
 
 /**
  * Handles the creation of a new session.
@@ -121,8 +122,9 @@ export async function deleteSession(req: Request, res: Response) {
     return res.json(session);
   } catch (error: any) {
     console.error("Delete Session Error:", error);
+    const status = error instanceof AppError ? error.statusCode : 500;
     return res
-      .status(500)
+      .status(status)
       .json({ error: error.message || "Internal server error" });
   }
 }
@@ -182,6 +184,7 @@ export async function deactivateSession(req: Request, res: Response) {
  * POST /api/session/:id/heartbeat
  * Body: { elapsedMinutes: number }
  * Frontend calls this every 60 s while session is ACTIVE to enforce maxAllowedMinutes.
+ * Also stamps lastHeartbeatAt so the watchdog can detect stale/abandoned sessions.
  */
 export async function sessionHeartbeat(req: Request, res: Response) {
   try {
@@ -191,6 +194,12 @@ export async function sessionHeartbeat(req: Request, res: Response) {
     if (!session || session.status !== SessionStatus.ACTIVE) {
       return res.json({ action: "NONE" });
     }
+
+    // Stamp the heartbeat timestamp so the watchdog knows this session is alive
+    await prisma.session.update({
+      where: { id },
+      data: { lastHeartbeatAt: new Date() },
+    });
 
     // 1. Calculate actual elapsed minutes on the backend to prevent frontend manipulation
     const now = new Date();
@@ -392,6 +401,18 @@ export async function saveMessage(req: Request, res: Response) {
 /**
  * Gets or generates analytics for a specific session.
  */
+export async function getExistingAnalytics(req: Request, res: Response) {
+  try {
+    const id = req.params.id as string;
+    const existing = await prisma.sessionFeedback.findUnique({ where: { sessionId: id } });
+    if (!existing) return res.status(404).json({ error: "No analytics found" });
+    return res.json(existing);
+  } catch (error: any) {
+    console.error("Get Existing Analytics Error:", error);
+    return res.status(500).json({ error: error.message || "Internal server error" });
+  }
+}
+
 export async function getSessionAnalytics(req: Request, res: Response) {
   try {
     const id = req.params.id as string;

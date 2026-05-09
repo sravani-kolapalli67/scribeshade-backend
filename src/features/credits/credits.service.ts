@@ -310,14 +310,14 @@ export async function getActiveBrackets() {
 // ─── maxAllowedMinutes computation ────────────────────────────────────────────
 
 /**
- * Given available credits, picks the highest bracket the user can afford.
- * Throws AppError(402) if the user cannot afford even the cheapest half-bracket.
+ * Given available credits, computes how many minutes the user can afford.
+ * Throws AppError(402) if the user cannot afford even 1 paid minute.
+ * Does NOT move any credits — purely a read + compute.
  */
 export async function computeMaxAllowedMinutes(
   availableCredits: Prisma.Decimal,
 ): Promise<{
   maxMinutes: number;
-  creditsToHold: Prisma.Decimal;
   snapshot: BracketSnapshot;
 }> {
   const brackets = await getActiveBrackets();
@@ -326,22 +326,19 @@ export async function computeMaxAllowedMinutes(
     throw new AppError(500, "No active credit brackets configured");
   }
 
-  // We use the first bracket for configuration defaults (like freeZoneMinutes)
   const chosen = brackets[0];
   const ratePerMin = 0.5;
   const freeMins = chosen.freeZoneMinutes;
 
-  // Calculate how many paid minutes they can afford: max = freeMins + (available / 0.5)
-  const affordablePaidMinutes = Math.floor(availableCredits.toNumber() / ratePerMin);
-  
-  if (affordablePaidMinutes < 1 && availableCredits.toNumber() < ratePerMin) {
-    throw new AppError(402, "INSUFFICIENT_CREDITS");
-  }
+  // With full-duration billing (past the free zone we charge from minute 0),
+  // the maximum session length a user can afford is:
+  //   availableCredits / ratePerMin  total minutes
+  // They always get the free zone — if they can't afford a single paid minute
+  // beyond the free zone they still get `freeMins` for free.
+  const affordableTotalMinutes = Math.floor(availableCredits.toNumber() / ratePerMin);
 
-  const maxMinutes = freeMins + affordablePaidMinutes;
-  
-  // Hold the entire available balance since we are in a linear model
-  const creditsToHold = availableCredits;
+  // If they can't even afford 1 full minute at rate, allow the free zone only.
+  const maxMinutes = Math.max(freeMins, affordableTotalMinutes);
 
   const snapshot: BracketSnapshot = {
     id: chosen.id,
@@ -352,70 +349,7 @@ export async function computeMaxAllowedMinutes(
     graceZoneMinutes: chosen.graceZoneMinutes,
   };
 
-  return {
-    maxMinutes,
-    creditsToHold,
-    snapshot,
-  };
-}
-
-// ─── Hold ─────────────────────────────────────────────────────────────────────
-
-/**
- * Places a soft credit lock at session activation.
- * Must be called inside the same Prisma $transaction as the session status update.
- */
-export async function placeHold(
-  userId: string,
-  tx: Prisma.TransactionClient,
-): Promise<HoldResult> {
-  const balance = await tx.userCreditBalance.findUnique({ where: { userId } });
-  if (!balance) throw new AppError(402, "INSUFFICIENT_CREDITS");
-
-  const available = d(balance.totalAvailable.toString());
-  const { maxMinutes, creditsToHold, snapshot } =
-    await computeMaxAllowedMinutes(available);
-
-  const newHeld = d(balance.heldCredits.toString()).add(creditsToHold);
-  const newAvailable = available.sub(creditsToHold);
-
-  await tx.userCreditBalance.update({
-    where: { userId },
-    data: {
-      heldCredits: newHeld,
-      totalAvailable: newAvailable,
-    },
-  });
-
-  return {
-    creditsHeld: creditsToHold.toString(),
-    maxAllowedMinutes: maxMinutes,
-    snapshot,
-  };
-}
-
-/**
- * Releases a previously placed hold (ABANDONED / PRE_CHECK cleanup).
- * Must be called inside a Prisma $transaction.
- */
-export async function releaseHold(
-  userId: string,
-  creditsHeld: Prisma.Decimal,
-  tx: Prisma.TransactionClient,
-): Promise<void> {
-  const balance = await tx.userCreditBalance.findUnique({ where: { userId } });
-  if (!balance) return; // nothing to release
-
-  const newHeld = d(balance.heldCredits.toString()).sub(creditsHeld);
-  const newAvailable = d(balance.totalAvailable.toString()).add(creditsHeld);
-
-  await tx.userCreditBalance.update({
-    where: { userId },
-    data: {
-      heldCredits: newHeld.lt(0) ? d(0) : newHeld,
-      totalAvailable: newAvailable,
-    },
-  });
+  return { maxMinutes, snapshot };
 }
 
 // ─── Deduction ────────────────────────────────────────────────────────────────
@@ -425,25 +359,19 @@ export async function releaseHold(
  *
  * Decision tree:
  *   activeDurationMinutes <= freeZone → FREE_ZONE  (deduct 0)
- *   isExhausted                        → EXHAUSTED  (deduct entire hold)
- *   elapsed >= bracket - graceZone     → FULL_BRACKET
- *   else                               → HALF_BRACKET
+ *   else                              → deduct for the FULL duration (0 → end)
+ *                                       at 0.5 credits/min
  */
 export async function deductCredits(
   userId: string,
   sessionId: string,
   activeDurationMinutes: number,
-  creditsHeld: Prisma.Decimal,
   snapshot: BracketSnapshot,
   isExhausted: boolean,
   tx: Prisma.TransactionClient,
 ): Promise<DeductionResult> {
   const {
     freeZoneMinutes,
-    graceZoneMinutes,
-    bracketMinutes,
-    creditsFull,
-    creditsHalf,
   } = snapshot;
 
   // ── Decision tree ──────────────────────────────────────────────────────────
@@ -453,20 +381,11 @@ export async function deductCredits(
   if (activeDurationMinutes <= freeZoneMinutes) {
     deductAmount = d(0);
     reason = "FREE_ZONE";
-  } else if (isExhausted) {
-    deductAmount = creditsHeld; // consume entire hold
-    reason = "EXHAUSTED";
   } else {
-    // Linear deduction: 0.5 credits per minute after free zone
-    const paidMinutes = Math.max(0, activeDurationMinutes - freeZoneMinutes);
-    deductAmount = d(paidMinutes).mul(0.5);
-    reason = "PER_MINUTE_DEDUCTION";
-
-    // Safety: don't deduct more than what was held
-    if (deductAmount.gt(creditsHeld)) {
-      deductAmount = creditsHeld;
-      reason = "CAP_REACHED";
-    }
+    // Beyond the free zone → charge for the FULL session duration from minute 0.
+    // Example: 5m 30s → ceil to 6 minutes → 6 × 0.5 = 3 credits
+    deductAmount = d(activeDurationMinutes).mul(0.5);
+    reason = isExhausted ? "EXHAUSTED" : "PER_MINUTE_DEDUCTION";
   }
 
   // ── Fetch balance ──────────────────────────────────────────────────────────
@@ -480,7 +399,7 @@ export async function deductCredits(
 
   console.log(
     `[CREDIT_DEDUCTION] Session=${sessionId} User=${userId} Duration=${activeDurationMinutes}m. ` +
-      `Hold=${creditsHeld} Deduct=${deductAmount} Reason=${reason}. ` +
+      `Deduct=${deductAmount} Reason=${reason}. ` +
       `Balance (P/E): ${purchasedDec}/${earnedDec}`,
   );
 
@@ -516,21 +435,17 @@ export async function deductCredits(
     if (nextEarned.lt(0)) nextEarned = d(0);
   }
 
-  // ── Release hold ────────────────────────────────────────────────────────────
+  // ── No hold to release — totalAvailable is derived directly ───────────────
+  // Formula: totalAvailable = (purchased + earned) - heldCredits (unchanged)
   const currentHeld = d(balance.heldCredits.toString());
-  const nextHeld = currentHeld.sub(creditsHeld);
-  const finalHeld = nextHeld.lt(0) ? d(0) : nextHeld;
-
-  // ── Calculate final availability ───────────────────────────────────────────
-  // Formula: totalAvailable = (purchased + earned) - remaining holds
-  const nextTotalAvailable = nextPurchased.add(nextEarned).sub(finalHeld);
+  const nextTotalAvailable = nextPurchased.add(nextEarned).sub(currentHeld);
 
   await tx.userCreditBalance.update({
     where: { userId },
     data: {
       purchasedCredits: nextPurchased,
       earnedCredits: nextEarned,
-      heldCredits: finalHeld,
+      // heldCredits unchanged — no hold system
       totalAvailable: nextTotalAvailable.lt(0) ? d(0) : nextTotalAvailable,
     },
   });

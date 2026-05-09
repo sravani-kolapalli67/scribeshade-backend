@@ -3,7 +3,7 @@ import { OpenRouter } from "@openrouter/sdk";
 import { CreateSessionData } from "./session.types";
 import * as qaService from "../qa/qa.service";
 import sharp from "sharp";
-import { Language, Industry, SessionStatus, Prisma } from "@prisma/client";
+import { Language, Industry, SessionStatus, DeductionReason, Prisma } from "@prisma/client";
 import * as documentService from "../document/document.service";
 import path from "path";
 import { AppError } from "../../shared/middleware/error.middleware";
@@ -112,6 +112,18 @@ function mapIndustry(jobDesc: string): Industry {
  * Creates a new interview session.
  */
 export async function createSession(data: CreateSessionData) {
+  // ── Single-session enforcement ──────────────────────────────────────────────
+  const openSession = await prisma.session.findFirst({
+    where: {
+      userId: data.userId,
+      status: { in: [SessionStatus.ACTIVE, SessionStatus.PAUSED, SessionStatus.DISCONNECTED] },
+    },
+    select: { id: true, status: true },
+  });
+  if (openSession) {
+    throw new AppError(409, `ACTIVE_SESSION_EXISTS:${openSession.id}`);
+  }
+
   let finalCompanyId = "";
 
   if (data.companyName) {
@@ -212,68 +224,97 @@ export async function getSessionById(id: string) {
 
 /**
  * Deletes a session by ID.
+ * Only PRE_CHECK sessions can be deleted (never activated, no credits at risk).
  */
-export async function deleteSession(id: string) {
-  // Release hold if session is still in PRE_CHECK (never activated)
-  const session = await prisma.session.findUnique({ where: { id } });
-  if (
-    session &&
-    session.status === SessionStatus.PRE_CHECK &&
-    new Prisma.Decimal(session.creditsHeld.toString()).gt(0)
-  ) {
-    await prisma.$transaction(async (tx) => {
-      await creditsService.releaseHold(
-        session.userId,
-        new Prisma.Decimal(session.creditsHeld.toString()),
-        tx,
-      );
-    });
-  }
+const DELETABLE_STATUSES: SessionStatus[] = [
+  SessionStatus.PRE_CHECK,
+  SessionStatus.COMPLETED,
+  SessionStatus.ABANDONED,
+  SessionStatus.FORCE_ENDED,
+  SessionStatus.AUTO_ENDED,
+  SessionStatus.CREDIT_EXHAUSTED,
+];
 
+export async function deleteSession(id: string) {
+  const session = await prisma.session.findUnique({ where: { id } });
+  if (!session) throw new AppError(404, "Session not found");
+  if (!DELETABLE_STATUSES.includes(session.status)) {
+    throw new AppError(409, "Cannot delete an active or in-progress session. End the session first.");
+  }
   return prisma.session.delete({
     where: { id },
   });
 }
 
 /**
- * Activates a session (sets status to ACTIVE, places a credit hold, records start time).
- * Runs inside a $transaction to atomically update both balance and session.
+ * Activates a session (sets status to ACTIVE, computes credit cap, records start time).
+ * Enforces single-active-session per user — throws 409 ACTIVE_SESSION_EXISTS if blocked.
+ * Runs inside a $transaction for race-condition safety.
  */
 export async function activateSession(id: string) {
   return prisma.$transaction(async (tx) => {
     const session = await tx.session.findUnique({ where: { id } });
     if (!session) throw new AppError(404, "Session not found");
 
-    // Idempotent — already ACTIVE
+    // Idempotent — already ACTIVE (reconnect case)
     if (session.status === SessionStatus.ACTIVE) {
       return session;
     }
 
-    if (session.status !== SessionStatus.PRE_CHECK) {
+    // Allow DISCONNECTED → ACTIVE (reconnection within grace window)
+    if (
+      session.status !== SessionStatus.PRE_CHECK &&
+      session.status !== SessionStatus.DISCONNECTED
+    ) {
       throw new AppError(
         409,
         `Cannot activate session in status ${session.status}`,
       );
     }
 
-    let creditsHeld: Prisma.Decimal = new Prisma.Decimal(0);
+    // ── Single-session enforcement ────────────────────────────────────────────
+    // Atomic check: no other ACTIVE/PAUSED/DISCONNECTED session for this user
+    const conflict = await tx.session.findFirst({
+      where: {
+        userId: session.userId,
+        id: { not: id },
+        status: { in: [SessionStatus.ACTIVE, SessionStatus.PAUSED, SessionStatus.DISCONNECTED] },
+      },
+      select: { id: true, status: true },
+    });
+    if (conflict) {
+      throw new AppError(
+        409,
+        `ACTIVE_SESSION_EXISTS:${conflict.id}`,
+      );
+    }
+
     let maxAllowedMinutes: number | null = null;
     let bracketConfigSnapshot: unknown = null;
 
-    // Place credit hold for paid sessions only
+    // Compute credit cap for paid sessions — NO funds are moved
     if (!session.free) {
-      const holdResult = await creditsService.placeHold(session.userId, tx);
-      creditsHeld = new Prisma.Decimal(holdResult.creditsHeld);
-      maxAllowedMinutes = holdResult.maxAllowedMinutes;
-      bracketConfigSnapshot = holdResult.snapshot;
+      const balance = await tx.userCreditBalance.findUnique({
+        where: { userId: session.userId },
+      });
+      if (!balance) throw new AppError(402, "INSUFFICIENT_CREDITS");
+
+      const available = new Prisma.Decimal(balance.totalAvailable.toString());
+      const { maxMinutes, snapshot } = await creditsService.computeMaxAllowedMinutes(available);
+      maxAllowedMinutes = maxMinutes;
+      bracketConfigSnapshot = snapshot;
     }
 
+    const now = new Date();
     return tx.session.update({
       where: { id },
       data: {
         status: SessionStatus.ACTIVE,
-        startedAt: new Date(),
-        creditsHeld,
+        // Only set startedAt on first activation, not on reconnect
+        ...(session.status === SessionStatus.PRE_CHECK ? { startedAt: now } : {}),
+        disconnectedAt: null, // clear any stale disconnect timestamp on reconnect
+        lastHeartbeatAt: now,
+        creditsHeld: new Prisma.Decimal(0), // no hold — always 0
         maxAllowedMinutes,
         bracketConfigSnapshot: bracketConfigSnapshot as any,
       },
@@ -346,6 +387,42 @@ export async function deactivateSession(
   }
 
   return session;
+}
+
+/**
+ * Abandons a stale ACTIVE or PAUSED session — called by session-watchdog when
+ * no heartbeat was received. No credits are charged (watchdog uses DISCONNECTED →
+ * AUTO_ENDED path instead for billing; ABANDONED is reserved for sessions that
+ * never left PRE_CHECK or were force-abandoned).
+ */
+export async function abandonStaleSession(
+  sessionId: string,
+  _userId: string,
+): Promise<void> {
+  await prisma.$transaction(async (tx) => {
+    const session = await tx.session.findUnique({ where: { id: sessionId } });
+    if (!session) return;
+
+    // Only handle sessions that are still open
+    if (
+      session.status !== SessionStatus.ACTIVE &&
+      session.status !== SessionStatus.PAUSED
+    ) {
+      return;
+    }
+
+    await tx.session.update({
+      where: { id: sessionId },
+      data: {
+        status: SessionStatus.ABANDONED,
+        endedAt: new Date(),
+        creditsDeducted: new Prisma.Decimal(0),
+        deductionReason: DeductionReason.ABANDONED,
+      },
+    });
+  });
+
+  console.log(`[watchdog] Session ${sessionId} abandoned — hold released, 0 credits charged.`);
 }
 
 /**

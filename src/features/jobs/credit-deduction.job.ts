@@ -14,24 +14,29 @@ export const creditDeductionWorker = new Worker(
       sessionId,
       userId,
       isExhausted = false,
+      isAutoEnded = false,
     } = job.data as {
       sessionId: string;
       userId: string;
       isExhausted?: boolean;
+      isAutoEnded?: boolean;
     };
     console.log(
-      `[credit-deduction] Starting job ${job.id} for session ${sessionId} (exhausted=${isExhausted})`,
+      `[credit-deduction] Starting job ${job.id} for session ${sessionId} (exhausted=${isExhausted}, autoEnded=${isAutoEnded})`,
     );
 
     await prisma.$transaction(async (tx) => {
       const session = await tx.session.findUnique({ where: { id: sessionId } });
       if (!session) return; // already cleaned up
 
-      // Guard: only process COMPLETING or CREDIT_EXHAUSTED
-      if (
-        session.status !== SessionStatus.COMPLETING &&
-        session.status !== SessionStatus.CREDIT_EXHAUSTED
-      ) {
+      // Guard: only process valid terminal-in-flight states
+      const processableStatuses: SessionStatus[] = [
+        SessionStatus.COMPLETING,
+        SessionStatus.CREDIT_EXHAUSTED,
+        SessionStatus.AUTO_ENDED,
+      ];
+      if (!processableStatuses.includes(session.status)) {
+        console.log(`[credit-deduction] Skipping session ${sessionId} in status ${session.status}`);
         return;
       }
 
@@ -58,18 +63,20 @@ export const creditDeductionWorker = new Worker(
         userId,
         sessionId,
         activeDurationMinutes,
-        new Prisma.Decimal(session.creditsHeld.toString()),
         snapshot,
         isExhausted,
         tx,
       );
 
+      // Determine final status
+      let finalStatus: SessionStatus = SessionStatus.COMPLETED;
+      if (isExhausted) finalStatus = SessionStatus.CREDIT_EXHAUSTED;
+      if (isAutoEnded) finalStatus = SessionStatus.AUTO_ENDED;
+
       await tx.session.update({
         where: { id: sessionId },
         data: {
-          status: isExhausted
-            ? SessionStatus.CREDIT_EXHAUSTED
-            : SessionStatus.COMPLETED,
+          status: finalStatus,
           creditsDeducted: new Prisma.Decimal(result.creditsDeducted),
           deductionReason: result.reason as any,
           durationSeconds: totalSeconds,

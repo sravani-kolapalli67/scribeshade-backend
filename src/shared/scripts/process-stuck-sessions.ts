@@ -33,7 +33,6 @@ async function processStuckSession(sessionId: string) {
       session.userId,
       sessionId,
       activeDurationMinutes,
-      new Prisma.Decimal(session.creditsHeld.toString()),
       snapshot,
       false, // assume not exhausted for manual cleanup unless we know
       tx,
