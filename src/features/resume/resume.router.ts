@@ -12,6 +12,7 @@ import {
   listResumes,
   listTemplates,
   removeResume,
+  renameResumeHandler,
   scoreAts,
   uploadResume,
 } from "./resume.controller";
@@ -27,8 +28,10 @@ import {
   extractFieldsHandler,
   markBuiltResumeCompleteHandler,
   validateSectionHandler,
+  builderAtsScoreHandler,
 } from "./resume.builder.controller";
 import { requireAuth } from "../auth/auth.middleware";
+import { idempotencyKeyMiddleware } from "../../shared/middleware/idempotency.middleware";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Multer (File Upload Middleware)
@@ -68,6 +71,7 @@ const router = Router();
 // Resume CRUD
 router.post("/upload", upload.single("resume"), uploadResume);
 router.get("/list", listResumes);
+router.patch("/:id/rename", renameResumeHandler);
 router.delete("/:id", removeResume);
 
 // ATS Analysis
@@ -88,12 +92,37 @@ router.get("/builder/:id", requireAuth, getBuiltResumeHandler);
 router.delete("/builder/:id", requireAuth, deleteBuiltResumeHandler);
 
 // ── Builder (AI) ──────────────────────────────────────────────────────────────
-router.post("/builder/generate", requireAuth, generateResumeHtmlHandler);
-router.post("/builder/enhance-section", requireAuth, enhanceSectionHandler);
+// All credit-deducting AI endpoints accept an `Idempotency-Key` header so
+// duplicate clicks / retries never double-bill. See
+// shared/middleware/idempotency.middleware.ts and
+// features/credits/ai-credit-meter.service.ts.
+router.post(
+  "/builder/generate",
+  requireAuth,
+  idempotencyKeyMiddleware,
+  generateResumeHtmlHandler,
+);
+router.post(
+  "/builder/enhance-section",
+  requireAuth,
+  idempotencyKeyMiddleware,
+  enhanceSectionHandler,
+);
 router.post("/builder/validate-section", requireAuth, validateSectionHandler);
-router.post("/builder/tailor", requireAuth, tailorResumeHandler);
+router.post("/builder/ats-score", requireAuth, builderAtsScoreHandler);
+router.post(
+  "/builder/tailor",
+  requireAuth,
+  idempotencyKeyMiddleware,
+  tailorResumeHandler,
+);
 router.post("/builder/export-pdf", requireAuth, exportPdfHandler);
-router.post("/builder/extract-fields", requireAuth, extractFieldsHandler);
+router.post(
+  "/builder/extract-fields",
+  requireAuth,
+  idempotencyKeyMiddleware,
+  extractFieldsHandler,
+);
 router.post("/builder/:id/complete", requireAuth, markBuiltResumeCompleteHandler);
 
 // ─────────────────────────────────────────────────────────────────────────────

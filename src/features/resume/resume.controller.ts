@@ -4,6 +4,7 @@ import fs from "fs";
 import {
   createResumeRecord,
   deleteResume,
+  renameResume,
   extractTextFromFile,
   generateCoverLetter,
   getAllTemplates,
@@ -97,11 +98,26 @@ export async function uploadResume(req: Request, res: Response): Promise<void> {
 
   // Step 3: Persist
   try {
+    const normalizedFilename = req.file.originalname.toLowerCase();
+    const metadataIndex = {
+      normalizedFilename,
+      keywords: Array.from(
+        new Set(
+          `${req.file.originalname} ${extractedText}`
+            .toLowerCase()
+            .replace(/[^a-z0-9]+/g, " ")
+            .split(" ")
+            .filter((term) => term.length >= 3),
+        ),
+      ).slice(0, 120),
+    };
+
     const resume = await createResumeRecord({
       filename: req.file.filename,
       filePath: req.file.path,
       size: req.file.size,
       resumeContext: extractedText,
+      metadataIndex,
       userId,
     });
 
@@ -118,7 +134,7 @@ export async function uploadResume(req: Request, res: Response): Promise<void> {
  * Returns all resumes belonging to a user.
  */
 export async function listResumes(req: Request, res: Response): Promise<void> {
-  const { userId } = req.query as { userId?: string };
+  const { userId, search } = req.query as { userId?: string; search?: string };
 
   if (!userId) {
     res.status(400).json({ error: "Missing userId query parameter" });
@@ -126,7 +142,7 @@ export async function listResumes(req: Request, res: Response): Promise<void> {
   }
 
   try {
-    const resumes = await getResumesByUser(userId);
+    const resumes = await getResumesByUser(userId, search);
     res.json(resumes);
   } catch (err) {
     console.error("[resume/list]", err);
@@ -261,11 +277,29 @@ export async function removeResume(req: Request, res: Response): Promise<void> {
   const { id } = req.params;
 
   try {
-    console.log(id);
     await deleteResume(id as string);
     res.json({ message: "Resume deleted successfully" });
   } catch (err) {
     console.error("[resume/delete]", err);
+    const status = getStatusCode(err);
+    res.status(status).json({ error: (err as Error).message });
+  }
+}
+
+export async function renameResumeHandler(req: Request, res: Response): Promise<void> {
+  const id = req.params.id as string;
+  const { filename } = req.body as { filename?: string };
+
+  if (!filename || !filename.trim()) {
+    res.status(400).json({ error: "filename is required" });
+    return;
+  }
+
+  try {
+    const updated = await renameResume(id, filename);
+    res.json({ success: true, data: updated });
+  } catch (err) {
+    console.error("[resume/rename]", err);
     const status = getStatusCode(err);
     res.status(status).json({ error: (err as Error).message });
   }

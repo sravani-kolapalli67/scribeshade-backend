@@ -1,7 +1,7 @@
 # ScribeShade Backend API Reference
 
-Last updated: 2026-05-04
-Document version: v1.7.0
+Last updated: 2026-05-07
+Document version: v1.8.0
 
 Base URL:
 - Local: `http://localhost:3200/api`
@@ -384,6 +384,83 @@ Error examples:
 ```json
 { "error": "Unauthorized: Authentication required" }
 ```
+
+### GET /credits/usage?page=1&limit=20&operation=resume_enhance_section
+Authenticated. Paginated AI feature usage history. Each row corresponds to a
+credit-deducting AI call (or a free cache hit, where `cached: true` and
+`creditsUsed` is `0`).
+
+Query params:
+- `page` default `1`
+- `limit` default `20`, max `100`
+- `operation` (optional) — exact operation key to filter, e.g.
+  `resume_generate`, `resume_enhance_section`, `resume_tailor`,
+  `resume_extract_fields`
+
+Success `200`:
+```json
+{
+  "success": true,
+  "data": [
+    {
+      "id": "usage-uuid",
+      "userId": "db-user-uuid",
+      "resumeId": "resume-uuid",
+      "operation": "resume_enhance_section",
+      "creditsUsed": "1.00",
+      "aiModel": "openai/gpt-4o-mini",
+      "aiCostUsd": "0.0021",
+      "inputTokens": 480,
+      "outputTokens": 120,
+      "cached": false,
+      "metadata": null,
+      "createdAt": "2026-04-28T11:10:00.000Z"
+    }
+  ],
+  "pagination": { "total": 5, "page": 1, "limit": 20, "pages": 1 }
+}
+```
+
+Error examples:
+- `401`
+```json
+{ "error": "Unauthorized: Authentication required" }
+```
+
+### GET /credits/feature-costs
+**Public** — no auth. Returns the active feature pricing catalog so the
+frontend can render server-driven cost labels (e.g. the `1cr` badge on the
+"AI Enhance" button) instead of hard-coded constants. Updated through the
+seed script (`prisma/seed-feature-costs.ts`).
+
+Success `200`:
+```json
+{
+  "success": true,
+  "data": [
+    { "featureKey": "resume_enhance_section", "credits": "1.00", "label": "AI Section Enhance" },
+    { "featureKey": "resume_extract_fields",  "credits": "2.00", "label": "Extract Fields from Resume" },
+    { "featureKey": "resume_generate",        "credits": "1.00", "label": "Generate Resume Content" },
+    { "featureKey": "resume_tailor",          "credits": "4.00", "label": "Tailor to Job Description (regenerate is free)" }
+  ]
+}
+```
+
+### Idempotency for AI credit-deducting endpoints
+
+All AI endpoints under `/resume/builder/*` that consume credits
+(`generate`, `enhance-section`, `tailor`, `extract-fields`) accept an optional
+**`Idempotency-Key`** header (UUID v4). Sending the same key replays the
+previous response without re-charging credits. Without a key, every successful
+call deducts credits.
+
+Additionally, `/resume/builder/tailor` is **content-cached** for 24h: the same
+job description against the same resume returns the cached result for free,
+regardless of the idempotency key (response includes `"cached": true`).
+
+Errors specific to credit metering:
+- `402 Payment Required` — `{ "error": "INSUFFICIENT_CREDITS", "required": 1, "available": 0.5 }`
+- `409 Conflict` — `{ "error": "IDEMPOTENCY_IN_PROGRESS" }` (a request with the same key is still running)
 
 ### GET /credits/purchases
 Authenticated. Purchase history.
@@ -844,8 +921,12 @@ Error examples:
 { "error": "Please upload a valid resume. The uploaded file does not appear to be a resume/CV." }
 ```
 
-### GET /resume/list?userId=<id>
-Lists resumes for user.
+### GET /resume/list?userId=<id>&search=<term>
+Lists resumes for user. Supports optional free-text search across uploaded resume filename, extracted resume text, indexed keywords, and built resume title/job title/company/job description.
+
+Query params:
+- `userId`: required
+- `search`: optional, case-insensitive text search for resume name, JD phrases, role/company names, or keywords
 
 Success `200`:
 ```json
@@ -853,7 +934,8 @@ Success `200`:
   {
     "id": "resume-uuid",
     "filename": "resume.pdf",
-    "uploadedAt": "2026-04-28T10:00:00.000Z"
+    "uploadedAt": "2026-04-28T10:00:00.000Z",
+    "source": "uploaded"
   }
 ]
 ```
@@ -1746,6 +1828,7 @@ Recommended client flow:
 
 | Version | Date | Summary |
 |---|---|---|
+| v1.8.0 | 2026-05-07 | Updated `GET /resume/list` to accept optional `search` for resume-name / JD / keyword search across uploaded and built resumes. Documented searchable sources and response `source` field example. |
 | v1.7.0 | 2026-05-04 | Added 4 previously undocumented endpoints: `POST /auth/tauri-ticket` (Tauri desktop sign-in token), `GET /session/:id/events` (SSE real-time stream), `POST /session-notes/:sessionId/generate` (AI session notes generation), `GET /session-notes/:sessionId` (retrieve notes). Added **Session Notes APIs** section. |
 | v1.6.0 | 2026-05-05 | Updated `POST /resume/ats-score` response to include `grade` (letter grade A+–F) and `sectionScores` (per-section numeric scores). Updated `POST /resume/generate-cover-letter` response to include `wordCount`; request now accepts optional `userName` and `userEmail`. Updated `POST /resume/create-template` to require `name` field; `GET /resume/all-templates` now returns `name`. Three default templates (Classic, Modern, Minimal) seeded via `pnpm seed:templates`. |
 | v1.5.0 | 2026-05-04 | Added 8 Resume Builder endpoints: `POST /resume/builder/save`, `GET /resume/builder/list`, `GET /resume/builder/:id`, `DELETE /resume/builder/:id`, `POST /resume/builder/generate` (1cr), `POST /resume/builder/enhance-section` (0.5cr), `POST /resume/builder/tailor` (1cr), `POST /resume/builder/export-pdf`. Added `BuiltResume` Prisma model and migration. |

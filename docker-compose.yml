@@ -1,4 +1,17 @@
 version: "3.9"
+
+# ==============================================================================
+# ScribeShade — Backend compose
+#
+# The "scribeshade-net" external network is shared with the frontend compose
+# (~/scribeshade-web/docker-compose.yml) so the nginx proxy inside the web
+# container can reach "scribeshade-api" by name on port 3200 without the
+# backend needing an external domain.
+#
+# Create the network once on the server before first deploy:
+#   docker network create scribeshade-net
+# ==============================================================================
+
 services:
 
   redis:
@@ -7,8 +20,11 @@ services:
     restart: always
     volumes:
       - redis_data:/data
+    networks:
+      - internal
+
   postgres:
-    build: .
+    image: postgres:16-alpine
     container_name: scribeshade-db
     restart: always
     environment:
@@ -19,12 +35,16 @@ services:
       - "5434:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    networks:
+      - internal
 
   api:
     image: scribeshade-backend:latest
     container_name: scribeshade-api
     restart: always
     ports:
+      # Keep the host port open for direct access / debugging.
+      # The frontend nginx uses the internal Docker network instead.
       - "3200:3200"
     env_file:
       - .env
@@ -35,7 +55,23 @@ services:
     depends_on:
       - postgres
       - redis
+    networks:
+      # Internal backend network (reaches redis, postgres by name)
+      - internal
+      # Shared network — makes "scribeshade-api" resolvable from the frontend
+      # nginx container without exposing the backend to the public internet.
+      - scribeshade-net
 
 volumes:
   postgres_data:
   redis_data:
+
+networks:
+  # Backend-only network: redis and postgres are NOT on scribeshade-net
+  # so they stay invisible to the frontend container.
+  internal:
+    driver: bridge
+
+  # Shared external network: created once on the server, joined by both stacks.
+  scribeshade-net:
+    external: true

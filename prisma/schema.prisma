@@ -1,6 +1,6 @@
 generator client {
   provider      = "prisma-client-js"
-  binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x", "debian-openssl-3.0.x"]
 }
 
 datasource db {
@@ -71,7 +71,14 @@ enum DeductionReason {
 enum PurchaseStatus {
   PENDING
   CONFIRMED
+  FAILED
   REFUNDED
+}
+
+enum IdempotencyStatus {
+  IN_PROGRESS
+  COMPLETED
+  FAILED
 }
 
 model User {
@@ -94,6 +101,8 @@ model User {
   creditBalance UserCreditBalance?
   ledgerEntries CreditLedger[]
   purchases     CreditPurchase[]
+  idempotencyKeys IdempotencyKey[]
+  aiGenerationCache AiGenerationCache[]
 }
 
 model Resume {
@@ -443,4 +452,51 @@ model Policy {
     privacyPolicy String @db.Text
     termsAndConditions String @db.Text
     updatedAt DateTime @default(now())
+}
+
+// ─── AI credit metering — request-level idempotency + result cache ────────────
+
+/// Request-level idempotency for AI credit-deducting endpoints.
+/// Clients send an `Idempotency-Key` header (UUID v4) per logical action.
+/// The wrapper inserts a row in IN_PROGRESS state, executes the AI call, then
+/// transitions to COMPLETED (with cached response) or FAILED. Concurrent
+/// duplicate requests collide on the unique `key` and short-circuit to the
+/// cached response, guaranteeing a user is never billed twice for one click.
+model IdempotencyKey {
+  key          String            @id
+  userId       String
+  user         User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  operation    String            // e.g. "RESUME_ENHANCE_SECTION"
+  status       IdempotencyStatus @default(IN_PROGRESS)
+  responseBody Json?             // Cached successful response payload
+  statusCode   Int?              // HTTP status code of the cached response
+  creditsUsed  Decimal?          @db.Decimal(10, 2)
+  createdAt    DateTime          @default(now())
+  completedAt  DateTime?
+  expiresAt    DateTime          // 24h TTL — older rows safe to GC
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@index([operation])
+}
+
+/// Caches successful AI generation results so repeat operations (e.g. JD
+/// tailor "regenerate") can be served free. Keyed by (user, resume, op,
+/// inputHash). The wrapper looks up by hash before deducting credits; a hit
+/// returns the cached payload with `creditsUsed: 0` and `cached: true`.
+model AiGenerationCache {
+  id             String   @id @default(uuid())
+  userId         String
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  resumeId       String   @default("") // "" means "not scoped to a resume"
+  operation      String   // e.g. "RESUME_TAILOR"
+  inputHash      String   // SHA-256 of normalized inputs
+  responseBody   Json
+  creditsCharged Decimal  @db.Decimal(10, 2)
+  createdAt      DateTime @default(now())
+  expiresAt      DateTime // 24h TTL
+
+  @@unique([userId, operation, resumeId, inputHash])
+  @@index([userId])
+  @@index([expiresAt])
 }

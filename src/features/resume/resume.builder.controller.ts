@@ -13,6 +13,9 @@ import {
   extractFields,
   markBuiltResumeComplete,
   validateSection,
+  scoreBuilderAts,
+  PdfExportError,
+  PDF_ERROR_CODES,
 } from "./resume.builder.service";
 import type {
   SaveBuiltResumeInput,
@@ -157,6 +160,7 @@ export async function generateResumeHtmlHandler(
       jobDescription,
       jobTitle,
       company,
+      idempotencyKey: req.idempotencyKey ?? null,
     });
 
     res.json(result);
@@ -175,11 +179,16 @@ export async function enhanceSectionHandler(
   next: NextFunction,
 ): Promise<void> {
   try {
-    const { userId, sectionId, currentText, jobDescription, jobTitle, resumeContext } =
+    const { userId: bodyUserId, sectionId, currentText, jobDescription, jobTitle, resumeContext } =
       req.body as Partial<EnhanceSectionInput>;
 
-    if (!userId || !sectionId || !currentText) {
-      res.status(400).json({ error: "userId, sectionId, and currentText are required" });
+    // userId is preferred from the resolved body (resolveUserId middleware converts
+    // Clerk IDs → DB UUIDs transparently). Fall back to the Clerk auth identity so
+    // the endpoint works even when the frontend omits userId from the body.
+    const userId = bodyUserId || getCurrentUserId(req);
+
+    if (!sectionId || !currentText) {
+      res.status(400).json({ error: "sectionId and currentText are required" });
       return;
     }
 
@@ -190,6 +199,8 @@ export async function enhanceSectionHandler(
       jobDescription,
       jobTitle,
       resumeContext,
+      idempotencyKey: req.idempotencyKey ?? null,
+      resumeId: (req.body as { resumeId?: string }).resumeId ?? null,
     });
 
     res.json(result);
@@ -208,15 +219,25 @@ export async function tailorResumeHandler(
   next: NextFunction,
 ): Promise<void> {
   try {
-    const { userId, resumeId, jobDescription, jobTitle, company } =
+    const { userId: bodyUserId, resumeId, jobDescription, jobTitle, company } =
       req.body as Partial<TailorResumeInput>;
+    // userId is preferred from the resolved body (resolveUserId middleware converts
+    // Clerk IDs to DB UUIDs). Fall back to Clerk auth for resilience.
+    const userId = bodyUserId || getCurrentUserId(req);
 
     if (!userId || !resumeId || !jobDescription) {
       res.status(400).json({ error: "userId, resumeId, and jobDescription are required" });
       return;
     }
 
-    const result = await tailorResume({ userId, resumeId, jobDescription, jobTitle, company });
+    const result = await tailorResume({
+      userId,
+      resumeId,
+      jobDescription,
+      jobTitle,
+      company,
+      idempotencyKey: req.idempotencyKey ?? null,
+    });
     res.json(result);
   } catch (err) {
     next(err);
@@ -225,15 +246,23 @@ export async function tailorResumeHandler(
 
 /**
  * POST /resume/builder/export-pdf
- * Saves the populated HTML to disk and returns a download URL.
+ * Renders the populated HTML to a PDF and streams it directly to the client.
+ *
+ * Response: application/pdf binary stream.
+ * Useful headers also exposed for the frontend:
+ *   - X-PDF-Filename       — suggested download filename
+ *   - X-PDF-Download-Url   — archived URL under /uploads/exports/ (24h)
+ *   - X-PDF-Total-Ms       — total render duration
  */
 export async function exportPdfHandler(
   req: Request,
   res: Response,
   next: NextFunction,
 ): Promise<void> {
+  const _ct0 = Date.now();
   try {
     const { userId, resumeId, populatedHtml } = req.body as Partial<ExportPdfInput>;
+    console.info(JSON.stringify({ event: "pdf_handler_start", resumeId: resumeId ?? null, htmlBytes: populatedHtml?.length ?? 0 }));
 
     if (!resumeId && !populatedHtml) {
       res.status(400).json({ error: "resumeId or populatedHtml is required" });
@@ -241,8 +270,27 @@ export async function exportPdfHandler(
     }
 
     const result = await exportResumeHtml({ userId: userId ?? "", resumeId, populatedHtml });
-    res.json(result);
+
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="${result.filename}"`);
+    res.setHeader("Content-Length", String(result.buffer.length));
+    res.setHeader("Cache-Control", "no-store");
+    res.setHeader("X-PDF-Filename",     result.filename);
+    res.setHeader("X-PDF-Download-Url", result.downloadUrl);
+    res.setHeader("X-PDF-Total-Ms",     String(result.timing.totalMs));
+    res.setHeader("Access-Control-Expose-Headers", "X-PDF-Filename, X-PDF-Download-Url, X-PDF-Total-Ms");
+    res.status(200).end(result.buffer);
+    console.info(JSON.stringify({ event: "pdf_handler_done", totalMs: result.timing.totalMs, controllerMs: Date.now() - _ct0 }));
   } catch (err) {
+    if (err instanceof PdfExportError) {
+      const httpStatus =
+        err.code === PDF_ERROR_CODES.PDF_TIMEOUT           ? 408 :
+        err.code === PDF_ERROR_CODES.BROWSER_CRASH         ? 502 :
+        err.code === PDF_ERROR_CODES.TEMPLATE_RENDER_ERROR ? 422 : 500;
+      console.error(JSON.stringify({ event: "pdf_handler_error", code: err.code, error: err.message, ms: Date.now() - _ct0 }));
+      res.status(httpStatus).json({ error: err.message, code: err.code });
+      return;
+    }
     next(err);
   }
 }
@@ -258,15 +306,25 @@ export async function extractFieldsHandler(
   next: NextFunction,
 ): Promise<void> {
   try {
-    const { userId, resumeContext, jobDescription, jobTitle, company } =
+    const { userId: bodyUserId, resumeContext, jobDescription, jobTitle, company } =
       req.body as Partial<ExtractFieldsInput>;
+    // userId is preferred from the resolved body (resolveUserId middleware converts
+    // Clerk IDs to DB UUIDs). Fall back to Clerk auth for resilience.
+    const userId = bodyUserId || getCurrentUserId(req);
 
     if (!userId || !resumeContext) {
       res.status(400).json({ error: "userId and resumeContext are required" });
       return;
     }
 
-    const result = await extractFields({ userId, resumeContext, jobDescription, jobTitle, company });
+    const result = await extractFields({
+      userId,
+      resumeContext,
+      jobDescription,
+      jobTitle,
+      company,
+      idempotencyKey: req.idempotencyKey ?? null,
+    });
     res.json(result);
   } catch (err) {
     next(err);
@@ -327,6 +385,35 @@ export async function validateSectionHandler(
     });
 
     res.json(result);
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * POST /resume/builder/ats-score
+ * Runs an ATS-style analysis on the user's saved BuiltResume. Free.
+ */
+export async function builderAtsScoreHandler(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const userId = getCurrentUserId(req);
+    if (!userId) {
+      res.status(401).json({ error: "Unauthorized" });
+      return;
+    }
+
+    const { resumeId } = req.body as { resumeId?: string };
+    if (!resumeId) {
+      res.status(400).json({ error: "resumeId is required" });
+      return;
+    }
+
+    const result = await scoreBuilderAts({ userId, resumeId });
+    res.json({ success: true, data: result });
   } catch (err) {
     next(err);
   }

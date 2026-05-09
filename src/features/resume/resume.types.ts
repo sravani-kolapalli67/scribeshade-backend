@@ -78,6 +78,7 @@ export interface GenerateResumeHtmlInput {
   jobDescription?: string;
   jobTitle?: string;
   company?: string;
+  idempotencyKey?: string | null;
 }
 
 export interface EnhanceSectionInput {
@@ -87,6 +88,8 @@ export interface EnhanceSectionInput {
   jobDescription?: string;
   jobTitle?: string;
   resumeContext?: string;
+  idempotencyKey?: string | null;
+  resumeId?: string | null;
 }
 
 export interface ExtractFieldsInput {
@@ -95,6 +98,7 @@ export interface ExtractFieldsInput {
   jobDescription?: string;
   jobTitle?: string;
   company?: string;
+  idempotencyKey?: string | null;
 }
 
 export interface MarkBuiltResumeCompleteInput {
@@ -108,6 +112,7 @@ export interface TailorResumeInput {
   jobDescription: string;
   jobTitle?: string;
   company?: string;
+  idempotencyKey?: string | null;
 }
 
 export interface ExportPdfInput {

@@ -1,6 +1,7 @@
 import path from "path";
 import fs from "fs";
 
+import type { Prisma } from "@prisma/client";
 import { OpenRouter } from "@openrouter/sdk";
 import mammoth from "mammoth";
 import { PDFParse } from "pdf-parse";
@@ -69,6 +70,34 @@ function parseJsonResponse<T>(text: string): T | null {
     }
     return null;
   }
+}
+
+function normalizeSearchText(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function buildKeywordIndex(...chunks: Array<string | null | undefined>): string[] {
+  const terms = chunks
+    .flatMap((chunk) => normalizeSearchText(chunk ?? "").split(" "))
+    .filter((term) => term.length >= 3);
+
+  return Array.from(new Set(terms)).slice(0, 120);
+}
+
+function matchesSearch(
+  search: string,
+  ...chunks: Array<string | null | undefined>
+): boolean {
+  const normalizedQuery = normalizeSearchText(search);
+  if (!normalizedQuery) return true;
+
+  const haystack = normalizeSearchText(chunks.filter(Boolean).join(" "));
+  const terms = normalizedQuery.split(" ").filter(Boolean);
+
+  return terms.every((term) => haystack.includes(term));
 }
 
 // uploadAndWaitForGeminiFile removed - no longer needed with OpenRouter
@@ -140,6 +169,7 @@ export async function createResumeRecord(data: {
   filePath: string;
   size: number;
   resumeContext: string;
+  metadataIndex?: Prisma.InputJsonValue;
   userId: string;
 }) {
   return prisma.resume.create({
@@ -148,6 +178,7 @@ export async function createResumeRecord(data: {
       path: data.filePath,
       size: data.size,
       resumeContext: data.resumeContext,
+      metadataIndex: data.metadataIndex,
       userId: data.userId,
     },
   });
@@ -158,7 +189,7 @@ export async function createResumeRecord(data: {
  * Also includes any BuiltResumes with status = "completed", normalized to the
  * same shape so the frontend can render them in the same list.
  */
-export async function getResumesByUser(userId: string) {
+export async function getResumesByUser(userId: string, search?: string) {
   const [uploaded, built] = await Promise.all([
     prisma.resume.findMany({
       where: { userId },
@@ -175,6 +206,7 @@ export async function getResumesByUser(userId: string) {
   const normalizedBuilt = built.map((br) => ({
     id:            br.id,
     filename:      `${br.title}.pdf`,
+    title:         br.title,
     path:          "",
     size:          null,
     resumeContext: null,
@@ -199,7 +231,37 @@ export async function getResumesByUser(userId: string) {
       new Date(b.uploadedAt).getTime() - new Date(a.uploadedAt).getTime(),
   );
 
-  return merged;
+  if (!search?.trim()) {
+    return merged;
+  }
+
+  return merged.filter((resume) => {
+    if (resume.source === "builder") {
+      return matchesSearch(
+        search,
+        resume.filename,
+        resume.jobTitle,
+        resume.company,
+        resume.title,
+        JSON.stringify((built.find((br) => br.id === resume.id)?.fields ?? {})),
+        built.find((br) => br.id === resume.id)?.jobDescription ?? "",
+      );
+    }
+
+    const metadataIndex = (resume.metadataIndex ?? {}) as {
+      keywords?: string[];
+      normalizedFilename?: string;
+    };
+
+    return matchesSearch(
+      search,
+      resume.filename,
+      resume.resumeContext,
+      metadataIndex.normalizedFilename,
+      metadataIndex.keywords?.join(" "),
+    );
+  });
+
 }
 
 /**
@@ -391,6 +453,26 @@ export async function getAllTemplates() {
  * Deletes a resume record and its associated file from disk.
  * DB cascade handles the ATSAnalysis deletion.
  */
+export async function renameResume(id: string, filename: string): Promise<{ id: string; filename: string }> {
+  const trimmed = filename.trim();
+  if (!trimmed) {
+    throw Object.assign(new Error("Filename cannot be empty"), { statusCode: 400 });
+  }
+
+  const resume = await prisma.resume.findUnique({ where: { id } });
+  if (!resume) {
+    throw Object.assign(new Error("Resume not found"), { statusCode: 404 });
+  }
+
+  const updated = await prisma.resume.update({
+    where: { id },
+    data: { filename: trimmed },
+    select: { id: true, filename: true },
+  });
+
+  return updated;
+}
+
 export async function deleteResume(id: string): Promise<void> {
   const resume = await prisma.resume.findUnique({ where: { id } });
 

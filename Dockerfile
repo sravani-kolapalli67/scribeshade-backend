@@ -57,20 +57,36 @@ COPY --from=builder /app/dist ./dist
 RUN find node_modules/.prisma/client -name "query-engine-*" ! -name "*musl*" -delete 2>/dev/null || true
 
 # --- Production Stage ---
-FROM node:20-alpine AS runner
+# Use the official Playwright image as the runner base so Chromium is
+# pre-installed at the exact path Playwright expects.
+# The Playwright version here MUST match the version in package.json.
+# Check with: node -e "require('playwright/package.json').version"
+FROM mcr.microsoft.com/playwright:v1.59.1-noble AS runner
 
 WORKDIR /app
 ENV NODE_ENV=production
+# Tell Playwright where its browsers already live in this image.
+# The official image installs them under /ms-playwright.
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
-# Create a non-root user
-RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+# Install Node 20 (Playwright base image ships with the correct Node via nvm,
+# but pinning ensures we match the rest of the pipeline).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
 
-# COPY EVERYTHING IN ONE GO WITH CORRECT PERMISSIONS
-# This prevents the layer blowup caused by "chown -R"
+# Create a non-root user that matches the appuser convention used previously.
+# The Playwright image already has a 'pwuser'; we create appuser separately
+# so the existing file-permission model is unchanged.
+RUN groupadd -r appgroup && useradd -r -g appgroup appuser
+
+# Copy built artefacts from the staging stage with correct ownership in one layer.
 COPY --from=staging --chown=appuser:appgroup /app /app
+
+# Playwright browser binaries need to be readable by appuser.
+RUN chmod -R o+rX /ms-playwright
 
 USER appuser
 EXPOSE 3000
 
-# Runtime env vars: DATABASE_URL, etc.
 CMD ["node", "dist/server.js"]

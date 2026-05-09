@@ -245,6 +245,39 @@ export async function verifyAndConfirmPurchase(
   };
 }
 
+export async function markPurchaseFailed(
+  userId: string,
+  orderId: string,
+  failureReason?: string,
+): Promise<{ purchaseId: string }> {
+  const purchase = await prisma.creditPurchase.findUnique({
+    where: { paymentProviderEventId: orderId },
+  });
+
+  if (!purchase) {
+    throw new AppError(404, "Purchase order not found");
+  }
+
+  if (purchase.userId !== userId) {
+    throw new AppError(403, "Purchase does not belong to this user");
+  }
+
+  // Only PENDING orders can be marked as failed
+  if (purchase.status !== "PENDING") {
+    return { purchaseId: purchase.id };
+  }
+
+  await prisma.creditPurchase.update({
+    where: { id: purchase.id },
+    data: {
+      status: "FAILED",
+      ...(failureReason ? { packName: `${purchase.packName} [${failureReason}]` } : {}),
+    },
+  });
+
+  return { purchaseId: purchase.id };
+}
+
 // ─── Balance ──────────────────────────────────────────────────────────────────
 
 export async function getOrCreateBalance(userId: string) {

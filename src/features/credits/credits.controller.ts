@@ -188,6 +188,41 @@ export async function verifyPurchase(
 }
 
 /**
+ * POST /api/credits/purchase/fail
+ * Marks a pending Razorpay order as FAILED when payment is declined/dismissed.
+ */
+export async function failPurchase(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+) {
+  try {
+    const clerkId = getCurrentUserId(req);
+    const user = await prisma.user.findUnique({ where: { clerkId } });
+    if (!user) return next(new AppError(404, "User not found"));
+
+    const { razorpay_order_id, failure_reason } = (req.body ?? {}) as {
+      razorpay_order_id?: string;
+      failure_reason?: string;
+    };
+
+    if (!razorpay_order_id) {
+      return next(new AppError(400, "razorpay_order_id is required"));
+    }
+
+    const result = await creditsService.markPurchaseFailed(
+      user.id,
+      razorpay_order_id,
+      failure_reason,
+    );
+
+    return res.json({ success: true, data: result });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
  * GET /api/credits/purchases
  * Returns the authenticated user's purchase history.
  */
@@ -207,6 +242,81 @@ export async function getPurchases(
     });
 
     return res.json({ success: true, data: purchases });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * GET /api/credits/usage
+ * Returns paginated AI feature usage for the authenticated user. Powers the
+ * "AI Activity" section in Billing and is the operational counterpart to
+ * the financial CreditLedger feed.
+ *
+ * Query params:
+ *   - page (default 1)
+ *   - limit (default 20, max 100)
+ *   - operation (optional filter, e.g. "RESUME_ENHANCE_SECTION")
+ */
+export async function getUsage(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+) {
+  try {
+    const clerkId = getCurrentUserId(req);
+    const user = await prisma.user.findUnique({ where: { clerkId } });
+    if (!user) return next(new AppError(404, "User not found"));
+
+    const page = Math.max(1, Number(req.query.page) || 1);
+    const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 20));
+    const skip = (page - 1) * limit;
+
+    const where = {
+      userId: user.id,
+      ...(typeof req.query.operation === "string"
+        ? { operation: req.query.operation }
+        : {}),
+    };
+
+    const [entries, total] = await Promise.all([
+      prisma.creditUsage.findMany({
+        where,
+        orderBy: { createdAt: "desc" },
+        skip,
+        take: limit,
+      }),
+      prisma.creditUsage.count({ where }),
+    ]);
+
+    return res.json({
+      success: true,
+      data: entries,
+      pagination: { total, page, limit, pages: Math.ceil(total / limit) },
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * GET /api/credits/feature-costs
+ * Returns the active FeatureCost catalog so the frontend can render real-time,
+ * server-driven cost labels (e.g. "1 cr" on the AI Enhance button) instead of
+ * hard-coded constants. Public — no auth needed (this is pricing information).
+ */
+export async function getFeatureCosts(
+  _req: Request,
+  res: Response,
+  next: NextFunction,
+) {
+  try {
+    const rows = await prisma.featureCost.findMany({
+      where: { isActive: true },
+      orderBy: { featureKey: "asc" },
+      select: { featureKey: true, credits: true, label: true },
+    });
+    return res.json({ success: true, data: rows });
   } catch (err) {
     next(err);
   }

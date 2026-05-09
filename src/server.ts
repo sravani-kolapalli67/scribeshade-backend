@@ -5,6 +5,7 @@ import { env } from "./config/env";
 import { creditDeductionWorker } from "./features/jobs/credit-deduction.job";
 import { sessionWatchdogWorker, scheduleWatchdog } from "./features/jobs/session-watchdog.job";
 import { holdExpiryWorker } from "./features/jobs/hold-expiry.job";
+import { warmBrowser } from "./features/resume/resume.builder.service";
 
 const startServer = async () => {
   const app = createApp();
@@ -26,6 +27,9 @@ const startServer = async () => {
     );
 
     console.log("⚙️  BullMQ workers started");
+
+    // Pre-warm Chromium so the first PDF export doesn't pay the cold-start cost
+    warmBrowser();
   });
 };
 
