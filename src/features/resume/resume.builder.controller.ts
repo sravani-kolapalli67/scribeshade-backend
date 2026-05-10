@@ -219,14 +219,20 @@ export async function tailorResumeHandler(
   next: NextFunction,
 ): Promise<void> {
   try {
-    const { userId: bodyUserId, resumeId, jobDescription, jobTitle, company } =
+    const { userId: bodyUserId, resumeId, jobDescription, jobTitle, company, fields } =
       req.body as Partial<TailorResumeInput>;
     // userId is preferred from the resolved body (resolveUserId middleware converts
     // Clerk IDs to DB UUIDs). Fall back to Clerk auth for resilience.
     const userId = bodyUserId || getCurrentUserId(req);
 
-    if (!userId || !resumeId || !jobDescription) {
-      res.status(400).json({ error: "userId, resumeId, and jobDescription are required" });
+    if (!userId || !jobDescription) {
+      res.status(400).json({ error: "userId and jobDescription are required" });
+      return;
+    }
+
+    // resumeId is optional: manual/unsaved resumes pass fields directly instead.
+    if (!resumeId && (!fields || Object.keys(fields).length === 0)) {
+      res.status(400).json({ error: "Either resumeId or fields must be provided" });
       return;
     }
 
@@ -236,6 +242,7 @@ export async function tailorResumeHandler(
       jobDescription,
       jobTitle,
       company,
+      fields,
       idempotencyKey: req.idempotencyKey ?? null,
     });
     res.json(result);

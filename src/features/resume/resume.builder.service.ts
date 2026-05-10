@@ -800,15 +800,28 @@ export async function tailorResume(input: TailorResumeInput): Promise<{
 }> {
   const { userId, resumeId, jobDescription, jobTitle, company } = input;
 
-  const resume = await prisma.builtResume.findUnique({ where: { id: resumeId } });
-  if (!resume) {
-    throw new AppError(404, "Resume not found");
+  // ── Resolve current fields ─────────────────────────────────────────────────
+  // Two paths:
+  //  A) resumeId provided → load from DB (existing saved resume)
+  //  B) resumeId absent   → use inline `fields` from the request (manual / unsaved resume)
+  let currentFields: Partial<ResumeFields>;
+  let resolvedResumeId: string | undefined = resumeId;
+
+  if (resumeId) {
+    const resume = await prisma.builtResume.findUnique({ where: { id: resumeId } });
+    if (!resume) {
+      throw new AppError(404, "Resume not found");
+    }
+    currentFields = resume.fields as unknown as ResumeFields;
+  } else {
+    // Manual resume — use whatever fields were passed in
+    currentFields = (input.fields ?? {}) as Partial<ResumeFields>;
+    // Use a stable synthetic key so caching still works across regen calls
+    resolvedResumeId = undefined;
   }
 
   const cost = await getFeatureCost(RESUME_FEATURE_KEYS.TAILOR, DEFAULT_COST_TAILOR);
   const cacheKey = hashInput("tailor", jobDescription, jobTitle, company);
-
-  const currentFields = resume.fields as unknown as ResumeFields;
 
   const { result, creditsUsed, creditsRemaining, cached } = await withCreditedAiAction<{
     tailoredFields: Partial<ResumeFields>;
@@ -821,50 +834,151 @@ export async function tailorResume(input: TailorResumeInput): Promise<{
       operation: "RESUME_TAILOR",
       cost,
       idempotencyKey: input.idempotencyKey,
-      resumeId,
+      resumeId: resolvedResumeId,
       cacheKey,
       metadata: { jobTitle, company },
     },
     async () => {
-      const prompt = `
-You are an expert resume writer and ATS optimization specialist.
-Tailor the provided resume to the target job description by rewriting relevant sections.
+      const isManual = !resumeId; // no saved resume — build from scratch
 
-Target Job: ${jobTitle ?? "Not specified"} at ${company ?? "Not specified"}
-Job Description:
-${jobDescription.substring(0, 1500)}
+      // ── Full JD (up to 6 000 chars so nothing is lost) ──────────────────────
+      const jdFull = jobDescription.substring(0, 6000);
 
-Current Resume Fields:
+      // ── Prompt: SCRATCH path ─────────────────────────────────────────────────
+      const scratchPrompt = `
+You are a world-class resume writer and ATS specialist. Your job is to build a complete, realistic, ATS-optimised professional resume ENTIRELY from the job description below. The candidate has no existing resume — everything must be inferred and crafted from the JD.
+
+═══════════════════════════════════════════════════════
+STEP 1 — EXTRACT every piece of structured data from the JD:
+  • Job title (exact string from JD)
+  • Company name
+  • Location (Remote / Hybrid / City)
+  • Required years of experience (e.g. "4–7 years")
+  • Required tech stack — split into: languages, frameworks/libraries, databases, infrastructure/tools
+  • Preferred / nice-to-have skills
+  • Key responsibilities (what the candidate will do day-to-day)
+  • Required qualifications
+
+STEP 2 — BUILD each resume section using ONLY what you extracted:
+  role       → exact job title from the JD
+  location   → location from JD (if Remote, use "Remote" or pick a major city)
+  summary    → 3–4 sentences: senior professional with X years, list 4–5 tech skills verbatim from JD, mention company name, mention key domain (fintech / SaaS / platform / etc. as relevant)
+  experience → 2–3 past positions that PROVE the required qualifications:
+                 • Total timeline should match the required years (e.g. 5 years if JD says 4–7)
+                 • Use tech from JD's required stack in every bullet
+                 • Each bullet = accomplishment with metric where possible (e.g. "reduced latency by 40%")
+                 • Titles: one seniority level below or equal to the target role
+                 • Company names: realistic mid-to-large tech / fintech companies (NOT the hiring company)
+  skills     → populate EVERY skill category from the JD's tech stack section:
+                 skillsLanguages  → programming languages
+                 skillsFrameworks → frameworks, libraries, UI toolkits
+                 skillsDatabases  → databases, caches, message queues
+                 skillsTools      → DevOps, CI/CD, cloud, monitoring, version control
+  projects   → 2 portfolio projects that use the JD's tech stack, each with a clear outcome
+  education  → Bachelor's or Master's in Computer Science / Software Engineering from a realistic university
+
+CRITICAL RULES:
+  • Every skill in skills* fields MUST appear in the JD (required or preferred)
+  • Do NOT invent tech that is not in the JD
+  • Do NOT invent certifications unless the JD mentions them
+  • Keep name and email EXACTLY as provided below — do not change them
+  • Make the resume feel like a real person who is a strong match for this role
+
+Candidate identity (do not alter):
+  name: ${currentFields.name ?? ""}
+  email: ${currentFields.email ?? ""}
+
+Target role context:
+  Job Title: ${jobTitle ?? "(extract from JD)"}
+  Company:   ${company ?? "(extract from JD)"}
+
+Full Job Description:
+${jdFull}
+
+═══════════════════════════════════════════════════════
+Return ONLY a JSON object — no markdown, no extra text:
+{
+  "tailoredFields": {
+    "role": "...",
+    "location": "...",
+    "summary": "...",
+    "experience": "Company Name\\nJob Title\\nMonth Year – Month Year\\n• Achievement bullet with metric\\n• Achievement bullet with metric\\n• Achievement bullet with metric\\n\\nCompany Name 2\\nJob Title 2\\nMonth Year – Month Year\\n• Achievement bullet\\n• Achievement bullet",
+    "skillsLanguages": "Comma-separated languages from JD",
+    "skillsFrameworks": "Comma-separated frameworks/libs from JD",
+    "skillsDatabases": "Comma-separated databases from JD",
+    "skillsTools": "Comma-separated tools/infra from JD",
+    "projects": "Project Name\\n• What it does and why it matters\\n• Technologies used: list from JD stack\\n\\nProject Name 2\\n• What it does\\n• Technologies used: list from JD stack",
+    "education": "Degree Name\\nUniversity Name\\nGraduation Year"
+  },
+  "keywordsMatched": ["keyword1", "keyword2"],
+  "keywordsMissing": [],
+  "matchScore": 95
+}
+      `.trim();
+
+      // ── Prompt: EXISTING RESUME path ─────────────────────────────────────────
+      const existingResumePrompt = `
+You are a world-class resume writer and ATS specialist. You are given a candidate's existing resume AND a target job description. Your job is to tailor the resume to maximise ATS match while preserving everything the candidate has already done.
+
+PRIORITY ORDER (strictly follow this):
+  1. EXISTING RESUME CONTENT is the source of truth — real jobs, dates, companies, and projects must be kept intact
+  2. JD TECH STACK — add missing keywords from the JD into bullets and skills naturally where accurate
+  3. JD RESPONSIBILITIES — rewrite bullet points to mirror the language/verbs used in the JD
+  4. JD REQUIRED QUALIFICATIONS — ensure the summary explicitly addresses the most important ones
+
+RULES:
+  • DO NOT change company names, job titles, or date ranges in experience — these are real facts
+  • DO NOT fabricate experience the candidate does not have
+  • DO rewrite bullet points to match JD terminology (same outcome, better keywords)
+  • DO add JD skills to the relevant skills* fields IF they are plausible given the candidate's existing stack
+  • DO rewrite the summary to target this specific role and company by name
+  • DO update the role field to match the target job title if different
+  • Keep name and email EXACTLY as in the existing resume
+
+Existing Resume:
 ${JSON.stringify(
   {
-    summary: currentFields.summary,
-    experience: currentFields.experience,
-    skillsLanguages: currentFields.skillsLanguages,
-    skillsFrameworks: currentFields.skillsFrameworks,
-    skillsDatabases: currentFields.skillsDatabases,
-    skillsTools: currentFields.skillsTools,
-    projects: currentFields.projects,
+    name:              currentFields.name,
+    role:              currentFields.role,
+    location:          currentFields.location,
+    summary:           currentFields.summary,
+    experience:        currentFields.experience,
+    skillsLanguages:   currentFields.skillsLanguages,
+    skillsFrameworks:  currentFields.skillsFrameworks,
+    skillsDatabases:   currentFields.skillsDatabases,
+    skillsTools:       currentFields.skillsTools,
+    projects:          currentFields.projects,
+    education:         currentFields.education,
   },
   null,
   2,
 )}
 
-Return a JSON object with this exact shape (no extra text, no markdown):
+Target Job: ${jobTitle ?? "Not specified"} at ${company ?? "Not specified"}
+Full Job Description:
+${jdFull}
+
+═══════════════════════════════════════════════════════
+Return ONLY a JSON object — no markdown, no extra text:
 {
   "tailoredFields": {
+    "role": "...",
     "summary": "...",
-    "experience": "...",
+    "experience": "Company Name\\nJob Title\\nMonth Year – Month Year\\n• Tailored bullet with JD keywords\\n• Tailored bullet with metric\\n\\nCompany Name 2\\nJob Title 2\\nMonth Year – Month Year\\n• Tailored bullet\\n• Tailored bullet",
     "skillsLanguages": "...",
     "skillsFrameworks": "...",
     "skillsDatabases": "...",
     "skillsTools": "...",
-    "projects": "..."
+    "projects": "...",
+    "education": "..."
   },
   "keywordsMatched": ["keyword1", "keyword2"],
   "keywordsMissing": ["keyword3"],
   "matchScore": 82
 }
       `.trim();
+
+      const prompt = isManual ? scratchPrompt : existingResumePrompt;
 
       const response = await ai.chat.send({
         chatRequest: {

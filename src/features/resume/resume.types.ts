@@ -108,11 +108,14 @@ export interface MarkBuiltResumeCompleteInput {
 
 export interface TailorResumeInput {
   userId: string;
-  resumeId: string;
+  /** DB UUID of a saved BuiltResume. Optional when tailoring a manual (unsaved) resume. */
+  resumeId?: string;
   jobDescription: string;
   jobTitle?: string;
   company?: string;
   idempotencyKey?: string | null;
+  /** Current resume field values — used when resumeId is absent (manual/unsaved resume). */
+  fields?: Record<string, string>;
 }
 
 export interface ExportPdfInput {
