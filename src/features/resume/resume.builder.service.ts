@@ -29,6 +29,14 @@ import type {
 // ─────────────────────────────────────────────────────────────────────────────
 
 const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL;
+
+// Resume tailoring is a complex multi-section structured-rewrite task that small
+// open-weight models (e.g. Gemma 4) handle poorly — they tend to echo the input
+// instead of rewriting. Override with a stronger reasoning model just for this
+// task. Configurable via OPENROUTER_RESUME_TAILOR_MODEL env var.
+const TAILOR_MODEL =
+  process.env.OPENROUTER_RESUME_TAILOR_MODEL ||
+  "anthropic/claude-sonnet-4.5";
 // Absolute path — safe across Docker, PM2, and any working-directory variation.
 const EXPORTS_DIR = path.resolve(process.cwd(), "uploads/exports");
 
@@ -860,7 +868,8 @@ export async function tailorResume(input: TailorResumeInput): Promise<{
   }
 
   const cost = await getFeatureCost(RESUME_FEATURE_KEYS.TAILOR, DEFAULT_COST_TAILOR);
-  const cacheKey = hashInput("tailor", jobDescription, jobTitle, company);
+  const _isManualForCache = !resumeId;
+  const cacheKey = hashInput("tailor_v9_locked_fields", jobTitle ?? "", company ?? "", jobDescription, _isManualForCache ? "scratch" : "existing");
 
   const { result, creditsUsed, creditsRemaining, cached } = await withCreditedAiAction<{
     tailoredFields: Partial<ResumeFields>;
@@ -878,75 +887,91 @@ export async function tailorResume(input: TailorResumeInput): Promise<{
       metadata: { jobTitle, company },
     },
     async () => {
-      const isManual = !resumeId; // no saved resume — build from scratch
+      // "scratch" = truly no resume context — AI invents everything (Path B: from JD only).
+      // "existing" = has uploaded/saved resume fields → use truth-preserving rewrite engine.
+      // Key fix: inline fields passed without a resumeId (wizard upload flow) are still
+      // "existing resume" context — NOT scratch. Only treat as scratch when fields are empty.
+      const hasInlineFields =
+        input.fields != null && Object.values(input.fields).some((v) => v && v.trim().length > 0);
+      const isManual = !resumeId && !hasInlineFields; // true only when truly building from JD alone
 
       // ── Full JD (up to 6 000 chars so nothing is lost) ──────────────────────
       const jdFull = jobDescription.substring(0, 6000);
+      const hasJD  = jdFull.trim().length >= 50;
 
-      // ── Prompt: SCRATCH path ─────────────────────────────────────────────────
+      // ── Resolve target role: explicit input wins, else extract from JD ───────
+      // Extract the first line of the JD that looks like a job title so the AI
+      // always has a concrete target — never falls back to inferring from resume.
+      const resolvedJobTitle = (jobTitle && jobTitle.trim())
+        ? jobTitle.trim()
+        : (() => {
+            // Try to pull "Job Title: X" or the first short line from JD
+            const match = jdFull.match(/(?:job\s*title|position|role)\s*[:\-–]\s*([^\n]+)/i)
+              ?? jdFull.match(/^(.{5,60})\n/);
+            return match ? match[1].trim() : "";
+          })();
+      const resolvedCompany = (company && company.trim()) ? company.trim() : "";
+
+      console.log("[resume.tailor] resolvedJobTitle:", resolvedJobTitle, "| resolvedCompany:", resolvedCompany);
+
+      // ─────────────────────────────────────────────────────────────────────────
+      // SCRATCH PROMPT
+      // Build a complete resume from Job Title alone (JD is optional bonus).
+      // Skills come from the LATEST industry-standard tech for the role in 2026,
+      // not blindly from the JD — so a "Senior React Engineer" always gets
+      // React 18, TypeScript, Next.js, Zustand, etc. even if the JD is vague.
+      // ─────────────────────────────────────────────────────────────────────────
       const scratchPrompt = `
-You are a world-class resume writer and ATS specialist. Your job is to build a complete, realistic, ATS-optimised professional resume ENTIRELY from the job description below. The candidate has no existing resume — everything must be inferred and crafted from the JD.
+You are a world-class resume writer and ATS specialist writing for the year 2026.
+Your task: build a COMPLETE, realistic, ATS-optimised professional resume for a candidate applying to the role described below. The candidate has no existing resume — invent all content.
 
-═══════════════════════════════════════════════════════
-STEP 1 — EXTRACT every piece of structured data from the JD:
-  • Job title (exact string from JD)
-  • Company name
-  • Location (Remote / Hybrid / City)
-  • Required years of experience (e.g. "4–7 years")
-  • Required tech stack — split into: languages, frameworks/libraries, databases, infrastructure/tools
-  • Preferred / nice-to-have skills
-  • Key responsibilities (what the candidate will do day-to-day)
-  • Required qualifications
+═══════════════════════════════════════════
+TARGET ROLE
+  Job Title : ${resolvedJobTitle || "(infer from JD below)"}
+  Company   : ${resolvedCompany || "(not specified)"}
+${hasJD ? `\nJob Description:\n${jdFull}` : ""}
 
-STEP 2 — BUILD each resume section using ONLY what you extracted:
-  role       → exact job title from the JD
-  location   → location from JD (if Remote, use "Remote" or pick a major city)
-  summary    → 3–4 sentences: senior professional with X years, list 4–5 tech skills verbatim from JD, mention company name, mention key domain (fintech / SaaS / platform / etc. as relevant)
-  experience → 2–3 past positions that PROVE the required qualifications:
-                 • Total timeline should match the required years (e.g. 5 years if JD says 4–7)
-                 • Use tech from JD's required stack in every bullet
-                 • Each bullet = accomplishment with metric where possible (e.g. "reduced latency by 40%")
-                 • Titles: one seniority level below or equal to the target role
-                 • Company names: realistic mid-to-large tech / fintech companies (NOT the hiring company)
-  skills     → populate EVERY skill category from the JD's tech stack section:
-                 skillsLanguages  → programming languages
-                 skillsFrameworks → frameworks, libraries, UI toolkits
-                 skillsDatabases  → databases, caches, message queues
-                 skillsTools      → DevOps, CI/CD, cloud, monitoring, version control
-  projects   → 2 portfolio projects that use the JD's tech stack, each with a clear outcome
+═══════════════════════════════════════════
+STEP 1 — DETERMINE THE IDEAL 2026 TECH STACK FOR THIS ROLE
+  • Based on the job title (and JD if provided), select the tech stack that top engineers in this exact role use in 2026.
+  • If a JD is provided, treat it as the PRIMARY source — use its required and preferred tech.
+  • If no JD, use current industry-standard tools for the title (e.g. "Senior React Engineer" → React 18, TypeScript, Next.js 14, Zustand, React Query, Vite, Vitest, Tailwind CSS, Node.js, PostgreSQL, Docker, GitHub Actions).
+  • Populate ALL four skill categories: languages, frameworks, databases, tools/infra.
+
+STEP 2 — CRAFT EACH RESUME SECTION
+  role       → exact job title
+  location   → "Remote" or a major tech hub city relevant to the company/role
+  summary    → 3–4 sentences: "X+ years", 5–6 core tech skills from STEP 1, mention company name if provided, relevant domain (fintech / SaaS / platform / etc.)
+  experience → 2–3 past positions that PROVE the candidate is qualified:
+               • Total timeline = required years (default 5–6 if not specified)
+               • Format EXACTLY:
+                   Company Name | Job Title | Month Year – Month Year
+                   • Bullet with metric/achievement using stack from STEP 1
+                   • Bullet with metric/achievement
+                   • Bullet with metric/achievement
+               • Company names: realistic mid-to-large companies (NOT the hiring company)
+               • Bullet style: action verb + outcome + technology (e.g. "Reduced API latency 40% by migrating to Redis caching")
+  skills     → use the stack from STEP 1 — every item MUST be relevant to the role
+  projects   → 2 portfolio projects using stack from STEP 1, each with a measurable outcome
   education  → Bachelor's or Master's in Computer Science / Software Engineering from a realistic university
 
-CRITICAL RULES:
-  • Every skill in skills* fields MUST appear in the JD (required or preferred)
-  • Do NOT invent tech that is not in the JD
-  • Do NOT invent certifications unless the JD mentions them
-  • Keep name and email EXACTLY as provided below — do not change them
-  • Make the resume feel like a real person who is a strong match for this role
-
-Candidate identity (do not alter):
-  name: ${currentFields.name ?? ""}
+LOCKED — NEVER change these:
+  name : ${currentFields.name ?? ""}
   email: ${currentFields.email ?? ""}
 
-Target role context:
-  Job Title: ${jobTitle ?? "(extract from JD)"}
-  Company:   ${company ?? "(extract from JD)"}
-
-Full Job Description:
-${jdFull}
-
-═══════════════════════════════════════════════════════
+═══════════════════════════════════════════
 Return ONLY a JSON object — no markdown, no extra text:
 {
   "tailoredFields": {
     "role": "...",
     "location": "...",
     "summary": "...",
-    "experience": "Company Name\\nJob Title\\nMonth Year – Month Year\\n• Achievement bullet with metric\\n• Achievement bullet with metric\\n• Achievement bullet with metric\\n\\nCompany Name 2\\nJob Title 2\\nMonth Year – Month Year\\n• Achievement bullet\\n• Achievement bullet",
-    "skillsLanguages": "Comma-separated languages from JD",
-    "skillsFrameworks": "Comma-separated frameworks/libs from JD",
-    "skillsDatabases": "Comma-separated databases from JD",
-    "skillsTools": "Comma-separated tools/infra from JD",
-    "projects": "Project Name\\n• What it does and why it matters\\n• Technologies used: list from JD stack\\n\\nProject Name 2\\n• What it does\\n• Technologies used: list from JD stack",
+    "experience": "Company Name | Job Title | Month Year – Month Year\\n• Achievement bullet with metric and tech\\n• Achievement bullet with metric\\n• Achievement bullet\\n\\nCompany Name 2 | Job Title 2 | Month Year – Month Year\\n• Achievement bullet\\n• Achievement bullet",
+    "skillsLanguages": "Comma-separated languages",
+    "skillsFrameworks": "Comma-separated frameworks & libraries",
+    "skillsDatabases": "Comma-separated databases, caches, queues",
+    "skillsTools": "Comma-separated DevOps, cloud, CI/CD, monitoring tools",
+    "projects": "Project Name\\n• What it does and the outcome\\n• Technologies: list from STEP 1 stack\\n\\nProject Name 2\\n• What it does\\n• Technologies: list from STEP 1 stack",
     "education": "Degree Name\\nUniversity Name\\nGraduation Year"
   },
   "keywordsMatched": ["keyword1", "keyword2"],
@@ -955,74 +980,393 @@ Return ONLY a JSON object — no markdown, no extra text:
 }
       `.trim();
 
-      // ── Prompt: EXISTING RESUME path ─────────────────────────────────────────
-      const existingResumePrompt = `
-You are a world-class resume writer and ATS specialist. You are given a candidate's existing resume AND a target job description. Your job is to tailor the resume to maximise ATS match while preserving everything the candidate has already done.
+      // ─────────────────────────────────────────────────────────────────────────
+      // EXPERIENCE GUARD — parse source experience into locked headers + bullets
+      //
+      // The AI is not permitted to invent employers, titles, or dates.
+      // We parse the source experience into structured blocks, pass only the
+      // header lines to the model as immutable anchors, and after the model
+      // responds we deterministically verify (and if needed restore) them.
+      // ─────────────────────────────────────────────────────────────────────────
 
-PRIORITY ORDER (strictly follow this):
-  1. EXISTING RESUME CONTENT is the source of truth — real jobs, dates, companies, and projects must be kept intact
-  2. JD TECH STACK — add missing keywords from the JD into bullets and skills naturally where accurate
-  3. JD RESPONSIBILITIES — rewrite bullet points to mirror the language/verbs used in the JD
-  4. JD REQUIRED QUALIFICATIONS — ensure the summary explicitly addresses the most important ones
+      /**
+       * Represents one parsed experience block from the source resume.
+       * header  — the "Company | Title | Dates" or "Company\nTitle\nDates" line(s)
+       * bullets — the editable bullet lines beneath that header
+       */
+      interface ExpBlock {
+        header: string;   // verbatim — locked
+        bullets: string;  // rewriteable
+      }
 
-RULES:
-  • DO NOT change company names, job titles, or date ranges in experience — these are real facts
-  • DO NOT fabricate experience the candidate does not have
-  • DO rewrite bullet points to match JD terminology (same outcome, better keywords)
-  • DO add JD skills to the relevant skills* fields IF they are plausible given the candidate's existing stack
-  • DO rewrite the summary to target this specific role and company by name
-  • DO update the role field to match the target job title if different
-  • Keep name and email EXACTLY as in the existing resume
+      /**
+       * Split raw experience text into blocks.
+       * Handles both common formats:
+       *   Format A: "Company | Title | Dates\n• bullet\n\nCompany2 | …"
+       *   Format B: "Company\nTitle\nDates\n• bullet\n\nCompany2\n…"
+       * Returns [] when experience is empty or unparseable.
+       */
+      function parseExperienceBlocks(raw: string): ExpBlock[] {
+        if (!raw || !raw.trim()) return [];
+        const blocks = raw.trim().split(/\n\s*\n/);
+        return blocks
+          .map((block) => {
+            const lines = block.trim().split("\n");
+            const headerLines: string[] = [];
+            const bulletLines: string[] = [];
+            for (const line of lines) {
+              if (line.trimStart().startsWith("•") || line.trimStart().startsWith("-") || line.trimStart().startsWith("*")) {
+                bulletLines.push(line);
+              } else {
+                // Non-bullet lines before first bullet are the header
+                if (bulletLines.length === 0) {
+                  headerLines.push(line);
+                } else {
+                  // Non-bullet after bullet = start of next block? Keep as bullet continuation.
+                  bulletLines.push(line);
+                }
+              }
+            }
+            return {
+              header: headerLines.join("\n").trim(),
+              bullets: bulletLines.join("\n").trim(),
+            };
+          })
+          .filter((b) => b.header.length > 0);
+      }
 
-Existing Resume:
+      /**
+       * Rebuild a full experience string from blocks, preserving blank-line separation.
+       */
+      function rebuildExperience(blocks: ExpBlock[]): string {
+        return blocks.map((b) => (b.bullets ? `${b.header}\n${b.bullets}` : b.header)).join("\n\n");
+      }
+
+      /**
+       * Extract just the header tokens from an experience block header string.
+       * Normalises whitespace and lowercases for comparison.
+       */
+      function headerTokens(header: string): string[] {
+        return header
+          .toLowerCase()
+          .split(/[\|\n,–\-]+/)
+          .map((t) => t.trim())
+          .filter((t) => t.length > 0);
+      }
+
+      /**
+       * Given source blocks and AI-returned experience text, validate and restore.
+       *
+       * Strategy:
+       *  1. Parse the AI output into blocks.
+       *  2. For each source block, find the best-matching AI block by header similarity.
+       *  3. If match found → replace AI header with source header (locked), keep AI bullets.
+       *  4. If no match found for a source block → keep source header + source bullets (fallback).
+       *  5. Discard any AI blocks that don't correspond to a source block (invented employers).
+       *
+       * Returns { experience, headersFabricated } where headersFabricated=true means
+       * the guard had to intervene.
+       */
+      function validateAndRestoreExperience(
+        sourceBlocks: ExpBlock[],
+        aiExperience: string,
+      ): { experience: string; headersFabricated: boolean } {
+        if (sourceBlocks.length === 0) {
+          // No source blocks to validate against — trust the AI output.
+          return { experience: aiExperience, headersFabricated: false };
+        }
+
+        const aiBlocks = parseExperienceBlocks(aiExperience);
+        let fabricated = false;
+
+        const mergedBlocks: ExpBlock[] = sourceBlocks.map((src) => {
+          const srcTokens = headerTokens(src.header);
+
+          // Score each AI block by how many header tokens it shares with the source block.
+          let bestBlock: ExpBlock | null = null;
+          let bestScore = 0;
+          for (const ai of aiBlocks) {
+            const aiTokens = headerTokens(ai.header);
+            const shared = srcTokens.filter((t) =>
+              aiTokens.some((at) => at.includes(t) || t.includes(at)),
+            ).length;
+            const score = shared / Math.max(srcTokens.length, 1);
+            if (score > bestScore) {
+              bestScore = score;
+              bestBlock = ai;
+            }
+          }
+
+          // Threshold: must share at least 40% of header tokens to be considered a match.
+          if (bestBlock && bestScore >= 0.4) {
+            if (bestBlock.header.trim() !== src.header.trim()) {
+              fabricated = true;
+              console.warn(
+                "[resume.tailor] ⚠ header mismatch — restoring source header",
+                { source: src.header.trim(), ai: bestBlock.header.trim(), score: bestScore },
+              );
+            }
+            return { header: src.header, bullets: bestBlock.bullets };
+          }
+
+          // No match: AI removed or completely renamed this job — fall back to source.
+          fabricated = true;
+          console.warn(
+            "[resume.tailor] ⚠ no AI match for source block — using source fallback",
+            { source: src.header.trim() },
+          );
+          return { header: src.header, bullets: src.bullets };
+        });
+
+        return { experience: rebuildExperience(mergedBlocks), headersFabricated: fabricated };
+      }
+
+      // ── Parse source experience now, before calling the model ──────────────
+      const sourceExpBlocks = parseExperienceBlocks(currentFields.experience ?? "");
+      const sourceHeadersText = sourceExpBlocks.map((b) => b.header).join("\n---\n");
+
+      console.log("[resume.tailor] source experience headers:", sourceExpBlocks.map((b) => b.header));
+
+      // ─────────────────────────────────────────────────────────────────────────
+      // EXISTING RESUME — TRUTH-PRESERVING REWRITE ENGINE
+      //
+      // PRD alignment: Scribeshade rewrites editable content for the target JD,
+      // but NEVER fabricates work history. Employers, job titles, and dates are
+      // immutable facts — only bullet wording may change.
+      // ─────────────────────────────────────────────────────────────────────────
+
+      const systemMessage = `
+You are Scribeshade's "Truth-Preserving Rewrite Engine" for JD-specific resume tailoring.
+
+TARGET ROLE: ${resolvedJobTitle || "(see JD below)"}${resolvedCompany ? ` at ${resolvedCompany}` : ""}
+
+════════════════════════════════════════════════════════════
+ABSOLUTE RULE — FACTUAL FIELDS ARE NEVER A REWRITE ZONE
+════════════════════════════════════════════════════════════
+
+WORK EXPERIENCE:
+  • You may ONLY rewrite the bullet text (lines starting with "•") under each job.
+  • You MUST preserve every company name, job title, and date range EXACTLY as given.
+  • You MUST NOT create new employers, new titles, or new date ranges.
+  • You MUST NOT output any experience block whose header line is not in the SOURCE HEADERS below.
+  • Do NOT replace a real employer with a famous tech company (Google, Spotify, Netflix, Uber, etc.).
+
+EDUCATION — FACTUAL HISTORY, NOT A REWRITE ZONE:
+  • If institution name, degree, GPA, or education dates are present in the uploaded resume,
+    copy them EXACTLY. Do not modify, replace, upgrade, or fabricate them.
+  • Do not change BCA to B.Tech, B.S., M.S., or any other degree.
+  • Do not change "Mohanlal Sukhadia University" to "University of California" or any other school.
+  • Do not add GPA, honors, or coursework if not present in the source.
+  • If education is missing from the source resume, leave "education" as an empty string — never invent it.
+
+CERTIFICATIONS:
+  • Copy the entire certifications field verbatim from the source. Do not alter issuer names or dates.
+
+PERSONAL INFO:
+  • name, email, phone, location — copy verbatim from source. Never alter.
+
+SOURCE EXPERIENCE HEADERS (copy these verbatim into your output — do not alter a single character):
+${sourceHeadersText || "(no experience provided)"}
+
+WHAT YOU MAY REWRITE:
+  • "role"     — set to EXACT target job title
+  • "summary"  — 3–4 sentences targeting the applied role; open with target-role identity
+  • Bullet lines under each existing job (ONLY the "•" lines, NOT the header)
+  • "skillsLanguages", "skillsFrameworks", "skillsDatabases", "skillsTools"
+  • Project descriptions (project names stay verbatim)
+
+ABSOLUTE OUTPUT RULES:
+  1. Output ONLY a single JSON object. No prose, no markdown fences.
+  2. "role" MUST equal "${resolvedJobTitle || "the target job title from the JD"}".
+  3. Experience headers MUST match SOURCE EXPERIENCE HEADERS exactly.
+  4. "education" MUST equal the source education exactly (or empty string if source was empty).
+  5. Do NOT invent companies, titles, dates, degrees, universities, or certifications.
+  6. "summary" must NOT mention the candidate's old domain as their identity.
+      `.trim();
+
+      const userPrompt = `
+═══════════════════════════════════════════════════════════════════
+TRUTH-PRESERVING REWRITE MODE — ACTIVE
+
+PRIMARY SOURCE OF TRUTH (priority order):
+  1. Target Job Title : ${resolvedJobTitle || "(extract from JD — first line that names the role)"}
+  2. Target Company   : ${resolvedCompany || "(extract from JD)"}
+  3. Job Description${hasJD ? `:\n\n--- JOB DESCRIPTION ---\n${jdFull}\n--- END JOB DESCRIPTION ---` : " : NOT PROVIDED — rely on title alone"}
+
+═══════════════════════════════════════════════════════════════════
+LOCKED FACTS — COPY THESE VERBATIM, DO NOT ALTER A SINGLE CHARACTER
+
+EXPERIENCE HEADERS (company name, job title, dates — locked):
+${sourceHeadersText || "(none)"}
+
+  • Never create a new company, title, or date range.
+  • Never replace a real employer with a famous tech company (Google, Spotify, Netflix, Uber, etc.).
+  • Never change the number of jobs or their chronological order.
+  • Treat these headers as constants — paste them back unchanged in your output.
+
+EDUCATION — LOCKED FACTUAL HISTORY:
+${currentFields.education?.trim() ? `Source education (copy this EXACTLY — do not alter a single word, date, degree name, or institution name):\n${currentFields.education.trim()}` : "Source education: (empty — do NOT invent any education block; leave 'education' as empty string \"\")"}
+
+  • Do not upgrade the degree (BCA stays BCA, not B.Tech or M.S.).
+  • Do not change the institution name to a more prestigious school.
+  • Do not add GPA, honors, coursework, or dates that were not in the source.
+  • If source education is empty, output "education": "" — never invent an institution.
+
+CERTIFICATIONS — LOCKED:
+${currentFields.certifications?.trim() ? `Source certifications (copy verbatim):\n${currentFields.certifications.trim()}` : "Source certifications: (empty — output \"certifications\": \"\")"}
+
+Personal: name="${currentFields.name ?? ""}", email="${currentFields.email ?? ""}",
+          phone="${currentFields.phone ?? ""}", location="${currentFields.location ?? ""}"
+
+═══════════════════════════════════════════════════════════════════
+WHAT YOU MUST REWRITE (editable fields — transform for the target role)
+
+  ▸ role     — set to EXACT target job title
+  ▸ summary  — 3–4 sentence profile for a ${resolvedJobTitle || "target-role"} professional.
+               Open with the target-role identity. Reference company/domain if provided.
+               Mention 4–6 core 2026 technologies for this role.
+               DO NOT say "transitioning from" or name the old domain.
+  ▸ experience BULLETS ONLY — for each locked job above, rewrite the bullet lines:
+               • Use target-role vocabulary, tools, verbs, and success metrics.
+               • Reframe the candidate's real work toward the closest analogous
+                 target-role activity (e.g. building a mobile sync layer → designing
+                 a CDC pipeline / streaming ingestion system).
+               • Preserve any real metrics from the source; never invent new numbers.
+               • 3–5 bullets per position. ≥60% of bullets must name a target-stack tool.
+               • DO NOT keep old-domain jargon with no target-role analogue.
+  ▸ skills   — replace all four fields with the ideal 2026 stack for the target role.
+               Include every tech in the JD plus the broader modern stack.
+  ▸ projects — project NAMES are locked. Rewrite every description for target-role relevance.
+  ▸ certifications — issuer + date locked; rewrite description toward target role.
+  ▸ education — copy verbatim.
+
+═══════════════════════════════════════════════════════════════════
+EXPERIENCE FORMAT RULES
+
+  Detect the header format from the source:
+    Format A: "Company | Title | Dates"  (pipe-separated single line)
+    Format B: "Company\\nTitle\\nDates"   (separate lines)
+  Use the same format in your output.
+  Header lines: PASTE VERBATIM (exactly as shown in SOURCE EXPERIENCE HEADERS above).
+  Bullet lines: replace with new target-role bullets starting with "•".
+  Preserve blank lines between job blocks.
+
+═══════════════════════════════════════════════════════════════════
+CONCRETE EXAMPLE
+
+  LOCKED HEADERS (from source resume):
+    WebSenor | React Developer | Jun 2022 – Dec 2023
+    MyPay Communication | MERN Developer | Jan 2024 – Present
+
+  TARGET ROLE: Data Engineer
+
+  WRONG — NEVER DO THIS (invented employers):
+    Spotify | Data Engineer | 2022 – 2023
+    Uber | Senior Data Engineer | 2023 – Present
+
+  CORRECT:
+    WebSenor | React Developer | Jun 2022 – Dec 2023
+    • Designed event-driven ingestion pipeline processing 20K+ daily user events
+      into a partitioned data lake on S3, enabling downstream Spark aggregation jobs.
+    • Built CDC-style sync layer (React Native + SQLite + Postgres) — same idempotency
+      patterns applied to Kafka consumer groups for exactly-once delivery.
+    • Reduced dashboard query latency 35% by introducing Redis caching on hot
+      analytics endpoints; later ported the pattern to a materialized view in Snowflake.
+
+    MyPay Communication | MERN Developer | Jan 2024 – Present
+    • Instrumented transaction event streams using Kafka producers, enabling
+      real-time payment reconciliation across distributed microservices.
+    • Modelled transactional data in PostgreSQL with a star-schema design;
+      wrote dbt models to populate a BI-ready data mart for finance reporting.
+
+  Note: company names and dates are unchanged. Only bullets are new.
+
+═══════════════════════════════════════════════════════════════════
+SELF-CHECK BEFORE RETURNING — every box MUST be true:
+  □ "role" equals the target job title.
+  □ "summary" opens with the target-role identity. Old domain not mentioned.
+  □ Every experience header matches the SOURCE EXPERIENCE HEADERS exactly.
+  □ No new company or title appears in "experience" that was not in the source.
+  □ ≥60% of experience bullets contain a target-stack tool name.
+  □ All four "skills*" fields replaced with target 2026 stack.
+  □ Project names are unchanged; descriptions are rewritten.
+  □ "education" exactly matches the SOURCE EDUCATION above (or empty string if source was empty).
+  □ "certifications" exactly matches the SOURCE CERTIFICATIONS above (or empty string if source was empty).
+If any box fails — REWRITE before responding.
+
+═══════════════════════════════════════════════════════════════════
+EXISTING RESUME (factual context — extract facts, then transform editable sections):
+
 ${JSON.stringify(
   {
-    name:              currentFields.name,
-    role:              currentFields.role,
-    location:          currentFields.location,
-    summary:           currentFields.summary,
-    experience:        currentFields.experience,
-    skillsLanguages:   currentFields.skillsLanguages,
-    skillsFrameworks:  currentFields.skillsFrameworks,
-    skillsDatabases:   currentFields.skillsDatabases,
-    skillsTools:       currentFields.skillsTools,
-    projects:          currentFields.projects,
-    education:         currentFields.education,
+    name:             currentFields.name,
+    role:             currentFields.role,
+    location:         currentFields.location,
+    summary:          currentFields.summary,
+    experience:       currentFields.experience,
+    skillsLanguages:  currentFields.skillsLanguages,
+    skillsFrameworks: currentFields.skillsFrameworks,
+    skillsDatabases:  currentFields.skillsDatabases,
+    skillsTools:      currentFields.skillsTools,
+    projects:         currentFields.projects,
+    education:        currentFields.education,
+    certifications:   currentFields.certifications,
   },
   null,
   2,
 )}
 
-Target Job: ${jobTitle ?? "Not specified"} at ${company ?? "Not specified"}
-Full Job Description:
-${jdFull}
-
-═══════════════════════════════════════════════════════
-Return ONLY a JSON object — no markdown, no extra text:
+═══════════════════════════════════════════════════════════════════
+RETURN ONLY THIS JSON — nothing else:
 {
   "tailoredFields": {
-    "role": "...",
-    "summary": "...",
-    "experience": "Company Name\\nJob Title\\nMonth Year – Month Year\\n• Tailored bullet with JD keywords\\n• Tailored bullet with metric\\n\\nCompany Name 2\\nJob Title 2\\nMonth Year – Month Year\\n• Tailored bullet\\n• Tailored bullet",
-    "skillsLanguages": "...",
-    "skillsFrameworks": "...",
-    "skillsDatabases": "...",
-    "skillsTools": "...",
-    "projects": "...",
-    "education": "..."
+    "role": "exact target job title",
+    "summary": "fully rewritten target-role profile, 3-4 sentences",
+    "experience": "VERBATIM header line 1\\n• rewritten bullet\\n• rewritten bullet\\n\\nVERBATIM header line 2\\n• rewritten bullet\\n• rewritten bullet",
+    "skillsLanguages": "target 2026 languages",
+    "skillsFrameworks": "target 2026 frameworks/libs",
+    "skillsDatabases": "target 2026 databases/warehouses",
+    "skillsTools": "target 2026 DevOps/cloud/orchestration",
+    "projects": "VERBATIM Project Name\\n• Rewritten in target-role language\\n• Tech: target stack\\n\\nVERBATIM Project Name 2\\n• Rewritten",
+    "education": "COPY SOURCE EDUCATION VERBATIM (or empty string if source was empty)",
+    "certifications": "COPY SOURCE CERTIFICATIONS VERBATIM (or empty string if source was empty)"
   },
-  "keywordsMatched": ["keyword1", "keyword2"],
-  "keywordsMissing": ["keyword3"],
-  "matchScore": 82
+  "keywordsMatched": ["target-stack-keyword-from-jd", "..."],
+  "keywordsMissing": ["jd-keyword-not-fittable", "..."],
+  "matchScore": 88
 }
       `.trim();
 
-      const prompt = isManual ? scratchPrompt : existingResumePrompt;
+      const useSystemMessages = !isManual;
+      const messages = useSystemMessages
+        ? [
+            { role: "system" as const, content: systemMessage },
+            { role: "user"   as const, content: userPrompt },
+          ]
+        : [{ role: "user" as const, content: scratchPrompt }];
+
+      // Diagnostics: confirm exactly what we're sending to the model so we can
+      // verify the system message + JD + target role are reaching the LLM.
+      console.log("[resume.tailor] →", {
+        model: TAILOR_MODEL,
+        path: useSystemMessages ? "existing-resume" : "scratch",
+        jobTitle,
+        company,
+        jdChars: jobDescription.length,
+        hasJD,
+        messageRoles: messages.map((m) => m.role),
+        systemChars: useSystemMessages ? systemMessage.length : 0,
+        userChars: useSystemMessages ? userPrompt.length : scratchPrompt.length,
+      });
 
       const response = await ai.chat.send({
         chatRequest: {
-          model: OPENROUTER_MODEL,
-          messages: [{ role: "user", content: prompt }],
+          model: TAILOR_MODEL,
+          messages,
+          // Slightly higher temperature so the rewrite is genuinely fresh prose,
+          // not a near-copy of the input bullets. The strict prompt + self-check
+          // keep factual integrity intact.
+          temperature: 0.7,
         },
       });
 
@@ -1038,12 +1382,107 @@ Return ONLY a JSON object — no markdown, no extra text:
         throw new AppError(502, "AI returned an unparseable response");
       }
 
+      // ══════════════════════════════════════════════════════════════════════
+      // POST-AI LOCKED-FIELD GUARD
+      // Deterministically restores all factual fields that must never be
+      // fabricated by the model, regardless of what the prompt said.
+      //
+      // Fields guarded here:
+      //   • education          — institution, degree, dates — never invent
+      //   • certifications     — issuer + dates — never invent (desc is ok)
+      //   • name/email/phone/location — always locked
+      //   • experience headers — handled by validateAndRestoreExperience below
+      // ══════════════════════════════════════════════════════════════════════
+
+      const lockedFieldLog: Record<string, { source: string; ai: string }> = {};
+
+      /**
+       * Hard-lock a single string field: if source has a value, AI output
+       * must match it exactly. If source is empty, discard AI output.
+       */
+      function guardLockedField(
+        fieldName: keyof ResumeFields,
+        sourceValue: string | null | undefined,
+      ): void {
+        const aiValue = (parsed!.tailoredFields as Record<string, string>)[fieldName as string] ?? "";
+        const src     = (sourceValue ?? "").trim();
+
+        if (src.length > 0) {
+          // Source has value — AI must not change it
+          if (aiValue.trim() !== src) {
+            lockedFieldLog[fieldName as string] = { source: src, ai: aiValue };
+            (parsed!.tailoredFields as Record<string, string>)[fieldName as string] = src;
+          }
+        } else {
+          // Source is empty — AI must not fabricate
+          if (aiValue.trim().length > 0) {
+            lockedFieldLog[fieldName as string] = { source: "(empty)", ai: aiValue };
+            (parsed!.tailoredFields as Record<string, string>)[fieldName as string] = "";
+          }
+        }
+      }
+
+      // ── Education guard ───────────────────────────────────────────────────
+      // Education is entirely factual. If source has it, copy it verbatim.
+      // If source is empty, AI must not invent it.
+      guardLockedField("education", currentFields.education);
+
+      // ── Personal facts guard ──────────────────────────────────────────────
+      guardLockedField("name",     currentFields.name);
+      guardLockedField("email",    currentFields.email);
+      guardLockedField("phone",    currentFields.phone);
+      guardLockedField("location", currentFields.location);
+
+      // ── Certifications: preserve issuer+dates by restoring original when source exists ─
+      // The full certs string contains issuer+dates (factual) mixed with description
+      // (editable). For safety, if source has certs, keep the whole source value.
+      // The model is allowed to rewrite descriptions only when we can parse them —
+      // for now the safe default is to lock the whole field.
+      guardLockedField("certifications", currentFields.certifications);
+
+      if (Object.keys(lockedFieldLog).length > 0) {
+        console.warn("[resume.tailor] ⚠ locked-field fabrication detected — reverted:", lockedFieldLog);
+      } else {
+        console.log("[resume.tailor] ✅ locked fields passed validation");
+      }
+
+      // ── Experience header guard ───────────────────────────────────────────
+      if (sourceExpBlocks.length > 0 && parsed.tailoredFields?.experience) {
+        const aiExp = parsed.tailoredFields.experience as string;
+        const { experience: guardedExp, headersFabricated } =
+          validateAndRestoreExperience(sourceExpBlocks, aiExp);
+
+        console.log("[resume.tailor] experience guard:", {
+          sourceBlocks: sourceExpBlocks.length,
+          headersFabricated,
+          sourceHeaders: sourceExpBlocks.map((b) => b.header),
+        });
+
+        parsed.tailoredFields.experience = guardedExp;
+      }
+      // / experience are nearly identical to the originals, the model is
+      // ignoring the rewrite directive and we should escalate the prompt or
+      // switch to a stronger model.
+      const sameSummary    = (parsed.tailoredFields?.summary ?? "").trim() === (currentFields.summary ?? "").trim();
+      const sameExperience = (parsed.tailoredFields?.experience ?? "").trim() === (currentFields.experience ?? "").trim();
+      const sameSkillsLang = (parsed.tailoredFields?.skillsLanguages ?? "").trim() === (currentFields.skillsLanguages ?? "").trim();
+      console.log("[resume.tailor] ←", {
+        model: TAILOR_MODEL,
+        responseChars: aiText.length,
+        rewroteSummary:    !sameSummary,
+        rewroteExperience: !sameExperience,
+        rewroteSkillsLang: !sameSkillsLang,
+        newRole: parsed.tailoredFields?.role,
+        matchScore: parsed.matchScore,
+        keywordsMatched: parsed.keywordsMatched?.length ?? 0,
+      });
+
       return {
         tailoredFields: parsed.tailoredFields ?? {},
         keywordsMatched: parsed.keywordsMatched ?? [],
         keywordsMissing: parsed.keywordsMissing ?? [],
         matchScore: parsed.matchScore ?? 0,
-        _aiUsage: { aiModel: OPENROUTER_MODEL },
+        _aiUsage: { aiModel: TAILOR_MODEL },
       };
     },
   );

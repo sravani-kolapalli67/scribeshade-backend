@@ -226,6 +226,19 @@ export async function tailorResumeHandler(
     // Clerk IDs to DB UUIDs). Fall back to Clerk auth for resilience.
     const userId = bodyUserId || getCurrentUserId(req);
 
+    // ── Request audit log ─────────────────────────────────────────────────────
+    // This is the definitive ground truth of what the frontend sent. If jobTitle
+    // or company is missing here, the upstream payload is the bug.
+    console.log("[tailor.controller] ← request body audit", {
+      hasUserId: !!userId,
+      hasResumeId: !!resumeId,
+      hasFields: !!(fields && Object.keys(fields ?? {}).length > 0),
+      jobTitleReceived: jobTitle ?? "(MISSING)",
+      companyReceived: company ?? "(MISSING)",
+      jdChars: (jobDescription ?? "").length,
+      jdPreview: (jobDescription ?? "").substring(0, 80),
+    });
+
     if (!userId || !jobDescription) {
       res.status(400).json({ error: "userId and jobDescription are required" });
       return;
