@@ -194,6 +194,7 @@ export async function getResumesByUser(userId: string, search?: string) {
     prisma.resume.findMany({
       where: { userId },
       orderBy: { uploadedAt: "desc" },
+      include: { atsAnalysis: true },
     }),
     prisma.builtResume.findMany({
       where: { userId, status: "completed" },
@@ -212,7 +213,8 @@ export async function getResumesByUser(userId: string, search?: string) {
     resumeContext: null,
     uploadedAt:    br.updatedAt,
     userId:        br.userId,
-    ats:           false,
+    ats:           br.atsScore !== null && br.atsScore !== undefined,
+    atsScore:      br.atsScore ?? undefined,
     atsAnalysis:   null,
     // Extra fields that identify this as a built resume
     source:        "builder" as const,
@@ -224,7 +226,11 @@ export async function getResumesByUser(userId: string, search?: string) {
 
   // Merge and sort by date descending
   const merged = [
-    ...uploaded.map((r) => ({ ...r, source: "uploaded" as const })),
+    ...uploaded.map((r) => ({
+      ...r,
+      source:   "uploaded" as const,
+      atsScore: r.atsAnalysis?.score ?? undefined,
+    })),
     ...normalizedBuilt,
   ].sort(
     (a, b) =>

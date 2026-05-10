@@ -6,6 +6,7 @@ import {
   listBuiltResumes,
   getBuiltResume,
   deleteBuiltResume,
+  renameBuiltResume,
   generateResumeHtml,
   enhanceSection,
   tailorResume,
@@ -392,6 +393,31 @@ export async function validateSectionHandler(
     });
 
     res.json(result);
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * PATCH /resume/builder/:id/rename
+ * Updates the title of a built resume.
+ */
+export async function renameBuiltResumeHandler(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const id = String(req.params.id);
+    const { title } = req.body as { title?: string };
+
+    if (!title || !title.trim()) {
+      res.status(400).json({ error: "title is required" });
+      return;
+    }
+
+    const updated = await renameBuiltResume(id, title.trim());
+    res.json({ success: true, data: updated });
   } catch (err) {
     next(err);
   }

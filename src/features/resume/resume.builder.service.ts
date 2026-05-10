@@ -33,6 +33,7 @@ const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL;
 const EXPORTS_DIR = path.resolve(process.cwd(), "uploads/exports");
 
 const VALID_SECTION_IDS = [
+  "personalInfo",
   "summary",
   "experience",
   "skills",
@@ -472,6 +473,25 @@ export async function deleteBuiltResume(id: string): Promise<void> {
   await prisma.builtResume.delete({ where: { id } });
 }
 
+export async function renameBuiltResume(
+  id: string,
+  title: string,
+): Promise<{ id: string; filename: string }> {
+  const trimmed = title.trim();
+  if (!trimmed) throw new AppError(400, "Title cannot be empty");
+
+  const resume = await prisma.builtResume.findUnique({ where: { id } });
+  if (!resume) throw new AppError(404, "Resume not found");
+
+  const updated = await prisma.builtResume.update({
+    where: { id },
+    data: { title: trimmed },
+    select: { id: true, title: true },
+  });
+
+  return { id: updated.id, filename: `${updated.title}.pdf` };
+}
+
 /**
  * Marks a built resume as completed.
  * Sets status to "completed" and records downloadedAt.
@@ -614,7 +634,26 @@ export async function enhanceSection(input: EnhanceSectionInput): Promise<{
       metadata: { sectionId },
     },
     async () => {
-      const prompt = `
+      // personalInfo enhancement = improve the professional title/role line only
+      // (name/email are locked and must not be altered)
+      const isPersonalInfo = sectionId === "personalInfo";
+
+      const prompt = isPersonalInfo
+        ? `
+You are an expert resume writer. The candidate's professional title / role line needs to be more specific, impactful, and ATS-friendly.
+
+Current title/role: ${currentText}
+${jobDescription ? `Target job description context: ${jobDescription.substring(0, 500)}` : ""}
+${jobTitle ? `Target job title: ${jobTitle}` : ""}
+
+Instructions:
+- Return ONLY the improved professional title string (e.g. "Senior Full Stack Engineer – Platform & Payments")
+- Make it specific, keyword-rich, and aligned to the target role if provided
+- Do NOT include name, email, phone, or location — just the title
+- Maximum 10 words
+- No explanation, no punctuation at the end
+        `.trim()
+        : `
 You are an expert resume writer. Rewrite the following resume section to be more impactful, quantified, and ATS-friendly.
 
 Section: ${sectionId}
@@ -629,7 +668,7 @@ Instructions:
 - Add quantified impact where possible (e.g. "reduced load time by 40%").
 - Keep the same format (plain text, not HTML).
 - Return ONLY the rewritten section text with no explanation.
-      `.trim();
+        `.trim();
 
       const response = await ai.chat.send({
         chatRequest: {
@@ -1682,7 +1721,7 @@ ${resumeText.substring(0, 6000)}
     throw new AppError(502, "AI returned an unparseable ATS response");
   }
 
-  return {
+  const result: BuilderAtsResult = {
     score: parsed.score,
     grade: parsed.grade ?? deriveAtsGrade(parsed.score),
     summary: parsed.summary ?? "",
@@ -1692,4 +1731,12 @@ ${resumeText.substring(0, 6000)}
     suggestions: parsed.suggestions ?? [],
     sectionScores: parsed.sectionScores ?? {},
   };
+
+  // Persist the score so the resume list can display it
+  await prisma.builtResume.update({
+    where: { id: resumeId },
+    data: { atsScore: result.score },
+  });
+
+  return result;
 }

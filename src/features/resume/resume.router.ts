@@ -21,6 +21,7 @@ import {
   listBuiltResumesHandler,
   getBuiltResumeHandler,
   deleteBuiltResumeHandler,
+  renameBuiltResumeHandler,
   generateResumeHtmlHandler,
   enhanceSectionHandler,
   tailorResumeHandler,
@@ -89,6 +90,7 @@ router.get("/all-templates", listTemplates);
 router.post("/builder/save", requireAuth, saveBuiltResumeHandler);
 router.get("/builder/list", requireAuth, listBuiltResumesHandler);
 router.get("/builder/:id", requireAuth, getBuiltResumeHandler);
+router.patch("/builder/:id/rename", requireAuth, renameBuiltResumeHandler);
 router.delete("/builder/:id", requireAuth, deleteBuiltResumeHandler);
 
 // ── Builder (AI) ──────────────────────────────────────────────────────────────

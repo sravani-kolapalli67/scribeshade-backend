@@ -165,6 +165,8 @@ model BuiltResume {
   /// "draft" until saved-clean + downloaded; then "completed"
   status         String   @default("draft")
   downloadedAt   DateTime?
+  /// ATS score persisted after the last builder ATS scan (0-100)
+  atsScore       Int?
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 
