@@ -15,6 +15,10 @@ import {
   markBuiltResumeComplete,
   validateSection,
   scoreBuilderAts,
+  rewriteResume,
+  injectSkills,
+  injectKeywords,
+  analyzeKeywordMatch,
   PdfExportError,
   PDF_ERROR_CODES,
 } from "./resume.builder.service";
@@ -27,6 +31,10 @@ import type {
   ExtractFieldsInput,
   MarkBuiltResumeCompleteInput,
   ValidateSectionInput,
+  RewriteResumeInput,
+  InjectSkillsInput,
+  InjectKeywordsInput,
+  KeywordMatchInput,
 } from "./resume.types";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -459,6 +467,151 @@ export async function builderAtsScoreHandler(
     }
 
     const result = await scoreBuilderAts({ userId, resumeId });
+    res.json({ success: true, data: result });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * POST /resume/builder/rewrite
+ * Full resume rewrite targeting a specific role — no job description required.
+ */
+export async function rewriteResumeHandler(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const bodyUserId = (req.body as Record<string, unknown>).userId as string | undefined;
+    const userId = bodyUserId || getCurrentUserId(req);
+    if (!userId) {
+      res.status(401).json({ error: "Unauthorized" });
+      return;
+    }
+
+    const { resumeId, jobTitle, company, targetLevel, fields } = req.body as RewriteResumeInput;
+    if (!jobTitle?.trim()) {
+      res.status(400).json({ error: "jobTitle is required" });
+      return;
+    }
+
+    const result = await rewriteResume({
+      userId,
+      resumeId,
+      jobTitle: jobTitle.trim(),
+      company,
+      targetLevel,
+      fields,
+      idempotencyKey: req.idempotencyKey ?? null,
+    });
+
+    res.json({ success: true, ...result });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * POST /resume/builder/inject-skills
+ * Analyses resume + job description, injects missing role-relevant skills.
+ */
+export async function injectSkillsHandler(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const bodyUserId = (req.body as Record<string, unknown>).userId as string | undefined;
+    const userId = bodyUserId || getCurrentUserId(req);
+    if (!userId) {
+      res.status(401).json({ error: "Unauthorized" });
+      return;
+    }
+
+    const { resumeId, jobDescription, jobTitle, fields } = req.body as InjectSkillsInput;
+    if (!fields) {
+      res.status(400).json({ error: "fields is required" });
+      return;
+    }
+
+    const result = await injectSkills({
+      userId,
+      resumeId,
+      jobDescription,
+      jobTitle,
+      fields,
+      idempotencyKey: req.idempotencyKey ?? null,
+    });
+
+    res.json({ success: true, ...result });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * POST /resume/builder/inject-keywords
+ * Weaves missing JD keywords naturally into resume sections.
+ */
+export async function injectKeywordsHandler(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const bodyUserId = (req.body as Record<string, unknown>).userId as string | undefined;
+    const userId = bodyUserId || getCurrentUserId(req);
+    if (!userId) {
+      res.status(401).json({ error: "Unauthorized" });
+      return;
+    }
+
+    const { resumeId, jobDescription, fields } = req.body as InjectKeywordsInput;
+    if (!jobDescription || jobDescription.trim().length < 50) {
+      res.status(400).json({ error: "jobDescription must be at least 50 characters" });
+      return;
+    }
+    if (!fields) {
+      res.status(400).json({ error: "fields is required" });
+      return;
+    }
+
+    const result = await injectKeywords({
+      userId,
+      resumeId,
+      jobDescription,
+      fields,
+      idempotencyKey: req.idempotencyKey ?? null,
+    });
+
+    res.json({ success: true, ...result });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * POST /resume/builder/keyword-match
+ * Free text-analysis: checks which JD keywords are present/missing in resume.
+ */
+export async function keywordMatchHandler(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const { jobDescription, fields } = req.body as KeywordMatchInput;
+    if (!jobDescription || jobDescription.trim().length < 10) {
+      res.status(400).json({ error: "jobDescription is required" });
+      return;
+    }
+    if (!fields) {
+      res.status(400).json({ error: "fields is required" });
+      return;
+    }
+
+    const result = analyzeKeywordMatch({ jobDescription, fields });
     res.json({ success: true, data: result });
   } catch (err) {
     next(err);

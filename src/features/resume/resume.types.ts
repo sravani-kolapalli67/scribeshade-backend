@@ -153,3 +153,50 @@ export interface SectionValidationResult {
   constraints: SectionConstraints;
   wordCount: number;
 }
+
+// ─── New Feature Types ────────────────────────────────────────────────────────
+
+export interface RewriteResumeInput {
+  userId: string;
+  /** DB UUID of a saved BuiltResume. Optional when rewriting a manual resume. */
+  resumeId?: string;
+  /** Target job title (required). */
+  jobTitle: string;
+  company?: string;
+  /** Optional seniority level hint. */
+  targetLevel?: string;
+  /** Current resume field values — used when resumeId is absent. */
+  fields?: Partial<ResumeFields>;
+  idempotencyKey?: string | null;
+}
+
+export interface InjectSkillsInput {
+  userId: string;
+  resumeId?: string;
+  jobDescription?: string;
+  jobTitle?: string;
+  /** Current resume fields (for deduplication against existing skills). */
+  fields: Partial<ResumeFields>;
+  idempotencyKey?: string | null;
+}
+
+export interface InjectKeywordsInput {
+  userId: string;
+  resumeId?: string;
+  jobDescription: string;
+  /** Current resume fields whose editable sections will receive keywords. */
+  fields: Partial<ResumeFields>;
+  idempotencyKey?: string | null;
+}
+
+export interface KeywordMatchInput {
+  jobDescription: string;
+  /** Current resume fields to analyse for keyword coverage. */
+  fields: Partial<ResumeFields>;
+}
+
+export interface KeywordMatchResult {
+  present: string[];
+  missing: string[];
+  matchScore: number;
+}

@@ -167,6 +167,10 @@ model BuiltResume {
   downloadedAt   DateTime?
   /// ATS score persisted after the last builder ATS scan (0-100)
   atsScore       Int?
+  /// Full ATS result object persisted after the last builder ATS scan
+  lastAtsResult  Json?
+  /// Timestamp of the last ATS scan
+  lastAtsAt      DateTime?
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 

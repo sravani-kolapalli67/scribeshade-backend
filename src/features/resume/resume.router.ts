@@ -30,6 +30,10 @@ import {
   markBuiltResumeCompleteHandler,
   validateSectionHandler,
   builderAtsScoreHandler,
+  rewriteResumeHandler,
+  injectSkillsHandler,
+  injectKeywordsHandler,
+  keywordMatchHandler,
 } from "./resume.builder.controller";
 import { requireAuth } from "../auth/auth.middleware";
 import { idempotencyKeyMiddleware } from "../../shared/middleware/idempotency.middleware";
@@ -127,6 +131,28 @@ router.post(
 );
 router.post("/builder/:id/complete", requireAuth, markBuiltResumeCompleteHandler);
 
-// ─────────────────────────────────────────────────────────────────────────────
+// ── Builder (New AI Features) ─────────────────────────────────────────────────
+router.post(
+  "/builder/rewrite",
+  requireAuth,
+  idempotencyKeyMiddleware,
+  rewriteResumeHandler,
+);
+router.post(
+  "/builder/inject-skills",
+  requireAuth,
+  idempotencyKeyMiddleware,
+  injectSkillsHandler,
+);
+router.post(
+  "/builder/inject-keywords",
+  requireAuth,
+  idempotencyKeyMiddleware,
+  injectKeywordsHandler,
+);
+// keyword-match is free — no idempotency needed
+router.post("/builder/keyword-match", requireAuth, keywordMatchHandler);
+
+// \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 
 export { router as resumeRouter };

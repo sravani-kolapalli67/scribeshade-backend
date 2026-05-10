@@ -80,8 +80,12 @@ async function deductCredits(
   return { creditsRemaining };
 }
 
-const OPENROUTER_MODEL =
-  process.env.OPENROUTER_MODEL || "google/gemini-2.5-flash";
+// Projects generation always uses Gemini 2.5 Flash — it is significantly
+// faster and more instruction-following than the global OPENROUTER_MODEL
+// (which may be set to a slower open-weight model like Gemma for sessions).
+// Override with PROJECTS_AI_MODEL env var if needed.
+const PROJECTS_MODEL =
+  process.env.PROJECTS_AI_MODEL || "google/gemini-2.5-flash-preview-05-20";
 
 if (!process.env.OPENROUTER_API_KEY) {
   throw new Error("OPENROUTER_API_KEY environment variable is not defined");
@@ -389,12 +393,18 @@ Now generate the 3 new projects.
   ];
 
   // Retry once on AI model failure (FR: AI Model Failure → retry once → 503)
+  const chatParams = {
+    model: PROJECTS_MODEL,
+    messages,
+    stream: true as const,
+    maxTokens: 16000,
+  };
   let stream;
   try {
-    stream = await ai.chat.send({ chatRequest: { model: OPENROUTER_MODEL, messages, stream: true } });
-  } catch (firstErr) {
+    stream = await ai.chat.send({ chatRequest: chatParams });
+  } catch {
     try {
-      stream = await ai.chat.send({ chatRequest: { model: OPENROUTER_MODEL, messages, stream: true } });
+      stream = await ai.chat.send({ chatRequest: chatParams });
     } catch {
       throw new AppError(503, "AI generation service is temporarily unavailable. Please try again.");
     }
@@ -647,12 +657,13 @@ Output the new content value now:
 
   const stream = await ai.chat.send({
     chatRequest: {
-      model: OPENROUTER_MODEL,
+      model: PROJECTS_MODEL,
       messages: [
         { role: "system", content: "You are an expert technical content generator outputting raw JSON only." },
         { role: "user", content: prompt },
       ],
       stream: true,
+      maxTokens: 2000,
     },
   });
 

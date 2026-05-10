@@ -22,6 +22,11 @@ import type {
   ResumeFields,
   ValidateSectionInput,
   SectionValidationResult,
+  RewriteResumeInput,
+  InjectSkillsInput,
+  InjectKeywordsInput,
+  KeywordMatchInput,
+  KeywordMatchResult,
 } from "./resume.types";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -57,6 +62,9 @@ export const RESUME_FEATURE_KEYS = {
   ENHANCE: "resume_enhance_section",
   TAILOR: "resume_tailor",
   EXTRACT: "resume_extract_fields",
+  REWRITE: "resume_rewrite",
+  INJECT_SKILLS: "resume_inject_skills",
+  INJECT_KEYWORDS: "resume_inject_keywords",
 } as const;
 
 // Defaults if FeatureCost row is missing (matches Plan.md):
@@ -2171,11 +2179,384 @@ ${resumeText.substring(0, 6000)}
     sectionScores: parsed.sectionScores ?? {},
   };
 
-  // Persist the score so the resume list can display it
+  // Persist the score so the resume list can display it, and persist full result for the editor panel
   await prisma.builtResume.update({
     where: { id: resumeId },
-    data: { atsScore: result.score },
+    data: {
+      atsScore: result.score,
+      lastAtsResult: result as unknown as Prisma.JsonObject,
+      lastAtsAt: new Date(),
+    },
   });
 
   return result;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AI — Full Resume Rewrite (role-based, no JD required)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Rewrites all editable resume sections to target a specific role and company.
+ * Unlike JD Tailor, no job description is required — the AI uses role context
+ * and 2026 industry standards to craft compelling, ATS-optimised content.
+ *
+ * Locked fields (name, email, employer names, dates) are never altered.
+ * Cost: 4 credits (same pool as tailor, resolved from FeatureCost).
+ */
+export async function rewriteResume(input: RewriteResumeInput): Promise<{
+  tailoredFields: Partial<ResumeFields>;
+  creditsUsed: number;
+  creditsRemaining: number;
+  cached: boolean;
+}> {
+  const { userId, resumeId, jobTitle, company, targetLevel } = input;
+
+  let currentFields: Partial<ResumeFields> = {};
+  let resolvedResumeId: string | undefined;
+
+  if (resumeId) {
+    const resume = await prisma.builtResume.findFirst({
+      where: { id: resumeId, userId: { not: undefined } },
+    });
+    if (!resume) throw new AppError(404, "Resume not found");
+    currentFields = resume.fields as unknown as ResumeFields;
+    resolvedResumeId = resumeId;
+  } else {
+    currentFields = (input.fields ?? {}) as Partial<ResumeFields>;
+  }
+
+  const cost = await getFeatureCost(RESUME_FEATURE_KEYS.REWRITE, new Prisma.Decimal("4"));
+  const cacheKey = hashInput("rewrite_v1", jobTitle, company ?? "", targetLevel ?? "");
+
+  const { result, creditsUsed, creditsRemaining, cached } = await withCreditedAiAction<{
+    tailoredFields: Partial<ResumeFields>;
+  }>(
+    {
+      userId,
+      operation: "RESUME_REWRITE",
+      cost,
+      idempotencyKey: input.idempotencyKey,
+      resumeId: resolvedResumeId,
+      cacheKey,
+      metadata: { jobTitle, company },
+    },
+    async () => {
+      const levelHint = targetLevel ? `Seniority: ${targetLevel}. ` : "";
+      const companyHint = company ? `\nTarget company: ${company}.` : "";
+
+      const prompt = `
+You are a world-class resume writer. Rewrite the following resume sections to be highly compelling for a ${jobTitle} role.${companyHint}
+${levelHint}
+
+IMPORTANT RULES:
+- NEVER change: name, email, employer names/companies, job titles, dates, degrees, institutions
+- Rewrite: summary, experience bullet points (same structure), skills, project descriptions
+- Use strong action verbs, quantified outcomes, and ATS-friendly keywords for a ${jobTitle}
+- Return ONLY a JSON object — no markdown, no extra text
+
+Current resume content:
+${JSON.stringify(currentFields, null, 2).substring(0, 4000)}
+
+Return JSON:
+{
+  "tailoredFields": {
+    "summary": "...",
+    "experience": "...",
+    "skillsLanguages": "...",
+    "skillsFrameworks": "...",
+    "skillsDatabases": "...",
+    "skillsTools": "...",
+    "projects": "..."
+  }
+}
+      `.trim();
+
+      const response = await ai.chat.send({
+        chatRequest: {
+          model: TAILOR_MODEL,
+          messages: [{ role: "user", content: prompt }],
+        },
+      });
+
+      const aiText = response.choices[0]?.message?.content ?? "";
+      const parsed = parseJsonResponse<{ tailoredFields: Partial<ResumeFields> }>(aiText);
+      if (!parsed?.tailoredFields) {
+        throw new AppError(502, "AI returned an unparseable rewrite response");
+      }
+
+      // Guard: never overwrite name/email even if AI ignores instructions
+      delete (parsed.tailoredFields as Record<string, unknown>).name;
+      delete (parsed.tailoredFields as Record<string, unknown>).email;
+
+      return {
+        tailoredFields: parsed.tailoredFields,
+        _aiUsage: { aiModel: TAILOR_MODEL },
+      };
+    },
+  );
+
+  return { tailoredFields: result.tailoredFields, creditsUsed, creditsRemaining, cached };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AI — Inject Skills
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Analyses the current resume skills + job description, then returns an updated
+ * set of skills fields that adds role-relevant skills the candidate is missing.
+ * Existing skills are preserved and deduplicated.
+ *
+ * Cost: 1 credit (resolved from FeatureCost `resume_inject_skills`).
+ */
+export async function injectSkills(input: InjectSkillsInput): Promise<{
+  injectedFields: Partial<ResumeFields>;
+  suggestedSkills: string[];
+  creditsUsed: number;
+  creditsRemaining: number;
+  cached: boolean;
+}> {
+  const { userId, jobDescription, jobTitle, fields } = input;
+
+  const cost = await getFeatureCost(RESUME_FEATURE_KEYS.INJECT_SKILLS, new Prisma.Decimal("1"));
+  const cacheKey = hashInput("inject_skills_v1", jobTitle ?? "", (jobDescription ?? "").substring(0, 500), fields.skillsLanguages ?? "", fields.skillsFrameworks ?? "");
+
+  const { result, creditsUsed, creditsRemaining, cached } = await withCreditedAiAction<{
+    injectedFields: Partial<ResumeFields>;
+    suggestedSkills: string[];
+  }>(
+    {
+      userId,
+      operation: "RESUME_INJECT_SKILLS",
+      cost,
+      idempotencyKey: input.idempotencyKey,
+      resumeId: input.resumeId,
+      cacheKey,
+      metadata: { jobTitle },
+    },
+    async () => {
+      const existingSkills = [
+        fields.skillsLanguages ?? "",
+        fields.skillsFrameworks ?? "",
+        fields.skillsDatabases ?? "",
+        fields.skillsTools ?? "",
+      ].filter(Boolean).join(", ");
+
+      const prompt = `
+You are a technical resume expert. Based on the target role and job description, identify skills that are missing from this candidate's resume and should be added.
+
+${jobTitle ? `Target role: ${jobTitle}` : ""}
+${jobDescription ? `Job Description:\n${jobDescription.substring(0, 2000)}` : ""}
+
+Existing skills: ${existingSkills || "(none listed)"}
+
+Instructions:
+- Only add skills that are GENUINELY relevant to the role and NOT already listed
+- Distribute added skills across the four categories below (languages, frameworks, databases, tools)
+- Preserve all existing skills — merge new ones in comma-separated format
+- Do not add soft skills, do not invent skills the candidate cannot plausibly have
+- Return ONLY valid JSON, no markdown
+
+Return JSON:
+{
+  "injectedFields": {
+    "skillsLanguages": "<existing + new, comma-separated>",
+    "skillsFrameworks": "<existing + new, comma-separated>",
+    "skillsDatabases": "<existing + new, comma-separated>",
+    "skillsTools": "<existing + new, comma-separated>"
+  },
+  "suggestedSkills": ["skill1", "skill2", "...(only the NEW ones added)"]
+}
+      `.trim();
+
+      const response = await ai.chat.send({
+        chatRequest: {
+          model: OPENROUTER_MODEL,
+          messages: [{ role: "user", content: prompt }],
+        },
+      });
+
+      const aiText = response.choices[0]?.message?.content ?? "";
+      const parsed = parseJsonResponse<{ injectedFields: Partial<ResumeFields>; suggestedSkills: string[] }>(aiText);
+      if (!parsed?.injectedFields) {
+        throw new AppError(502, "AI returned an unparseable skill injection response");
+      }
+
+      return {
+        injectedFields: parsed.injectedFields,
+        suggestedSkills: parsed.suggestedSkills ?? [],
+        _aiUsage: { aiModel: OPENROUTER_MODEL },
+      };
+    },
+  );
+
+  return {
+    injectedFields: result.injectedFields,
+    suggestedSkills: result.suggestedSkills,
+    creditsUsed,
+    creditsRemaining,
+    cached,
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AI — Inject Keywords (bulk keyword injection into resume sections)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Extracts important keywords from the job description that are missing from the
+ * resume, then weaves them naturally into the summary, experience, and projects
+ * sections without altering facts or structure.
+ *
+ * Cost: 2 credits (resolved from FeatureCost `resume_inject_keywords`).
+ */
+export async function injectKeywords(input: InjectKeywordsInput): Promise<{
+  injectedFields: Partial<ResumeFields>;
+  injectedKeywords: string[];
+  creditsUsed: number;
+  creditsRemaining: number;
+  cached: boolean;
+}> {
+  const { userId, jobDescription, fields } = input;
+
+  const cost = await getFeatureCost(RESUME_FEATURE_KEYS.INJECT_KEYWORDS, new Prisma.Decimal("2"));
+  const cacheKey = hashInput("inject_keywords_v1", jobDescription.substring(0, 500), fields.summary ?? "", fields.experience?.substring(0, 200) ?? "");
+
+  const { result, creditsUsed, creditsRemaining, cached } = await withCreditedAiAction<{
+    injectedFields: Partial<ResumeFields>;
+    injectedKeywords: string[];
+  }>(
+    {
+      userId,
+      operation: "RESUME_INJECT_KEYWORDS",
+      cost,
+      idempotencyKey: input.idempotencyKey,
+      resumeId: input.resumeId,
+      cacheKey,
+      metadata: {},
+    },
+    async () => {
+      const prompt = `
+You are an ATS expert. Your job is to inject missing job-description keywords naturally into a candidate's resume — without inventing facts, changing job titles, or altering employer names/dates.
+
+Job Description:
+${jobDescription.substring(0, 3000)}
+
+Current resume sections:
+summary: ${fields.summary ?? ""}
+experience: ${(fields.experience ?? "").substring(0, 1500)}
+projects: ${(fields.projects ?? "").substring(0, 800)}
+
+Instructions:
+- Extract the top 10-15 ATS keywords from the JD that are ABSENT from the resume
+- Weave them naturally into the summary, experience bullets, and project descriptions
+- NEVER: invent employers, change dates, change job titles, or add bullet points that describe things the candidate never did
+- Return ONLY valid JSON, no markdown
+
+Return JSON:
+{
+  "injectedFields": {
+    "summary": "<rewritten summary with keywords woven in>",
+    "experience": "<rewritten experience with keywords woven into bullets>",
+    "projects": "<rewritten projects with keywords>"
+  },
+  "injectedKeywords": ["keyword1", "keyword2", "..."]
+}
+      `.trim();
+
+      const response = await ai.chat.send({
+        chatRequest: {
+          model: TAILOR_MODEL,
+          messages: [{ role: "user", content: prompt }],
+        },
+      });
+
+      const aiText = response.choices[0]?.message?.content ?? "";
+      const parsed = parseJsonResponse<{ injectedFields: Partial<ResumeFields>; injectedKeywords: string[] }>(aiText);
+      if (!parsed?.injectedFields) {
+        throw new AppError(502, "AI returned an unparseable keyword injection response");
+      }
+
+      return {
+        injectedFields: parsed.injectedFields,
+        injectedKeywords: parsed.injectedKeywords ?? [],
+        _aiUsage: { aiModel: TAILOR_MODEL },
+      };
+    },
+  );
+
+  return {
+    injectedFields: result.injectedFields,
+    injectedKeywords: result.injectedKeywords,
+    creditsUsed,
+    creditsRemaining,
+    cached,
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Keyword Match (free — no AI, pure text analysis)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Extracts keywords from a job description and checks which ones appear in the
+ * resume. No AI model call, no credit charge — pure text analysis.
+ *
+ * Returns present keywords, missing keywords, and a coverage score (0–100).
+ */
+export function analyzeKeywordMatch(input: KeywordMatchInput): KeywordMatchResult {
+  const { jobDescription, fields } = input;
+
+  // Flatten all resume text into one searchable string (lowercase)
+  const resumeText = Object.values(fields)
+    .filter((v): v is string => typeof v === "string")
+    .join(" ")
+    .toLowerCase();
+
+  // Extract candidate keywords from JD:
+  // 1. Split on whitespace/punctuation
+  // 2. Filter: 3+ chars, not common stop words, not purely numeric
+  const STOP_WORDS = new Set([
+    "the", "and", "for", "are", "you", "will", "with", "our", "have", "that",
+    "this", "from", "they", "been", "has", "not", "but", "can", "its", "was",
+    "all", "one", "your", "who", "how", "out", "use", "any", "each", "about",
+    "more", "also", "than", "into", "such", "work", "team", "role", "job",
+    "skills", "experience", "looking", "join", "seek", "must", "able",
+    "strong", "good", "great", "excellent", "preferred", "required",
+  ]);
+
+  const rawTokens = jobDescription
+    .toLowerCase()
+    .split(/[\s,;:\-–()\[\].!?/|+&]+/)
+    .filter((t) => t.length >= 3 && !STOP_WORDS.has(t) && !/^\d+$/.test(t));
+
+  // Deduplicate while preserving order of first occurrence
+  const seen = new Set<string>();
+  const keywords: string[] = [];
+  for (const t of rawTokens) {
+    if (!seen.has(t)) {
+      seen.add(t);
+      keywords.push(t);
+    }
+  }
+
+  // Cap at 60 most relevant keywords (first 60 from JD tend to be the most important)
+  const topKeywords = keywords.slice(0, 60);
+
+  const present: string[] = [];
+  const missing: string[] = [];
+  for (const kw of topKeywords) {
+    if (resumeText.includes(kw)) {
+      present.push(kw);
+    } else {
+      missing.push(kw);
+    }
+  }
+
+  const matchScore = topKeywords.length > 0
+    ? Math.round((present.length / topKeywords.length) * 100)
+    : 0;
+
+  return { present, missing, matchScore };
 }
