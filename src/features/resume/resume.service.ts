@@ -392,21 +392,63 @@ Rules:
 }
 
 /**
+ * Converts a BuiltResume `fields` JSON object into a readable plain-text
+ * resume string so it can be fed to the cover-letter AI prompt.
+ */
+function serializeBuiltResumeFields(fields: Record<string, string>): string {
+  const sections: string[] = [];
+
+  if (fields.name)     sections.push(`Name: ${fields.name}`);
+  if (fields.role)     sections.push(`Role: ${fields.role}`);
+  if (fields.email)    sections.push(`Email: ${fields.email}`);
+  if (fields.phone)    sections.push(`Phone: ${fields.phone}`);
+  if (fields.location) sections.push(`Location: ${fields.location}`);
+  if (fields.links)    sections.push(`Links: ${fields.links}`);
+  if (fields.summary)  sections.push(`\nSummary:\n${fields.summary}`);
+  if (fields.experience) sections.push(`\nWork Experience:\n${fields.experience}`);
+
+  const skills = [
+    fields.skillsLanguages,
+    fields.skillsFrameworks,
+    fields.skillsDatabases,
+    fields.skillsTools,
+  ].filter(Boolean);
+  if (skills.length) sections.push(`\nSkills:\n${skills.join("\n")}`);
+
+  if (fields.projects)       sections.push(`\nProjects:\n${fields.projects}`);
+  if (fields.education)      sections.push(`\nEducation:\n${fields.education}`);
+  if (fields.certifications) sections.push(`\nCertifications:\n${fields.certifications}`);
+  if (fields.publications)   sections.push(`\nPublications:\n${fields.publications}`);
+
+  return sections.join("\n");
+}
+
+/**
  * Generates a cover letter for a given resume using Gemini.
+ * Accepts both uploaded-resume IDs (prisma.resume) and builder-resume IDs
+ * (prisma.builtResume) — the function checks both tables automatically.
  */
 export async function generateCoverLetter(
   params: CoverLetterRequest,
 ): Promise<{ coverLetter: string; wordCount: number }> {
   const { resumeId, jobRole, company, jobDescription, tone, userName, userEmail } = params;
 
-  const resume = await prisma.resume.findUnique({ where: { id: resumeId } });
+  let resumeText: string;
 
-  if (!resume) {
-    throw Object.assign(new Error("Resume not found"), { statusCode: 404 });
+  // Try uploaded (file-based) resume first
+  const uploadedResume = await prisma.resume.findUnique({ where: { id: resumeId } });
+
+  if (uploadedResume) {
+    const ext = path.extname(uploadedResume.path).toLowerCase();
+    resumeText = await extractTextFromFile(uploadedResume.path, ext);
+  } else {
+    // Fall back to builder resume
+    const builtResume = await prisma.builtResume.findUnique({ where: { id: resumeId } });
+    if (!builtResume) {
+      throw Object.assign(new Error("Resume not found"), { statusCode: 404 });
+    }
+    resumeText = serializeBuiltResumeFields(builtResume.fields as Record<string, string>);
   }
-
-  const ext = path.extname(resume.path).toLowerCase();
-  const resumeText = await extractTextFromFile(resume.path, ext);
 
   const prompt = `
 Generate a ${tone ?? "professional"} cover letter.

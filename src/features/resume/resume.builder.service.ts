@@ -632,7 +632,7 @@ export async function enhanceSection(input: EnhanceSectionInput): Promise<{
   creditsRemaining: number;
   cached: boolean;
 }> {
-  const { userId, sectionId, currentText, jobDescription, jobTitle, resumeContext } = input;
+  const { userId, sectionId, currentText, jobDescription, jobTitle, resumeContext, qualityIssues, qualitySuggestions } = input;
 
   if (!(VALID_SECTION_IDS as readonly string[]).includes(sectionId)) {
     throw new AppError(400, "Invalid sectionId");
@@ -678,11 +678,18 @@ ${jobDescription ? `Target role: ${jobTitle ?? ""}\nJob description: ${jobDescri
 
 Current text:
 ${currentText}
+${(qualityIssues && qualityIssues.length > 0) ? `
+QUALITY ISSUES TO FIX (identified by the section quality scorer — you MUST resolve all of these):
+${qualityIssues.map((issue, i) => `${i + 1}. ${issue}`).join("\n")}` : ""}
+${(qualitySuggestions && qualitySuggestions.length > 0) ? `
+SUGGESTED IMPROVEMENTS (apply all of these):
+${qualitySuggestions.map((s, i) => `${i + 1}. ${s}`).join("\n")}` : ""}
 
 Instructions:
 - Use strong action verbs.
 - Add quantified impact where possible (e.g. "reduced load time by 40%").
 - Keep the same format (plain text, not HTML).
+${(qualityIssues && qualityIssues.length > 0) ? "- The QUALITY ISSUES above are the most important things to fix — prioritise them above all else." : ""}
 - Return ONLY the rewritten section text with no explanation.
         `.trim();
 

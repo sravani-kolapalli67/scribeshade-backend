@@ -93,7 +93,7 @@ export async function getPlans(
 ) {
   try {
     const currency = req.query.currency as string | undefined;
-    const plans = creditsService.getInterviewCreditPlans(currency);
+    const plans = await creditsService.getInterviewCreditPlans(currency);
     return res.json({
       success: true,
       data: plans,

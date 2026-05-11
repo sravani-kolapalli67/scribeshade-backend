@@ -90,6 +90,10 @@ export interface EnhanceSectionInput {
   resumeContext?: string;
   idempotencyKey?: string | null;
   resumeId?: string | null;
+  /** Issues identified by the section quality scorer — AI must fix these. */
+  qualityIssues?: string[];
+  /** Suggestions from the section quality scorer — AI must address these. */
+  qualitySuggestions?: string[];
 }
 
 export interface ExtractFieldsInput {

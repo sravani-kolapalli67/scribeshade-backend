@@ -35,6 +35,10 @@ export interface CreditPackPlan {
   amountMajor: string;
   amountMinor: number;
   feature: "INTERVIEW_SESSION";
+  /** Value-efficiency percentage shown on the billing card (0–100). */
+  valuePct: number;
+  /** Whether to render the "Popular" badge. */
+  isPopular: boolean;
 }
 
 export interface PurchaseOrderResult {

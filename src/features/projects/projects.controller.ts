@@ -132,7 +132,7 @@ export async function generateProjects(
             // Send the full project JSON to the client with the unique delimiter
             res.write(cleanProject + DELIMITER);
 
-            // Parse for our background DB save
+            // Parse for DB save
             const parsedProject =
               projectsService.parseJsonResponse<any>(cleanProject);
             if (parsedProject) {
@@ -141,52 +141,49 @@ export async function generateProjects(
           }
         }
       }
-    } finally {
-      res.end();
-      if (uploadedFilePath) safeDeleteFile(uploadedFilePath);
-    }
 
-    // Background task: deduct credits + save to DB
-    // Credits are only charged when at least one valid project was parsed.
-    setTimeout(async () => {
+      // Deduct credits + save to DB before ending the response so the client's
+      // immediate list refresh sees the new record. All project chunks have
+      // already been written via res.write(); res.end() is the only thing left.
       if (allProjects.length === 0) {
         console.warn(
           "[projects.controller] No valid projects were generated — skipping credit deduction and DB save",
         );
-        return;
-      }
+      } else {
+        try {
+          await projectsService.deductGenerationCredits(userId);
+        } catch (creditErr) {
+          console.error(
+            "[projects.controller] Credit deduction failed after successful generation:",
+            creditErr,
+          );
+          // Generation already streamed; log and continue to save.
+        }
 
-      // Deduct credits now that we confirmed parseable output
-      try {
-        await projectsService.deductGenerationCredits(userId);
-      } catch (creditErr) {
-        console.error(
-          "[projects.controller] Credit deduction failed after successful generation:",
-          creditErr,
-        );
-        // Generation already streamed to the client; log and continue to save.
+        try {
+          await projectsService.saveProjectBatch(
+            userId,
+            position,
+            jobDescription,
+            allProjects,
+            resumeId,
+            industry,
+            experienceLevel,
+          );
+          console.log(
+            `[projects.controller] Successfully saved batch of ${allProjects.length} projects for user ${userId}`,
+          );
+        } catch (saveErr) {
+          console.error(
+            "[projects.controller] Failed to save project batch:",
+            saveErr,
+          );
+        }
       }
-
-      try {
-        await projectsService.saveProjectBatch(
-          userId,
-          position,
-          jobDescription,
-          allProjects,
-          resumeId,
-          industry,
-          experienceLevel,
-        );
-        console.log(
-          `[projects.controller] Successfully saved batch of ${allProjects.length} projects for user ${userId}`,
-        );
-      } catch (saveErr) {
-        console.error(
-          "[projects.controller] Failed to save project batch:",
-          saveErr,
-        );
-      }
-    }, 0);
+    } finally {
+      res.end();
+      if (uploadedFilePath) safeDeleteFile(uploadedFilePath);
+    }
   } catch (error) {
     console.error("[projects.controller] generateProjects error:", error);
     if (uploadedFilePath) safeDeleteFile(uploadedFilePath);

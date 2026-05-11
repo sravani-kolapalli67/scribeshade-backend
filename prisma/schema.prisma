@@ -79,6 +79,26 @@ enum PurchaseStatus {
   REFUNDED
 }
 
+enum PackFeature {
+  INTERVIEW_SESSION
+}
+
+enum SupportedCurrency {
+  INR
+  USD
+  GBP
+}
+
+enum PackTier {
+  QUICK
+  STARTER
+  BASIC
+  STANDARD
+  PROFESSIONAL
+  POWER
+  MEGA
+}
+
 enum IdempotencyStatus {
   IN_PROGRESS
   COMPLETED
@@ -372,6 +392,53 @@ model SessionNotes {
 }
 
 // ─── Credit system models ─────────────────────────────────────────────────────
+
+/// Purchasable credit pack definitions — replaces the hardcoded INTERVIEW_PACKS array.
+/// Each row is one pack. Prices per currency are stored as normalised Decimal columns.
+/// Soft-delete via `isActive`; no FK relations needed (packs are catalogue data).
+model CreditPack {
+  id          String      @id @default(uuid())
+
+  /// Machine-readable identifier, e.g. "quick_5". Unique — used as the stable
+  /// reference in Razorpay receipts, the CreditPurchase.packName field, and URLs.
+  code        String      @unique
+
+  /// Enum tier — drives ordering and badge logic on the frontend.
+  tier        PackTier
+
+  /// Display name shown in the UI, e.g. "Quick 5".
+  name        String
+
+  /// Number of credits the user receives on purchase.
+  credits     Decimal     @db.Decimal(10, 2)
+
+  /// Which product feature these credits are valid for.
+  feature     PackFeature @default(INTERVIEW_SESSION)
+
+  /// Prices in each supported currency (major units, e.g. "99.00").
+  priceInr    Decimal     @db.Decimal(10, 2)
+  priceUsd    Decimal     @db.Decimal(10, 2)
+  priceGbp    Decimal     @db.Decimal(10, 2)
+
+  /// Optional "value / discount" percentage shown on the card (0–100).
+  /// Computed externally and stored here so it can be tweaked without code changes.
+  valuePct    Int         @default(0)
+
+  /// Whether this pack is shown in the purchase UI.
+  isActive    Boolean     @default(true)
+
+  /// Whether to show a "Popular" badge on the card.
+  isPopular   Boolean     @default(false)
+
+  /// Display order in the pricing grid (ascending).
+  sortOrder   Int         @default(0)
+
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+
+  @@index([isActive])
+  @@index([tier])
+}
 
 model CreditConfig {
   id               String   @id @default(uuid())

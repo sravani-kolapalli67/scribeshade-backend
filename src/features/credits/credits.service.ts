@@ -13,64 +13,12 @@ import type {
 } from "./credits.types";
 
 // ─── Internal Decimal helper ──────────────────────────────────────────────────
-// Prisma uses its own Decimal class. We work with it via string conversion to
-// avoid floating-point drift. All arithmetic uses Prisma.Decimal.
 
 function d(value: string | number): Prisma.Decimal {
   return new Prisma.Decimal(value);
 }
 
 type SupportedCurrency = "INR" | "USD" | "GBP";
-
-const INTERVIEW_PACKS: Array<{
-  code: string;
-  name: string;
-  credits: string;
-  prices: Record<SupportedCurrency, string>;
-}> = [
-  {
-    code: "quick_5",
-    name: "Quick 5",
-    credits: "5",
-    prices: { INR: "99.00", USD: "2.99", GBP: "2.49" },
-  },
-  {
-    code: "starter_10",
-    name: "Starter",
-    credits: "10",
-    prices: { INR: "149.00", USD: "3.99", GBP: "3.49" },
-  },
-  {
-    code: "basic_25",
-    name: "Basic",
-    credits: "25",
-    prices: { INR: "349.00", USD: "9.99", GBP: "8.99" },
-  },
-  {
-    code: "standard_60",
-    name: "Standard",
-    credits: "60",
-    prices: { INR: "699.00", USD: "19.99", GBP: "17.99" },
-  },
-  {
-    code: "professional_120",
-    name: "Professional",
-    credits: "120",
-    prices: { INR: "1299.00", USD: "39.99", GBP: "34.99" },
-  },
-  {
-    code: "power_300",
-    name: "Power",
-    credits: "300",
-    prices: { INR: "2999.00", USD: "89.99", GBP: "79.99" },
-  },
-  {
-    code: "mega_600",
-    name: "Mega",
-    credits: "600",
-    prices: { INR: "4999.00", USD: "149.99", GBP: "129.99" },
-  },
-];
 
 const MINOR_UNIT_MULTIPLIER: Record<SupportedCurrency, number> = {
   INR: 100,
@@ -92,19 +40,38 @@ function toMinorUnits(
   return Math.round(Number(amountMajor) * multiplier);
 }
 
-function toPlanDTO(
-  pack: (typeof INTERVIEW_PACKS)[number],
+/** Map a CreditPack DB row into the DTO the controllers/frontend expect. */
+function packToDTO(
+  pack: {
+    code: string;
+    name: string;
+    credits: Prisma.Decimal;
+    feature: string;
+    priceInr: Prisma.Decimal;
+    priceUsd: Prisma.Decimal;
+    priceGbp: Prisma.Decimal;
+    valuePct: number;
+    isPopular: boolean;
+  },
   currency: SupportedCurrency,
 ): CreditPackPlan {
-  const amountMajor = pack.prices[currency];
+  const amountMajor =
+    currency === "USD"
+      ? pack.priceUsd.toString()
+      : currency === "GBP"
+        ? pack.priceGbp.toString()
+        : pack.priceInr.toString();
+
   return {
     code: pack.code,
     name: pack.name,
-    credits: pack.credits,
+    credits: pack.credits.toString(),
     currency,
     amountMajor,
     amountMinor: toMinorUnits(amountMajor, currency),
-    feature: "INTERVIEW_SESSION",
+    feature: pack.feature as "INTERVIEW_SESSION",
+    valuePct: pack.valuePct,
+    isPopular: pack.isPopular,
   };
 }
 
@@ -140,11 +107,15 @@ function assertValidRazorpaySignature(
   }
 }
 
-export function getInterviewCreditPlans(
+export async function getInterviewCreditPlans(
   currencyInput?: string,
-): CreditPackPlan[] {
+): Promise<CreditPackPlan[]> {
   const currency = normalizeCurrency(currencyInput);
-  return INTERVIEW_PACKS.map((pack) => toPlanDTO(pack, currency));
+  const packs = await prisma.creditPack.findMany({
+    where: { isActive: true },
+    orderBy: { sortOrder: "asc" },
+  });
+  return packs.map((pack) => packToDTO(pack, currency));
 }
 
 export async function createPurchaseOrder(
@@ -153,12 +124,14 @@ export async function createPurchaseOrder(
   currencyInput?: string,
 ): Promise<PurchaseOrderResult> {
   const currency = normalizeCurrency(currencyInput);
-  const pack = INTERVIEW_PACKS.find((item) => item.code === packCode);
+  const pack = await prisma.creditPack.findUnique({
+    where: { code: packCode, isActive: true },
+  });
   if (!pack) {
     throw new AppError(400, "Invalid packCode");
   }
 
-  const plan = toPlanDTO(pack, currency);
+  const plan = packToDTO(pack, currency);
   const razorpay = getRazorpayClient();
 
   const order = await razorpay.orders.create({
