@@ -246,102 +246,43 @@ export const PDF_PRINT_CSS = `
     text-shadow: none !important;
   }
 
-  /* ── Remove browser-added page margins ── */
+  /* ── Page margins: 0 — the Playwright page.pdf() margin option adds the
+     physical safe zone at every page edge. CSS @page margin is explicitly
+     zeroed so it does NOT reduce the CSS content area, ensuring the layout
+     viewport is exactly A4 (794 × 1123px) — identical to the preview iframe.
+     If both @page margin AND Playwright margin are non-zero they stack,
+     shrinking the printable height by ~112px/page and causing earlier page
+     breaks and layout reflow vs the preview. ── */
   @page {
     margin: 0 !important;
   }
 
   /* ═══════════════════════════════════════════════════════════════════════════
-     PAGINATION — Safe page-break system
-     Applied universally across all templates via semantic element targeting.
-     These rules prevent the three most common resume PDF defects:
-       1. Orphan section headings (h2/h3 alone at bottom of page)
-       2. Mid-entry splits (bullet list cut between pages)
-       3. Large blank gaps from premature forced page breaks
+     PAGINATION — natural flow
+     Strategy: let ALL content flow naturally across page breaks.
+     The physical page margin in page.pdf() (28px top/bottom) is the safe
+     zone guard — it creates blank space at the edges of each PDF page
+     without shrinking the CSS layout viewport.
+     We do NOT use break-inside:avoid on bullets, lists, or experience
+     entries; those rules cause content to jump pages and leave large
+     blank gaps that look far worse than a mid-bullet break.
      ═══════════════════════════════════════════════════════════════════════════ */
 
-  /* ── Section containers: never break inside, keep heading + first item ── */
-  section,
-  .section,
-  [data-section] {
-    break-inside:      avoid;
-    page-break-inside: avoid;
+  /* ── Orphan/widow control: prevent a lone last-line from sitting alone
+     at the top of a new page (widows) or a lone first-line stranded at
+     the bottom (orphans). 2 lines minimum keeps text readable. ── */
+  p, li, .summary, .exp-item, .experience-entry {
+    orphans: 2;
+    widows:  2;
   }
 
-  /* ── Headings: keep with next sibling (at least first content block) ── */
+  /* ── Section headings: never leave a heading stranded alone at the
+     bottom of a page with no content beneath it. ── */
   h1, h2, h3, h4, h5, h6,
   .section-title,
   .section-header {
     break-after:      avoid;
     page-break-after: avoid;
-    orphans: 2;
-    widows:  2;
-  }
-
-  /* ── Individual content blocks: treat each as an atomic unit.
-     Experience entries, project cards, education rows, certification items,
-     skill groups — all use a consistent set of class names across templates.
-     We also target generic list items and common data-* wrappers. ── */
-  .exp-item,
-  .experience-item,
-  .experience-entry,
-  .proj-item,
-  .project-item,
-  .project-card,
-  .edu-item,
-  .education-item,
-  .cert-item,
-  .certification-item,
-  .skill-group,
-  .skills-row,
-  /* data-list children rendered by populateTemplate */
-  [data-list] > *,
-  /* generic list items that hold multi-line content */
-  li {
-    break-inside:      avoid;
-    page-break-inside: avoid;
-    orphans: 2;
-    widows:  2;
-  }
-
-  /* ── Bullet groups: keep at least two bullets on same page ── */
-  ul, ol {
-    break-inside:      avoid;
-    page-break-inside: avoid;
-    orphans: 2;
-    widows:  2;
-  }
-
-  /* ── Modern template sidebar: sidebar should never break across pages.
-     If it must, keep each sidebar section atomic. ── */
-  .sidebar {
-    break-inside:      avoid;
-    page-break-inside: avoid;
-  }
-  .sidebar h2 {
-    break-after:      avoid;
-    page-break-after: avoid;
-  }
-
-  /* ── Horizontal rules / dividers: stay attached to what follows ── */
-  hr {
-    break-after:      avoid;
-    page-break-after: avoid;
-  }
-
-  /* ── Divider elements used by Minimal template ── */
-  .divider {
-    break-after:      avoid;
-    page-break-after: avoid;
-  }
-
-  /* ── Contact / header block: never split the name/title/links row ── */
-  .contact,
-  .header,
-  [data-field="name"],
-  [data-field="role"] {
-    break-inside:      avoid;
-    page-break-inside: avoid;
   }
 
   /* ── Prevent empty trailing pages caused by bottom margins ── */
@@ -1756,7 +1697,13 @@ async function _exportResumeHtmlInner(
           format: "A4",
           printBackground: true,
           preferCSSPageSize: true,
-          margin: { top: "0", right: "0", bottom: "0", left: "0" },
+          // Left/right: 0 — templates control horizontal padding via body padding.
+          // Top/bottom: 28px — physical PDF margin only. CSS @page { margin } is
+          // explicitly set to 0 in PDF_PRINT_CSS so this is the ONLY margin
+          // source. Keeping them separate ensures the CSS layout viewport is
+          // the full A4 height (matching the preview iframe), while still
+          // providing a visible safe zone at every page edge in the PDF.
+          margin: { top: "28px", right: "0", bottom: "28px", left: "0" },
         }),
         new Promise<never>((_, reject) => {
           _pdfTimeoutHandle = setTimeout(

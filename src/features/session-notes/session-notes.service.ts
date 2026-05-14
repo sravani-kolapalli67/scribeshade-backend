@@ -27,6 +27,11 @@ export async function generateSessionNotes(sessionId: string) {
 
   if (!session) throw new AppError(404, "Session not found");
 
+  // Respect transcript privacy — ephemeral sessions must not produce persistent notes.
+  if (session.saveTranscription === false) {
+    throw new AppError(403, "Session notes are not available for sessions with transcript saving disabled");
+  }
+
   // Build transcript text from transcript JSON
   const transcriptArray = Array.isArray(session.transcript)
     ? (session.transcript as any[])
@@ -94,7 +99,8 @@ export async function getSessionNotes(sessionId: string) {
     where: { sessionId },
   });
 
-  if (!notes) throw new AppError(404, "Notes not found for this session");
-
-  return notes;
+  // Notes may not exist yet (session just ended, generation not yet triggered).
+  // Return null so the controller can send a 200 with empty data instead of a
+  // noisy 404 that the frontend already handles as "no notes yet".
+  return notes ?? null;
 }

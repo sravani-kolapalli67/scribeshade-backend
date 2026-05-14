@@ -102,7 +102,14 @@ export async function getSession(req: Request, res: Response) {
       return res.status(404).json({ error: "Session not found" });
     }
 
-    return res.json(session);
+    // Strip transcript AND messages from response when user has opted out of transcript saving.
+    // This prevents any data from being exposed or restored on page reload.
+    const responseData =
+      session.saveTranscription === false
+        ? { ...session, transcript: [], messages: [] }
+        : session;
+
+    return res.json(responseData);
   } catch (error: any) {
     console.error("Get Session Error:", error);
     return res
@@ -138,7 +145,17 @@ export async function deleteSession(req: Request, res: Response) {
 export async function activateSession(req: Request, res: Response) {
   try {
     const id = req.params.id as string;
-    const session = await sessionService.activateSession(id);
+    const body = req.body ?? {};
+    const session = await sessionService.activateSession(id, {
+      language:
+        typeof body.language === "string" && body.language.trim().length > 0
+          ? body.language.trim()
+          : undefined,
+      simpleLanguage:
+        body.simpleLanguage === undefined
+          ? undefined
+          : body.simpleLanguage === "true" || body.simpleLanguage === true,
+    });
 
     if (!session) {
       return res.status(404).json({ error: "Session not found" });
@@ -168,8 +185,9 @@ export async function deactivateSession(req: Request, res: Response) {
     const { aiUsage, transcript } = req.body ?? {};
     const session = await sessionService.deactivateSession(id, aiUsage, transcript);
 
-    // Auto-trigger analytics generation in the background
-    if (transcript) {
+    // Auto-trigger analytics generation in the background.
+    // Skip for ephemeral sessions — the user opted out of all transcript-related persistence.
+    if (transcript && session.saveTranscription !== false) {
       sessionService.generateSessionFeedback(id, transcript).catch((err) => {
         console.error(`Background analytics generation failed for session ${id}:`, err);
       });
@@ -392,7 +410,9 @@ export async function saveMessage(req: Request, res: Response) {
       answer ?? "",
       time
     );
-    return res.json({ success: true, messages: updatedSession.messages });
+    // appendMessage returns undefined for ephemeral sessions (saveTranscription === false).
+    // Respond with an empty messages array so the client behaves consistently.
+    return res.json({ success: true, messages: updatedSession?.messages ?? [] });
   } catch (error: any) {
     console.error("Save Message Error:", error);
     return res

@@ -42,10 +42,15 @@ export const creditDeductionWorker = new Worker(
 
       const snapshot = session.bracketConfigSnapshot as any;
       if (!snapshot) {
-        // Free session — just mark COMPLETED
+        // Free session — mark COMPLETED and clear transcript/messages if user opted out
         await tx.session.update({
           where: { id: sessionId },
-          data: { status: SessionStatus.COMPLETED },
+          data: {
+            status: SessionStatus.COMPLETED,
+            ...(session.saveTranscription === false
+              ? { transcript: [], messages: [] }
+              : {}),
+          },
         });
         return;
       }
@@ -80,6 +85,12 @@ export const creditDeductionWorker = new Worker(
           creditsDeducted: new Prisma.Decimal(result.creditsDeducted),
           deductionReason: result.reason as any,
           durationSeconds: totalSeconds,
+          // Clear transcript and messages when the user opted out of saving it.
+          // We collect it during the session for AI context, but honour
+          // the user's preference at the point of final persistence.
+          ...(session.saveTranscription === false
+            ? { transcript: [], messages: [] }
+            : {}),
         },
       });
     });

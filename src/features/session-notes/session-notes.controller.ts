@@ -28,7 +28,9 @@ export async function getNotes(req: Request, res: Response, next: NextFunction) 
     if (!sessionId) return next(new AppError(400, "sessionId is required"));
 
     const notes = await sessionNotesService.getSessionNotes(sessionId as string);
-    res.json({ success: true, data: notes });
+    // notes is null when generation hasn't happened yet — return 200 with null data
+    // so the frontend doesn't log a 404 error for sessions that simply have no notes yet.
+    res.json({ success: true, data: notes ?? null });
   } catch (err) {
     next(err);
   }

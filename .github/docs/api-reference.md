@@ -652,6 +652,18 @@ Error examples:
 ### POST /session/:id/activate
 Activates session and places hold (paid sessions only).
 
+Request body (optional):
+```json
+{
+  "language": "English",
+  "simpleLanguage": true
+}
+```
+
+Notes:
+- `language` and `simpleLanguage` are optional overrides persisted to the session at activation time.
+- This ensures all subsequent AI answers and screen analysis use the latest language preference and simple-language mode.
+
 Success `200`:
 ```json
 {

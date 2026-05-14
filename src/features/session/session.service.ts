@@ -257,70 +257,116 @@ export async function deleteSession(id: string) {
  * Enforces single-active-session per user — throws 409 ACTIVE_SESSION_EXISTS if blocked.
  * Runs inside a $transaction for race-condition safety.
  */
-export async function activateSession(id: string) {
+export async function activateSession(
+  id: string,
+  settings?: { language?: string; simpleLanguage?: boolean },
+) {
+  // ── Pre-flight reads (outside transaction to avoid timeout) ─────────────────
+  const session = await prisma.session.findUnique({ where: { id } });
+  if (!session) throw new AppError(404, "Session not found");
+
+  const hasLanguageOverride =
+    typeof settings?.language === "string" &&
+    settings.language.trim().length > 0 &&
+    settings.language.trim() !== session.language;
+  const hasSimpleLanguageOverride =
+    typeof settings?.simpleLanguage === "boolean" &&
+    settings.simpleLanguage !== session.simpleLanguage;
+
+  const settingsUpdate: Prisma.SessionUpdateInput = {
+    ...(hasLanguageOverride ? { language: settings!.language!.trim() } : {}),
+    ...(hasSimpleLanguageOverride
+      ? { simpleLanguage: settings!.simpleLanguage! }
+      : {}),
+  };
+
+  // Idempotent — already ACTIVE (reconnect case)
+  if (session.status === SessionStatus.ACTIVE) {
+    if (Object.keys(settingsUpdate).length === 0) return session;
+    return prisma.session.update({
+      where: { id },
+      data: settingsUpdate,
+    });
+  }
+
+  // Allow DISCONNECTED → ACTIVE (reconnection within grace window)
+  if (
+    session.status !== SessionStatus.PRE_CHECK &&
+    session.status !== SessionStatus.DISCONNECTED
+  ) {
+    throw new AppError(
+      409,
+      `Cannot activate session in status ${session.status}`,
+    );
+  }
+
+  // Compute credit cap outside the transaction — this is a slow async call
+  // that must not run inside an interactive tx due to the 5 s default timeout.
+  let maxAllowedMinutes: number | null = null;
+  let bracketConfigSnapshot: unknown = null;
+
+  if (!session.free) {
+    const balance = await prisma.userCreditBalance.findUnique({
+      where: { userId: session.userId },
+    });
+    if (!balance) throw new AppError(402, "INSUFFICIENT_CREDITS");
+
+    const available = new Prisma.Decimal(balance.totalAvailable.toString());
+    const { maxMinutes, snapshot } =
+      await creditsService.computeMaxAllowedMinutes(available);
+    maxAllowedMinutes = maxMinutes;
+    bracketConfigSnapshot = snapshot;
+  }
+
+  // ── Atomic state transition ─────────────────────────────────────────────────
   return prisma.$transaction(async (tx) => {
-    const session = await tx.session.findUnique({ where: { id } });
-    if (!session) throw new AppError(404, "Session not found");
+    // Re-read inside tx to guard against concurrent activations
+    const current = await tx.session.findUnique({ where: { id } });
+    if (!current) throw new AppError(404, "Session not found");
 
-    // Idempotent — already ACTIVE (reconnect case)
-    if (session.status === SessionStatus.ACTIVE) {
-      return session;
-    }
-
-    // Allow DISCONNECTED → ACTIVE (reconnection within grace window)
+    // Re-check status — another request may have raced
+    if (current.status === SessionStatus.ACTIVE) return current;
     if (
-      session.status !== SessionStatus.PRE_CHECK &&
-      session.status !== SessionStatus.DISCONNECTED
+      current.status !== SessionStatus.PRE_CHECK &&
+      current.status !== SessionStatus.DISCONNECTED
     ) {
       throw new AppError(
         409,
-        `Cannot activate session in status ${session.status}`,
+        `Cannot activate session in status ${current.status}`,
       );
     }
 
-    // ── Single-session enforcement ────────────────────────────────────────────
-    // Atomic check: no other ACTIVE/PAUSED/DISCONNECTED session for this user
+    // Single-session enforcement — atomic check inside tx
     const conflict = await tx.session.findFirst({
       where: {
-        userId: session.userId,
+        userId: current.userId,
         id: { not: id },
-        status: { in: [SessionStatus.ACTIVE, SessionStatus.PAUSED, SessionStatus.DISCONNECTED] },
+        status: {
+          in: [
+            SessionStatus.ACTIVE,
+            SessionStatus.PAUSED,
+            SessionStatus.DISCONNECTED,
+          ],
+        },
       },
       select: { id: true, status: true },
     });
     if (conflict) {
-      throw new AppError(
-        409,
-        `ACTIVE_SESSION_EXISTS:${conflict.id}`,
-      );
-    }
-
-    let maxAllowedMinutes: number | null = null;
-    let bracketConfigSnapshot: unknown = null;
-
-    // Compute credit cap for paid sessions — NO funds are moved
-    if (!session.free) {
-      const balance = await tx.userCreditBalance.findUnique({
-        where: { userId: session.userId },
-      });
-      if (!balance) throw new AppError(402, "INSUFFICIENT_CREDITS");
-
-      const available = new Prisma.Decimal(balance.totalAvailable.toString());
-      const { maxMinutes, snapshot } = await creditsService.computeMaxAllowedMinutes(available);
-      maxAllowedMinutes = maxMinutes;
-      bracketConfigSnapshot = snapshot;
+      throw new AppError(409, `ACTIVE_SESSION_EXISTS:${conflict.id}`);
     }
 
     const now = new Date();
     return tx.session.update({
       where: { id },
       data: {
+        ...settingsUpdate,
         status: SessionStatus.ACTIVE,
-        // Only set startedAt on first activation, not on reconnect
-        ...(session.status === SessionStatus.PRE_CHECK ? { startedAt: now } : {}),
-        disconnectedAt: null, // clear any stale disconnect timestamp on reconnect
+        ...(current.status === SessionStatus.PRE_CHECK
+          ? { startedAt: now }
+          : {}),
+        disconnectedAt: null,
         lastHeartbeatAt: now,
-        creditsHeld: new Prisma.Decimal(0), // no hold — always 0
+        creditsHeld: new Prisma.Decimal(0),
         maxAllowedMinutes,
         bracketConfigSnapshot: bracketConfigSnapshot as any,
       },
@@ -385,10 +431,16 @@ export async function deactivateSession(
         userId: session.userId,
       });
     } else {
-      // Free session — mark COMPLETED synchronously
+      // Free session — mark COMPLETED synchronously.
+      // Clear both transcript and messages when the user opted out of saving.
       await prisma.session.update({
         where: { id },
-        data: { status: SessionStatus.COMPLETED },
+        data: {
+          status: SessionStatus.COMPLETED,
+          ...(session.saveTranscription === false
+            ? { transcript: [], messages: [] }
+            : {}),
+        },
       });
     }
   }
@@ -425,6 +477,11 @@ export async function abandonStaleSession(
         endedAt: new Date(),
         creditsDeducted: new Prisma.Decimal(0),
         deductionReason: DeductionReason.ABANDONED,
+        // Honour the user's transcript preference even on abandoned sessions.
+        // Clear both transcript and messages to fully respect ephemeral mode.
+        ...(session.saveTranscription === false
+          ? { transcript: [], messages: [] }
+          : {}),
       },
     });
   });
@@ -683,6 +740,13 @@ function processAIStream(
     (async () => {
       try {
         const finalResponse = await result.getText();
+
+        // Sentinel: model decided the input had no genuine new question.
+        // Skip ALL persistence — no QA row, no message append, no card.
+        if (/={3,}\s*NO_NEW_QUESTION\s*={3,}/i.test(finalResponse)) {
+          return;
+        }
+
         const questionMatch = finalResponse.match(
           /QUESTION:\*?\*?\s*([\s\S]*?)\s*\*?\*?ANSWER:/i,
         );
@@ -697,24 +761,28 @@ function processAIStream(
         const extractedAnswer = answerMatch?.[1]?.trim() || finalResponse;
 
         if (extractedAnswer && session) {
-          await qaService
-            .createQA({
-              userId: session.userId,
-              sessionId,
-              companyId: session.companyId,
-              ques: extractedQuestion,
-              answer: extractedAnswer,
-              language: mapLanguage(session.language),
-              industry: mapIndustry(session.jobDescription),
-            })
-            .catch((e) => console.error("Auto-save QA Error:", e));
+          // Ephemeral sessions — skip all persistence (QA table + messages).
+          // The user opted out of transcript saving; no data should outlive the session.
+          if (session.saveTranscription !== false) {
+            await qaService
+              .createQA({
+                userId: session.userId,
+                sessionId,
+                companyId: session.companyId,
+                ques: extractedQuestion,
+                answer: extractedAnswer,
+                language: mapLanguage(session.language),
+                industry: mapIndustry(session.jobDescription),
+              })
+              .catch((e) => console.error("Auto-save QA Error:", e));
 
-          await appendMessage(
-            sessionId,
-            "AI_ASSISTANT",
-            extractedQuestion,
-            extractedAnswer,
-          ).catch((e) => console.error("appendMessage Error:", e));
+            await appendMessage(
+              sessionId,
+              "AI_ASSISTANT",
+              extractedQuestion,
+              extractedAnswer,
+            ).catch((e) => console.error("appendMessage Error:", e));
+          }
         }
       } catch (e) {
         console.error("Post-processing Error:", e);
@@ -760,6 +828,10 @@ export async function analyzeScreen(
     const targetModel = resolveModelId(aiModel) || model;
     const result = ai.callModel({
       model: targetModel,
+      // Raised so multi-question screenshots (e.g. 10 numbered questions) are
+      // never truncated mid-answer. Default OpenRouter cap is too low for the
+      // QUESTION/ANSWER + ===NEXT_QUESTION=== block expansion.
+      maxOutputTokens: 8000,
       input: [
         {
           role: "system",
@@ -823,6 +895,8 @@ export async function getAIAnswer(
     const targetModel = resolveModelId(aiModel) || model;
     const result = ai.callModel({
       model: targetModel,
+      // Raised to support multi-question transcripts without truncation.
+      maxOutputTokens: 8000,
       input: [
         {
           role: "system",
@@ -865,7 +939,9 @@ export async function transcribe(file: Express.Multer.File) {
 }
 
 /**
- * Appends a message to the session's JSON messages array AND the Transcript table.
+ * Appends a message to the session's JSON messages array AND (when allowed) the Transcript array.
+ * When `saveTranscription === false` the entire DB write is skipped — no messages, no transcript.
+ * This prevents any data from accumulating for ephemeral sessions.
  */
 export async function appendMessage(
   sessionId: string,
@@ -876,10 +952,14 @@ export async function appendMessage(
 ) {
   const session = await prisma.session.findUnique({
     where: { id: sessionId },
-    select: { messages: true, transcript: true },
+    select: { messages: true, transcript: true, saveTranscription: true },
   });
 
   if (!session) throw new Error("Session not found");
+
+  // Ephemeral session — user opted out of all persistence.
+  // Skip both messages[] and transcript[] writes entirely.
+  if (session.saveTranscription === false) return;
 
   const currentMessages = Array.isArray(session.messages)
     ? (session.messages as any[])
@@ -927,10 +1007,13 @@ export async function saveTranscript(
 ) {
   const session = await prisma.session.findUnique({
     where: { id: sessionId },
-    select: { transcript: true },
+    select: { transcript: true, saveTranscription: true },
   });
 
   if (!session) throw new Error("Session not found");
+
+  // Honour the user's transcript preference — skip writing if opted out.
+  if (session.saveTranscription === false) return;
 
   const currentTranscript = Array.isArray(session.transcript)
     ? (session.transcript as any[])
