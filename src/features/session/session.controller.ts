@@ -49,8 +49,11 @@ export async function createSession(req: Request, res: Response) {
       sessionId: session.id,
       data: session,
     });
-  } catch (error) {
+  } catch (error: any) {
     console.error("Create Session Error:", error);
+    if (error?.statusCode) {
+      return res.status(error.statusCode).json({ error: error.message });
+    }
     return res.status(500).json({
       success: false,
       error: "Internal server error",

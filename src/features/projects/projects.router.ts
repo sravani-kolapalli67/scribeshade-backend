@@ -47,6 +47,13 @@ projectsRouter.post(
 );
 
 /**
+ * GET /api/projects/mine
+ * Returns all generated projects for the currently authenticated user.
+ * Resolves user via Bearer token — no userId param needed.
+ */
+projectsRouter.get("/mine", requireAuth, projectsController.listMyProjects);
+
+/**
  * GET /api/projects/user/:userId
  * Returns all generated projects for a specific user.
  */
@@ -94,5 +101,11 @@ projectsRouter.post("/:id/versions/:versionId/rollback", requireAuth, projectsCo
  * Regenerates a single project section (1 credit).
  */
 projectsRouter.post("/:id/edit-component", projectsController.editProjectComponent);
+
+/**
+ * GET /api/projects/:id/export-pdf
+ * Renders all projects for a record into a structured A4 PDF via Playwright.
+ */
+projectsRouter.get("/:id/export-pdf", requireAuth, projectsController.exportProjectPdf);
 
 export { projectsRouter };

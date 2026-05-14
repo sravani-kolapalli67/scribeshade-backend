@@ -7,6 +7,7 @@ import { getCurrentUserId } from "../auth/auth.middleware";
 import { prisma } from "../../shared/lib/prisma";
 import { AppError } from "../../shared/middleware/error.middleware";
 import { GenerateProjectRequest } from "./projects.types";
+import { exportProjectsToPdf } from "./projects.pdf.service";
 
 /**
  * Safely deletes a file from the filesystem.
@@ -26,11 +27,16 @@ export async function generateProjects(
   req: Request,
   res: Response,
 ): Promise<void> {
+  const reqStart = Date.now();
   let uploadedFilePath: string | undefined;
 
   try {
     const { resumeId, resumeText, position, jobDescription, industry, experienceLevel, generationMode } =
       req.body as Omit<GenerateProjectRequest, "userId">
+
+    console.log(`\n[projects.controller] ══════════ NEW GENERATION REQUEST ══════════`);
+    console.log(`[projects.controller]   position="${position}" mode=${generationMode || "new"} industry=${industry || "n/a"} exp=${experienceLevel || "n/a"}`);
+    console.log(`[projects.controller]   resumeId=${resumeId || "none"} hasResumeText=${!!resumeText} hasFile=${!!req.file}`);
 
     // ── Resolve caller's identity — Clerk token preferred, body.userId fallback ─
     let userId: string;
@@ -62,14 +68,18 @@ export async function generateProjects(
     }
 
     // ── Credit gate (balance check only — no deduction yet) ─────────────────
+    console.log(`[projects.controller]   Checking credit balance…`);
     try {
       await projectsService.checkGenerationCreditBalance(userId);
     } catch (creditErr) {
       if (req.file) safeDeleteFile(req.file.path);
       const ae = creditErr as AppError;
+      console.warn(`[projects.controller]   Credit check FAILED: ${ae.message}`);
       res.status(ae.statusCode ?? 402).json({ error: ae.message ?? "Insufficient credits" });
       return;
     }
+
+    console.log(`[projects.controller]   Credit check OK`);
 
     let finalResumeText = resumeText || "";
 
@@ -77,6 +87,7 @@ export async function generateProjects(
     if (req.file) {
       uploadedFilePath = req.file.path;
       const ext = path.extname(req.file.originalname).toLowerCase();
+      console.log(`[projects.controller]   Extracting text from uploaded file (${ext})…`);
       try {
         const extracted = await resumeService.extractTextFromFile(
           uploadedFilePath,
@@ -84,6 +95,7 @@ export async function generateProjects(
         );
         if (extracted) {
           finalResumeText = extracted;
+          console.log(`[projects.controller]   File extraction OK — ${extracted.length} chars`);
         }
       } catch (err) {
         console.error("[projects.controller] Text extraction failed:", err);
@@ -94,6 +106,7 @@ export async function generateProjects(
 
     // Resume is optional — generation can proceed with just position + JD
     // Set headers for streaming
+    console.log(`[projects.controller]   Streaming headers set — handing off to orchestrator…`);
     res.setHeader("Content-Type", "text/plain; charset=utf-8");
     res.setHeader("Transfer-Encoding", "chunked");
 
@@ -136,7 +149,11 @@ export async function generateProjects(
             const parsedProject =
               projectsService.parseJsonResponse<any>(cleanProject);
             if (parsedProject) {
+              const title = parsedProject?.projectHeader?.title ?? "(unknown)";
+              console.log(`[projects.controller]   ✓ Streamed project ${allProjects.length + 1}/3: "${title}" (+${Date.now() - reqStart}ms)`);
               allProjects.push(parsedProject);
+            } else {
+              console.warn(`[projects.controller]   ⚠ JSON parse+repair failed (${cleanProject.length} chars) — preview: ${cleanProject.slice(0, 200)}`);
             }
           }
         }
@@ -147,19 +164,22 @@ export async function generateProjects(
       // already been written via res.write(); res.end() is the only thing left.
       if (allProjects.length === 0) {
         console.warn(
-          "[projects.controller] No valid projects were generated — skipping credit deduction and DB save",
+          `[projects.controller]   No valid projects parsed — skipping credit deduction and DB save (${Date.now() - reqStart}ms)`,
         );
       } else {
+        console.log(`[projects.controller]   Deducting credits for userId=${userId.slice(0, 8)}…`);
         try {
           await projectsService.deductGenerationCredits(userId);
+          console.log(`[projects.controller]   Credits deducted OK`);
         } catch (creditErr) {
           console.error(
-            "[projects.controller] Credit deduction failed after successful generation:",
+            "[projects.controller]   Credit deduction failed after successful generation:",
             creditErr,
           );
           // Generation already streamed; log and continue to save.
         }
 
+        console.log(`[projects.controller]   Saving batch of ${allProjects.length} projects to DB…`);
         try {
           await projectsService.saveProjectBatch(
             userId,
@@ -171,17 +191,18 @@ export async function generateProjects(
             experienceLevel,
           );
           console.log(
-            `[projects.controller] Successfully saved batch of ${allProjects.length} projects for user ${userId}`,
+            `[projects.controller]   DB save OK — ${allProjects.length} projects persisted (+${Date.now() - reqStart}ms total)`,
           );
         } catch (saveErr) {
           console.error(
-            "[projects.controller] Failed to save project batch:",
+            "[projects.controller]   Failed to save project batch:",
             saveErr,
           );
         }
       }
     } finally {
       res.end();
+      console.log(`[projects.controller] Response ended (${Date.now() - reqStart}ms total)\n`);
       if (uploadedFilePath) safeDeleteFile(uploadedFilePath);
     }
   } catch (error) {
@@ -193,6 +214,29 @@ export async function generateProjects(
     } else {
       res.end();
     }
+  }
+}
+
+/**
+ * GET /api/projects/mine
+ * Lists projects for the authenticated user — resolves identity via Bearer token.
+ */
+export async function listMyProjects(
+  req: Request,
+  res: Response,
+): Promise<void> {
+  try {
+    const clerkId = getCurrentUserId(req);
+    const user = await prisma.user.findUnique({ where: { clerkId } });
+    if (!user) {
+      res.status(401).json({ error: "User not found — please sign in again" });
+      return;
+    }
+    const projects = await projectsService.getProjectsByUser(user.id);
+    res.json(projects);
+  } catch (error) {
+    console.error("[projects.controller] listMyProjects error:", error);
+    res.status(500).json({ error: (error as Error).message });
   }
 }
 
@@ -406,6 +450,35 @@ export async function editProjectComponent(
     const ae = error as AppError;
     const status = ae.statusCode ?? 500;
     console.error("[projects.controller] editProjectComponent error:", error);
+    res.status(status).json({ error: (error as Error).message });
+  }
+}
+
+/**
+ * GET /api/projects/:id/export-pdf
+ */
+export async function exportProjectPdf(
+  req: Request,
+  res: Response,
+): Promise<void> {
+  try {
+    const clerkId = getCurrentUserId(req);
+    if (!clerkId) { res.status(401).json({ error: "Unauthorized" }); return; }
+
+    const user = await prisma.user.findUnique({ where: { clerkId } });
+    if (!user) { res.status(404).json({ error: "User not found" }); return; }
+
+    const { id } = req.params;
+    const { buffer, filename } = await exportProjectsToPdf(id as string, user.id);
+
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+    res.setHeader("Content-Length", buffer.length);
+    res.end(buffer);
+  } catch (error) {
+    const ae = error as AppError;
+    const status = ae.statusCode ?? 500;
+    console.error("[projects.controller] exportProjectPdf error:", error);
     res.status(status).json({ error: (error as Error).message });
   }
 }

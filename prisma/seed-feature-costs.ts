@@ -43,6 +43,32 @@ const defaults = [
     credits: "1",
     label: "Resume Builder – Apply Template (AI populate)",
   },
+  // ── Resume AI Capabilities (card tools) ───────────────────────────────────
+  {
+    featureKey: "resume_rewrite",
+    credits: "4",
+    label: "Resume Builder – Full Rewrite (role-targeted)",
+  },
+  {
+    featureKey: "resume_inject_skills",
+    credits: "1",
+    label: "Resume Builder – Inject Skills",
+  },
+  {
+    featureKey: "resume_inject_keywords",
+    credits: "2",
+    label: "Resume Builder – Keyword Inject",
+  },
+  {
+    featureKey: "resume_ats_score",
+    credits: "0",
+    label: "Resume Builder – ATS Score (free)",
+  },
+  {
+    featureKey: "resume_cover_letter",
+    credits: "0",
+    label: "Resume Builder – Cover Letter (free)",
+  },
   // ── AI Projects (existing) ─────────────────────────────────────────────────
   {
     featureKey: "project_generate",

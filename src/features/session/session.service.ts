@@ -29,10 +29,15 @@ const MODEL_ID_MAP: Record<string, string> = {
   "gemini 2.0 flash exp": "google/gemini-2.0-flash-exp:free",
   "gemini 1.5 flash": "google/gemini-flash-1.5",
   "gemini 1.5 pro": "google/gemini-pro-1.5",
+  "gemini 3.1 flash lite": "google/gemini-3.1-flash-lite-preview",
+  "gemini 3.1 pro": "google/gemini-3.1-pro-preview",
   "gpt-4o": "openai/gpt-4o",
   "gpt-4o mini": "openai/gpt-4o-mini",
+  "gpt-5": "openai/gpt-5",
   "claude 3.5 sonnet": "anthropic/claude-3.5-sonnet",
   "claude 3 haiku": "anthropic/claude-3-haiku",
+  "claude 4.6 sonnet": "anthropic/claude-sonnet-4.6",
+  "claude haiku 4.5": "anthropic/claude-haiku-4-5",
 };
 
 function resolveModelId(id: string | undefined): string | undefined {
@@ -233,6 +238,7 @@ const DELETABLE_STATUSES: SessionStatus[] = [
   SessionStatus.FORCE_ENDED,
   SessionStatus.AUTO_ENDED,
   SessionStatus.CREDIT_EXHAUSTED,
+  SessionStatus.DISCONNECTED,
 ];
 
 export async function deleteSession(id: string) {
@@ -349,7 +355,8 @@ export async function deactivateSession(
 
     if (
       s.status !== SessionStatus.ACTIVE &&
-      s.status !== SessionStatus.PAUSED
+      s.status !== SessionStatus.PAUSED &&
+      s.status !== SessionStatus.DISCONNECTED
     ) {
       throw new AppError(
         409,

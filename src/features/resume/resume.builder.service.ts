@@ -123,7 +123,7 @@ let _browserLaunching = false;
  * has crashed. Uses a lightweight health-check (open + close a context) rather
  * than trusting `browser.isConnected()` alone to catch zombie processes.
  */
-async function getSharedBrowser(): Promise<Browser> {
+export async function getSharedBrowser(): Promise<Browser> {
   // Happy path — browser is alive and healthy
   if (_browser?.isConnected()) {
     try {
@@ -219,7 +219,7 @@ export class PdfExportError extends AppError {
 //   3. Remove Google Fonts @import calls that survive request blocking.
 //   4. Override box-shadow with a cheaper equivalent for ATS compatibility.
 
-const PDF_PRINT_CSS = `
+export const PDF_PRINT_CSS = `
   /* ── Animation freeze ── */
   *, *::before, *::after {
     animation-duration:   0ms !important;
