@@ -878,6 +878,7 @@ export async function getAIAnswer(
   id: string,
   transcript: string,
   isCustomQuery: boolean = false,
+  isRegenerate: boolean = false,
   aiModel?: string,
 ) {
   const session = await prisma.session.findUnique({
@@ -906,7 +907,7 @@ export async function getAIAnswer(
         {
           role: "user",
           type: "message",
-          content: buildUserMessage(transcript, isCustomQuery, context),
+          content: buildUserMessage(transcript, isCustomQuery, isRegenerate, context),
         },
       ],
     });

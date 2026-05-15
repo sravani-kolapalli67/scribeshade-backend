@@ -163,6 +163,7 @@ export function buildSystemMessage(context: any) {
 export function buildUserMessage(
   transcript: string,
   isCustomQuery: boolean,
+  isRegenerate: boolean,
   context: any,
 ): string {
   const hasProjects = !!(context?.projects && context.projects.trim());
@@ -171,6 +172,20 @@ export function buildUserMessage(
   const projectReminder = hasProjects
     ? "\n\nIMPORTANT: The system context contains the candidate\'s AI-generated projects. If this question is about projects, experience, work done, or a specific project — you MUST answer using those exact projects from the system context. Do not give a generic answer. Pull specific details: title, what was built, role, tech stack, metrics, and challenges."
     : "";
+
+  if (isRegenerate) {
+    return `Task: REGENERATE the answer for the specific interview question below.${projectReminder}
+
+CRITICAL RULES FOR REGENERATION:
+- You MUST answer the question below. DO NOT output ===NO_NEW_QUESTION===.
+- Ignore the "RECENT CONVERSATION HISTORY" instruction that tells you not to re-answer. This is an explicit user request to regenerate an answer, so you MUST answer it even if it appears in the history.
+- Provide a full, interview-ready answer following the STRICT formatting rules (**QUESTION:** / **ANSWER:**).
+
+If the question involves logic or coding, ALWAYS provide a working code implementation in ${lang}.
+
+Question:
+${transcript}`;
+  }
 
   if (isCustomQuery) {
     return `Task: Answer the candidate\'s specific question below as if they are saying it to the interviewer.${projectReminder}
