@@ -1,0 +1,591 @@
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x", "debian-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id                String              @id @default(uuid())
+  clerkId           String              @unique
+  /// @kottster-display-field
+  email             String              @unique
+  name              String?
+  createdAt         DateTime            @default(now())
+  updatedAt         DateTime            @updatedAt
+  aiGenerationCache AiGenerationCache[]
+  askAiMessages     AskAiMessage[]
+  builtResumes      BuiltResume[]
+  ledgerEntries     CreditLedger[]
+  purchases         CreditPurchase[]
+  creditUsages      CreditUsage[]
+  documents         Document[]
+  idempotencyKeys   IdempotencyKey[]
+  projects          Project[]
+  questions         QA[]
+  resumes           Resume[]
+  sessions          Session[]
+  transcriptChunks  TranscriptChunk[]
+  creditBalance     UserCreditBalance?
+}
+
+model Resume {
+  id            String       @id @default(uuid())
+  /// @kottster-display-field
+  filename      String
+  path          String
+  uploadedAt    DateTime     @default(now())
+  userId        String
+  resumeContext String?
+  size          Int?
+  ats           Boolean      @default(false)
+  metadataIndex Json?
+  parsedData    Json?
+  atsAnalysis   ATSAnalysis?
+  user          User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model Document {
+  id         String   @id @default(uuid())
+  filename   String
+  path       String
+  size       Int?
+  uploadedAt DateTime @default(now())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model ATSAnalysis {
+  id              String   @id @default(uuid())
+  score           Int
+  summary         String
+  strengths       String[]
+  weaknesses      String[]
+  missingKeywords String[]
+  suggestions     String[]
+  createdAt       DateTime @default(now())
+  resumeId        String   @unique
+  resume          Resume   @relation(fields: [resumeId], references: [id], onDelete: Cascade)
+}
+
+model BuiltResume {
+  id             String    @id @default(uuid())
+  userId         String
+  title          String
+  templateId     String
+  fields         Json
+  sections       Json
+  jobDescription String?
+  jobTitle       String?
+  company        String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  downloadedAt   DateTime?
+  /// "draft" until saved-clean + downloaded; then "completed"
+  status         String    @default("draft")
+  /// ATS score persisted after the last builder ATS scan (0-100)
+  atsScore       Int?
+  /// Timestamp of the last ATS scan
+  lastAtsAt      DateTime?
+  /// Full ATS result object persisted after the last builder ATS scan
+  lastAtsResult  Json?
+  user           User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model ResumeTemplate {
+  id        String   @id @default(uuid())
+  category  String
+  thumbnail String
+  code      String
+  createdAt DateTime @default(now())
+  name      String
+}
+
+model Company {
+  id          String    @id @default(uuid())
+  /// @kottster-display-field
+  name        String    @unique
+  slug        String    @unique
+  description String?
+  logo        String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  questions   QA[]
+  sessions    Session[]
+}
+
+model Session {
+  id                    String            @id @default(uuid())
+  extraContext          String
+  free                  Boolean
+  language              String
+  mode                  String
+  resumeId              String
+  saveTranscription     Boolean
+  simpleLanguage        Boolean           @default(true)
+  userId                String
+  createdAt             DateTime          @default(now())
+  updatedAt             DateTime          @updatedAt
+  documentId            String            @map("DocumentId")
+  autoGenerateResponse  Boolean
+  jobDescription        String
+  endedAt               DateTime?
+  startedAt             DateTime?
+  messages              Json              @default("[]")
+  companyId             String
+  companyName           String
+  aiUsage               Int               @default(0)
+  transcript            Json              @default("[]")
+  bracketConfigSnapshot Json?
+  creditExhaustedAt     DateTime?
+  creditsDeducted       Decimal?          @db.Decimal(10, 2)
+  creditsHeld           Decimal           @default(0) @db.Decimal(10, 2)
+  deductionReason       DeductionReason?
+  durationSeconds       Int?
+  maxAllowedMinutes     Int?
+  pausedDurationSeconds Int               @default(0)
+  status                SessionStatus     @default(PRE_CHECK)
+  projectIds            Json              @default("[]")
+  lastHeartbeatAt       DateTime?
+  disconnectedAt        DateTime?
+  askAiMessages         AskAiMessage[]
+  questions             QA[]
+  company               Company           @relation(fields: [companyId], references: [id])
+  user                  User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  feedback              SessionFeedback?
+  notes                 SessionNotes?
+  transcriptChunks      TranscriptChunk[]
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([companyId])
+  @@index([status])
+}
+
+model QA {
+  id         String     @id @default(uuid())
+  companyId  String
+  sessionId  String?
+  ques       String
+  answer     String?
+  difficulty Difficulty @default(Easy)
+  industry   Industry   @default(DSA)
+  language   Language   @default(General)
+  isShared   Boolean    @default(false)
+  createdAt  DateTime   @default(now())
+  updatedAt  DateTime   @updatedAt
+  userId     String?
+  company    Company    @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  session    Session?   @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  user       User?      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([companyId])
+  @@index([sessionId])
+  @@index([userId])
+  @@index([isShared])
+}
+
+model Project {
+  id              String           @id @default(uuid())
+  position        String
+  jobDescription  String
+  resumeId        String?
+  projects        Json
+  userId          String
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+  experienceLevel String?
+  industry        String?
+  user            User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  versions        ProjectVersion[]
+
+  @@index([userId])
+}
+
+model ProjectVersion {
+  id            String   @id @default(uuid())
+  projectId     String
+  versionNumber Int
+  projects      Json
+  label         String?
+  createdAt     DateTime @default(now())
+  project       Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, versionNumber])
+  @@index([projectId])
+}
+
+model SessionFeedback {
+  id              String   @id @default(uuid())
+  sessionId       String   @unique
+  score           Int
+  confidence      Int
+  sessionQuality  String
+  verdict         String
+  communication   Int
+  interactivity   Int
+  technicalDepth  Int
+  conciseness     Int
+  avgResponseLen  Int
+  answeredCount   Int
+  aiAssistsCount  Int
+  avgResponseTime Float
+  strengths       String[]
+  improvements    String[]
+  interviewerMood String
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  session         Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+}
+
+model SessionNotes {
+  id             String   @id @default(uuid())
+  sessionId      String   @unique
+  companyName    String
+  jobDescription String
+  summary        String
+  questions      Json
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  session        Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+}
+
+/// Purchasable credit pack definitions — replaces the hardcoded INTERVIEW_PACKS array.
+/// Each row is one pack. Prices per currency are stored as normalised Decimal columns.
+/// Soft-delete via `isActive`; no FK relations needed (packs are catalogue data).
+model CreditPack {
+  id        String      @id @default(uuid())
+  /// Machine-readable identifier, e.g. "quick_5". Unique — used as the stable
+  /// reference in Razorpay receipts, the CreditPurchase.packName field, and URLs.
+  code      String      @unique
+  /// Enum tier — drives ordering and badge logic on the frontend.
+  tier      PackTier
+  /// Display name shown in the UI, e.g. "Quick 5".
+  name      String
+  /// Number of credits the user receives on purchase.
+  credits   Decimal     @db.Decimal(10, 2)
+  /// Which product feature these credits are valid for.
+  feature   PackFeature @default(INTERVIEW_SESSION)
+  /// Prices in each supported currency (major units, e.g. "99.00").
+  priceInr  Decimal     @db.Decimal(10, 2)
+  priceUsd  Decimal     @db.Decimal(10, 2)
+  priceGbp  Decimal     @db.Decimal(10, 2)
+  /// Optional "value / discount" percentage shown on the card (0–100).
+  /// Computed externally and stored here so it can be tweaked without code changes.
+  valuePct  Int         @default(0)
+  /// Whether this pack is shown in the purchase UI.
+  isActive  Boolean     @default(true)
+  /// Whether to show a "Popular" badge on the card.
+  isPopular Boolean     @default(false)
+  /// Display order in the pricing grid (ascending).
+  sortOrder Int         @default(0)
+  createdAt DateTime    @default(now())
+  updatedAt DateTime    @updatedAt
+
+  @@index([isActive])
+  @@index([tier])
+}
+
+model CreditConfig {
+  id               String   @id @default(uuid())
+  bracketMinutes   Int      @unique
+  creditsFull      Decimal  @db.Decimal(10, 2)
+  creditsHalf      Decimal  @db.Decimal(10, 2)
+  freeZoneMinutes  Int      @default(5)
+  graceZoneMinutes Int      @default(5)
+  isActive         Boolean  @default(true)
+  updatedAt        DateTime @updatedAt
+}
+
+/// Configurable credit cost per product feature.
+/// Update rows here to change pricing without a code deploy.
+model FeatureCost {
+  id         String   @id @default(uuid())
+  featureKey String   @unique
+  credits    Decimal  @db.Decimal(10, 2)
+  label      String
+  isActive   Boolean  @default(true)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+}
+
+model UserCreditBalance {
+  userId           String   @id
+  purchasedCredits Decimal  @default(0) @db.Decimal(10, 2)
+  earnedCredits    Decimal  @default(0) @db.Decimal(10, 2)
+  heldCredits      Decimal  @default(0) @db.Decimal(10, 2)
+  totalAvailable   Decimal  @default(0) @db.Decimal(10, 2)
+  lastUpdated      DateTime @updatedAt
+  user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model CreditLedger {
+  id            String     @id @default(uuid())
+  userId        String
+  sessionId     String?
+  type          LedgerType
+  amount        Decimal    @db.Decimal(10, 2)
+  balanceBefore Decimal    @db.Decimal(10, 2)
+  balanceAfter  Decimal    @db.Decimal(10, 2)
+  reason        String
+  createdAt     DateTime   @default(now())
+  user          User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([sessionId])
+}
+
+model CreditPurchase {
+  id                     String         @id @default(uuid())
+  userId                 String
+  /// References CreditPack.code (unique identifier, not @id)
+  packName               String
+  creditsPurchased       Decimal        @db.Decimal(10, 2)
+  creditsRemaining       Decimal        @db.Decimal(10, 2)
+  paymentProviderEventId String         @unique
+  amountPaid             Decimal        @db.Decimal(10, 2)
+  currency               String         @default("USD")
+  status                 PurchaseStatus @default(PENDING)
+  createdAt              DateTime       @default(now())
+  confirmedAt            DateTime?
+  user                   User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model CreditUsage {
+  id           String   @id @default(uuid())
+  userId       String
+  resumeId     String?
+  operation    String
+  creditsUsed  Decimal  @db.Decimal(10, 2)
+  aiModel      String?
+  aiCostUsd    Decimal? @db.Decimal(10, 4)
+  inputTokens  Int?
+  outputTokens Int?
+  cached       Boolean  @default(false)
+  metadata     Json?
+  createdAt    DateTime @default(now())
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([resumeId])
+  @@index([operation])
+}
+
+model Policy {
+  id                 String   @id @default(uuid())
+  privacyPolicy      String
+  termsAndConditions String
+  updatedAt          DateTime @default(now())
+}
+
+/// Request-level idempotency for AI credit-deducting endpoints.
+/// Clients send an `Idempotency-Key` header (UUID v4) per logical action.
+/// The wrapper inserts a row in IN_PROGRESS state, executes the AI call, then
+/// transitions to COMPLETED (with cached response) or FAILED. Concurrent
+/// duplicate requests collide on the unique `key` and short-circuit to the
+/// cached response, guaranteeing a user is never billed twice for one click.
+model IdempotencyKey {
+  key          String            @id
+  userId       String
+  operation    String
+  status       IdempotencyStatus @default(IN_PROGRESS)
+  responseBody Json?
+  statusCode   Int?
+  creditsUsed  Decimal?          @db.Decimal(10, 2)
+  createdAt    DateTime          @default(now())
+  completedAt  DateTime?
+  expiresAt    DateTime
+  user         User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@index([operation])
+}
+
+/// Caches successful AI generation results so repeat operations (e.g. JD
+/// tailor "regenerate") can be served free. Keyed by (user, resume, op,
+/// inputHash). The wrapper looks up by hash before deducting credits; a hit
+/// returns the cached payload with `creditsUsed: 0` and `cached: true`.
+model AiGenerationCache {
+  id             String   @id @default(uuid())
+  userId         String
+  resumeId       String   @default("")
+  operation      String
+  inputHash      String
+  responseBody   Json
+  creditsCharged Decimal  @db.Decimal(10, 2)
+  createdAt      DateTime @default(now())
+  expiresAt      DateTime
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, operation, resumeId, inputHash])
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model TranscriptChunk {
+  id              String                 @id @default(uuid())
+  sessionId       String
+  userId          String
+  questionId      String?
+  question        String?
+  aiAnswer        String?
+  content         String
+  technologies    String[]
+  difficulty      String?
+  startTime       Float?
+  endTime         Float?
+  speakerType     SpeakerType?
+  embedding       Unsupported("vector")?
+  createdAt       DateTime               @default(now())
+  chunkOrder      Int?
+  chunkType       ChunkType?
+  isQuestion      Boolean                @default(false)
+  questionGroupId String?
+  session         Session                @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  user            User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId, createdAt])
+  @@index([sessionId, chunkOrder])
+  @@index([sessionId, questionGroupId])
+  @@index([sessionId, speakerType, createdAt])
+  @@index([userId])
+}
+
+model AskAiMessage {
+  id        String      @id @default(uuid())
+  sessionId String
+  userId    String
+  role      MessageRole
+  content   String
+  citations Json?
+  createdAt DateTime    @default(now())
+  session   Session     @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  user      User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId, createdAt])
+  @@index([userId])
+}
+
+enum Difficulty {
+  Easy
+  Medium
+  Hard
+}
+
+enum Industry {
+  DSA
+  Full_Stack
+  Data_Science
+  DevOps
+  System_Design
+  Mobile
+  Cloud
+}
+
+enum Language {
+  JavaScript
+  TypeScript
+  Python
+  Java
+  C_Plus_Plus
+  C
+  C_Sharp
+  Go
+  General
+}
+
+enum SessionStatus {
+  PRE_CHECK
+  ACTIVE
+  PAUSED
+  COMPLETING
+  COMPLETED
+  ABANDONED
+  FORCE_ENDED
+  CREDIT_EXHAUSTED
+  DISCONNECTED
+  AUTO_ENDED
+}
+
+enum LedgerType {
+  DEBIT
+  PURCHASE
+  REFUND
+  EARN
+}
+
+enum DeductionReason {
+  FREE_ZONE
+  HALF_BRACKET
+  FULL_BRACKET
+  EXHAUSTED
+  FORCE_ENDED
+  REFUND
+  BRACKET_OVERFLOW
+  PER_MINUTE_DEDUCTION
+  CAP_REACHED
+  ABANDONED
+  AUTO_ENDED
+}
+
+enum PurchaseStatus {
+  PENDING
+  CONFIRMED
+  REFUNDED
+  FAILED
+}
+
+enum PackFeature {
+  INTERVIEW_SESSION
+}
+
+enum SupportedCurrency {
+  INR
+  USD
+  GBP
+}
+
+enum PackTier {
+  QUICK
+  STARTER
+  BASIC
+  STANDARD
+  PROFESSIONAL
+  POWER
+  MEGA
+}
+
+enum IdempotencyStatus {
+  IN_PROGRESS
+  COMPLETED
+  FAILED
+}
+
+enum ChunkType {
+  question
+  answer
+  context
+  system
+}
+
+enum MessageRole {
+  USER      @map("user")
+  ASSISTANT @map("assistant")
+  SYSTEM    @map("system")
+}
+
+enum SpeakerType {
+  INTERVIEWER @map("interviewer")
+  CANDIDATE   @map("candidate")
+  SYSTEM      @map("system")
+  assistant
+}
+
+

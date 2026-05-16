@@ -807,10 +807,10 @@ export async function analyzeScreen(
   const compressPromise = isPreCompressed
     ? Promise.resolve(file.buffer)
     : sharp(file.buffer)
-        .resize({ width: 1024 })
-        .jpeg({ quality: 65 })
-        .toBuffer()
-        .catch((err) => { console.error("Sharp compression error:", err); throw err; });
+      .resize({ width: 1024 })
+      .jpeg({ quality: 65 })
+      .toBuffer()
+      .catch((err) => { console.error("Sharp compression error:", err); throw err; });
 
   // Run image compression, session fetch, and full context build in parallel.
   // Previously context was fetched sequentially after compression, adding 200-400 ms.

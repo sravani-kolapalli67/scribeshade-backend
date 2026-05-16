@@ -50,12 +50,12 @@ src/
 
 **Key integration points in the existing session lifecycle:**
 
-| Existing endpoint | Credit action added |
-|---|---|
-| `POST /api/session/:id/activate` | Place credit hold + compute `maxAllowedMinutes` |
-| `POST /api/session/:id/deactivate` | Trigger `credit-deduction` BullMQ job |
-| `POST /api/session/:id/heartbeat` *(new)* | Enforce `maxAllowedMinutes`; emit `CREDIT_WARNING` or auto-terminate |
-| `DELETE /api/session/:id` | Release hold if session was `PRE_CHECK` or `ACTIVE` |
+| Existing endpoint                         | Credit action added                                                  |
+| ----------------------------------------- | -------------------------------------------------------------------- |
+| `POST /api/session/:id/activate`          | Place credit hold + compute `maxAllowedMinutes`                      |
+| `POST /api/session/:id/deactivate`        | Trigger `credit-deduction` BullMQ job                                |
+| `POST /api/session/:id/heartbeat` _(new)_ | Enforce `maxAllowedMinutes`; emit `CREDIT_WARNING` or auto-terminate |
+| `DELETE /api/session/:id`                 | Release hold if session was `PRE_CHECK` or `ACTIVE`                  |
 
 ---
 
@@ -251,7 +251,7 @@ import { Decimal } from "@prisma/client/runtime/library";
 export interface BracketSnapshot {
   id: string;
   bracketMinutes: number;
-  creditsFull: string;   // Decimal serialized as string for JSON
+  creditsFull: string; // Decimal serialized as string for JSON
   creditsHalf: string;
   freeZoneMinutes: number;
   graceZoneMinutes: number;
@@ -284,7 +284,11 @@ export interface CreditBalanceDTO {
 import { Decimal } from "@prisma/client/runtime/library";
 import { prisma } from "../../shared/lib/prisma";
 import { AppError } from "../../shared/middleware/error.middleware";
-import type { BracketSnapshot, HoldResult, DeductionResult } from "./credits.types";
+import type {
+  BracketSnapshot,
+  HoldResult,
+  DeductionResult,
+} from "./credits.types";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -347,7 +351,11 @@ export async function resolveBracket(durationMinutes: number) {
  */
 export async function computeMaxAllowedMinutes(
   availableCredits: Decimal,
-): Promise<{ maxMinutes: number; creditsToHold: Decimal; snapshot: BracketSnapshot }> {
+): Promise<{
+  maxMinutes: number;
+  creditsToHold: Decimal;
+  snapshot: BracketSnapshot;
+}> {
   const brackets = await getActiveBrackets();
 
   if (!brackets.length) {
@@ -400,7 +408,9 @@ export async function placeHold(
   const { maxMinutes, creditsToHold, snapshot } =
     await computeMaxAllowedMinutes(available);
 
-  const newHeld = new Decimal(balance.heldCredits.toString()).add(creditsToHold);
+  const newHeld = new Decimal(balance.heldCredits.toString()).add(
+    creditsToHold,
+  );
   const newAvailable = available.sub(creditsToHold);
 
   await tx.userCreditBalance.update({
@@ -411,7 +421,11 @@ export async function placeHold(
     },
   });
 
-  return { creditsHeld: creditsToHold, maxAllowedMinutes: maxMinutes, snapshot };
+  return {
+    creditsHeld: creditsToHold,
+    maxAllowedMinutes: maxMinutes,
+    snapshot,
+  };
 }
 
 /**
@@ -446,8 +460,13 @@ export async function deductCredits(
   isExhausted: boolean,
   tx: typeof prisma,
 ): Promise<DeductionResult> {
-  const { freeZoneMinutes, graceZoneMinutes, bracketMinutes, creditsFull, creditsHalf } =
-    snapshot;
+  const {
+    freeZoneMinutes,
+    graceZoneMinutes,
+    bracketMinutes,
+    creditsFull,
+    creditsHalf,
+  } = snapshot;
 
   // ── Decision tree ──────────────────────────────────────────────────────────
   let deductAmount: Decimal;
@@ -485,8 +504,12 @@ export async function deductCredits(
   const balanceAfter = balanceBefore.sub(deductAmount);
 
   // Release the hold, apply the actual deduction
-  const heldAfter = new Decimal(balance.heldCredits.toString()).sub(creditsHeld);
-  const newPurchased = new Decimal(balance.purchasedCredits.toString()).sub(deductAmount);
+  const heldAfter = new Decimal(balance.heldCredits.toString()).sub(
+    creditsHeld,
+  );
+  const newPurchased = new Decimal(balance.purchasedCredits.toString()).sub(
+    deductAmount,
+  );
 
   await tx.userCreditBalance.update({
     where: { userId },
@@ -527,7 +550,11 @@ import { prisma } from "../../shared/lib/prisma";
  * GET /api/credits/balance
  * Returns the caller's current credit balance.
  */
-export async function getBalance(req: Request, res: Response, next: NextFunction) {
+export async function getBalance(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+) {
   try {
     const userId = getCurrentUserId(req);
     const user = await prisma.user.findUnique({ where: { clerkId: userId } });
@@ -544,7 +571,11 @@ export async function getBalance(req: Request, res: Response, next: NextFunction
  * GET /api/credits/ledger
  * Returns paginated ledger entries for the caller.
  */
-export async function getLedger(req: Request, res: Response, next: NextFunction) {
+export async function getLedger(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+) {
   try {
     const userId = getCurrentUserId(req);
     const user = await prisma.user.findUnique({ where: { clerkId: userId } });
@@ -574,7 +605,11 @@ export async function getLedger(req: Request, res: Response, next: NextFunction)
  * GET /api/credits/brackets
  * Returns all active bracket configurations.
  */
-export async function getBrackets(_req: Request, res: Response, next: NextFunction) {
+export async function getBrackets(
+  _req: Request,
+  res: Response,
+  next: NextFunction,
+) {
   try {
     const brackets = await creditsService.getActiveBrackets();
     return res.json({ success: true, data: brackets });
@@ -636,12 +671,19 @@ export async function activateSession(sessionId: string, userId: string) {
 
     // Guard: idempotent — already ACTIVE
     if (session.status === SessionStatus.ACTIVE) {
-      return { session, creditsHeld: session.creditsHeld, maxAllowedMinutes: session.maxAllowedMinutes };
+      return {
+        session,
+        creditsHeld: session.creditsHeld,
+        maxAllowedMinutes: session.maxAllowedMinutes,
+      };
     }
 
     // Only PRE_CHECK → ACTIVE is valid
     if (session.status !== SessionStatus.PRE_CHECK) {
-      throw new AppError(409, `Cannot activate a session in status ${session.status}`);
+      throw new AppError(
+        409,
+        `Cannot activate a session in status ${session.status}`,
+      );
     }
 
     // Place credit hold
@@ -703,7 +745,10 @@ export async function deactivateSession(
       s.status !== SessionStatus.ACTIVE &&
       s.status !== SessionStatus.PAUSED
     ) {
-      throw new AppError(409, `Cannot deactivate session in status ${s.status}`);
+      throw new AppError(
+        409,
+        `Cannot deactivate session in status ${s.status}`,
+      );
     }
 
     return tx.session.update({
@@ -718,7 +763,10 @@ export async function deactivateSession(
   });
 
   // Enqueue deduction job (handles ledger + balance + status → COMPLETED)
-  await creditDeductionQueue.add("credit-deduction", { sessionId, userId: user.id });
+  await creditDeductionQueue.add("credit-deduction", {
+    sessionId,
+    userId: user.id,
+  });
 
   // Fire-and-forget analytics (existing behaviour preserved)
   generateSessionFeedback(sessionId).catch(console.error);
@@ -737,7 +785,11 @@ Add to `session.controller.ts`:
  * Body: { elapsedMinutes: number }
  * Frontend calls this every 60 s while session is ACTIVE.
  */
-export async function sessionHeartbeat(req: Request, res: Response, next: NextFunction) {
+export async function sessionHeartbeat(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+) {
   try {
     const { id } = req.params;
     const { elapsedMinutes } = req.body as { elapsedMinutes: number };
@@ -756,7 +808,10 @@ export async function sessionHeartbeat(req: Request, res: Response, next: NextFu
     }
 
     if (elapsedMinutes >= max - 1) {
-      return res.json({ action: "CREDIT_WARNING", remainingMinutes: max - elapsedMinutes });
+      return res.json({
+        action: "CREDIT_WARNING",
+        remainingMinutes: max - elapsedMinutes,
+      });
     }
 
     return res.json({ action: "NONE", remainingMinutes: max - elapsedMinutes });
@@ -843,7 +898,11 @@ import { Decimal } from "@prisma/client/runtime/library";
 export const creditDeductionWorker = new Worker(
   "credit-deduction",
   async (job) => {
-    const { sessionId, userId, isExhausted = false } = job.data as {
+    const {
+      sessionId,
+      userId,
+      isExhausted = false,
+    } = job.data as {
       sessionId: string;
       userId: string;
       isExhausted?: boolean;
@@ -1004,7 +1063,10 @@ Start all workers in `src/server.ts` after the server starts:
 ```typescript
 // In src/server.ts (after app.listen):
 import { creditDeductionWorker } from "./jobs/credit-deduction.job";
-import { sessionWatchdogWorker, scheduleWatchdog } from "./jobs/session-watchdog.job";
+import {
+  sessionWatchdogWorker,
+  scheduleWatchdog,
+} from "./jobs/session-watchdog.job";
 import { holdExpiryWorker } from "./jobs/hold-expiry.job";
 
 scheduleWatchdog().catch(console.error);
@@ -1022,21 +1084,21 @@ All routes below are prefixed with `/api`.
 
 ### Credits
 
-| Method | Path | Auth | Description |
-|--------|------|------|-------------|
-| `GET` | `/credits/balance` | Required | Current balance for authenticated user |
-| `GET` | `/credits/ledger` | Required | Paginated ledger (`?page=1&limit=20`) |
-| `GET` | `/credits/brackets` | Public | Active bracket configs |
+| Method | Path                | Auth     | Description                            |
+| ------ | ------------------- | -------- | -------------------------------------- |
+| `GET`  | `/credits/balance`  | Required | Current balance for authenticated user |
+| `GET`  | `/credits/ledger`   | Required | Paginated ledger (`?page=1&limit=20`)  |
+| `GET`  | `/credits/brackets` | Public   | Active bracket configs                 |
 
 ### Session (credit-integrated)
 
-| Method | Path | Auth | Description | Credit action |
-|--------|------|------|-------------|---------------|
-| `POST` | `/session/create-session` | Required | Creates session in `PRE_CHECK` | None yet |
-| `POST` | `/session/:id/activate` | Required | Start session timer | Place hold, compute `maxAllowedMinutes` |
-| `POST` | `/session/:id/deactivate` | Required | End session | Enqueue `credit-deduction` job |
-| `POST` | `/session/:id/heartbeat` | Required | Tick every 60 s | Check exhaustion; return `NONE \| CREDIT_WARNING \| CREDIT_EXHAUSTED` |
-| `DELETE` | `/session/:id` | Required | Delete session | Release hold if `PRE_CHECK` |
+| Method   | Path                      | Auth     | Description                    | Credit action                                                         |
+| -------- | ------------------------- | -------- | ------------------------------ | --------------------------------------------------------------------- |
+| `POST`   | `/session/create-session` | Required | Creates session in `PRE_CHECK` | None yet                                                              |
+| `POST`   | `/session/:id/activate`   | Required | Start session timer            | Place hold, compute `maxAllowedMinutes`                               |
+| `POST`   | `/session/:id/deactivate` | Required | End session                    | Enqueue `credit-deduction` job                                        |
+| `POST`   | `/session/:id/heartbeat`  | Required | Tick every 60 s                | Check exhaustion; return `NONE \| CREDIT_WARNING \| CREDIT_EXHAUSTED` |
+| `DELETE` | `/session/:id`            | Required | Delete session                 | Release hold if `PRE_CHECK`                                           |
 
 #### `POST /session/:id/activate` — Response
 
@@ -1106,7 +1168,7 @@ Log reason = BRACKET_OVERFLOW and alert.
 ### Example values (default seed)
 
 | Bracket | creditsFull | creditsHalf | freeZone | graceZone |
-|---------|-------------|-------------|----------|-----------|
+| ------- | ----------- | ----------- | -------- | --------- |
 | 30 min  | 0.50        | 0.25        | 5 min    | 5 min     |
 | 60 min  | 1.00        | 0.50        | 5 min    | 5 min     |
 
@@ -1148,36 +1210,36 @@ CREATE SESSION
 
 ### Session Lifecycle
 
-| Scenario | Status | Deduct | Notes |
-|----------|--------|--------|-------|
-| Never activated (PRE_CHECK > 10 min) | `ABANDONED` | 0 | `hold-expiry` job releases hold |
-| Within free zone (≤ 5 min active) | `COMPLETED` | 0 | Ledger entry written with amount = 0 |
-| Mid-bracket (e.g. 12 of 30 min) | `COMPLETED` | `creditsHalf` | `HALF_BRACKET` |
-| Grace zone reached (≥ 25 of 30 min) | `COMPLETED` | `creditsFull` | `FULL_BRACKET` |
-| Exactly at bracket boundary (30.0 min) | `COMPLETED` | `creditsFull` | Boundary inclusive of grace |
-| Credit exhaustion mid-session | `CREDIT_EXHAUSTED` | all `creditsHeld` | `credit_exhausted_at` recorded |
-| App crash / connection drop | `FORCE_ENDED` | full bracket at closure elapsed time | Watchdog detects stale ACTIVE |
-| Pause then resume | `ACTIVE` → `PAUSED` → `ACTIVE` | Uses `activeDuration = total − pausedSeconds` | Hold NOT released on pause |
-| Pause with no resume (> maxAllowedMinutes) | `FORCE_ENDED` | Watchdog applies bracket logic | Treated like crash |
-| Duplicate `/deactivate` call | `COMPLETED` (idempotent 200) | No double-deduction | Status check before $transaction |
-| `/deactivate` after `CREDIT_EXHAUSTED` | Idempotent 200 | No change | Guard on status check |
+| Scenario                                   | Status                         | Deduct                                        | Notes                                |
+| ------------------------------------------ | ------------------------------ | --------------------------------------------- | ------------------------------------ |
+| Never activated (PRE_CHECK > 10 min)       | `ABANDONED`                    | 0                                             | `hold-expiry` job releases hold      |
+| Within free zone (≤ 5 min active)          | `COMPLETED`                    | 0                                             | Ledger entry written with amount = 0 |
+| Mid-bracket (e.g. 12 of 30 min)            | `COMPLETED`                    | `creditsHalf`                                 | `HALF_BRACKET`                       |
+| Grace zone reached (≥ 25 of 30 min)        | `COMPLETED`                    | `creditsFull`                                 | `FULL_BRACKET`                       |
+| Exactly at bracket boundary (30.0 min)     | `COMPLETED`                    | `creditsFull`                                 | Boundary inclusive of grace          |
+| Credit exhaustion mid-session              | `CREDIT_EXHAUSTED`             | all `creditsHeld`                             | `credit_exhausted_at` recorded       |
+| App crash / connection drop                | `FORCE_ENDED`                  | full bracket at closure elapsed time          | Watchdog detects stale ACTIVE        |
+| Pause then resume                          | `ACTIVE` → `PAUSED` → `ACTIVE` | Uses `activeDuration = total − pausedSeconds` | Hold NOT released on pause           |
+| Pause with no resume (> maxAllowedMinutes) | `FORCE_ENDED`                  | Watchdog applies bracket logic                | Treated like crash                   |
+| Duplicate `/deactivate` call               | `COMPLETED` (idempotent 200)   | No double-deduction                           | Status check before $transaction     |
+| `/deactivate` after `CREDIT_EXHAUSTED`     | Idempotent 200                 | No change                                     | Guard on status check                |
 
 ### Credit Balance
 
-| Scenario | Behaviour |
-|----------|-----------|
-| Insufficient credits (< `creditsHalf` of smallest bracket) | `AppError(402, "INSUFFICIENT_CREDITS")` on activate |
-| Earned credits change during session | Ignored for hold/maxAllowedMinutes; applied at deduction time only |
-| Decimal precision | `Decimal(10,2)` throughout; never use `Number()` for credit math |
-| Negative balance attempt | `DEDUCTION_ANOMALY` logged; deduction clamped to available; never writes negative `balanceAfter` |
-| Multiple active sessions | `heldCredits` is cumulative; `totalAvailable = purchased + earned − held` checked on each activation |
+| Scenario                                                   | Behaviour                                                                                            |
+| ---------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| Insufficient credits (< `creditsHalf` of smallest bracket) | `AppError(402, "INSUFFICIENT_CREDITS")` on activate                                                  |
+| Earned credits change during session                       | Ignored for hold/maxAllowedMinutes; applied at deduction time only                                   |
+| Decimal precision                                          | `Decimal(10,2)` throughout; never use `Number()` for credit math                                     |
+| Negative balance attempt                                   | `DEDUCTION_ANOMALY` logged; deduction clamped to available; never writes negative `balanceAfter`     |
+| Multiple active sessions                                   | `heldCredits` is cumulative; `totalAvailable = purchased + earned − held` checked on each activation |
 
 ### Config & Purchase
 
-| Scenario | Behaviour |
-|----------|-----------|
+| Scenario                           | Behaviour                                                                                                      |
+| ---------------------------------- | -------------------------------------------------------------------------------------------------------------- |
 | Config changed after session start | `bracketConfigSnapshot` on session row is always used; live `CreditConfig` never consulted for active sessions |
-| No matching bracket | Largest bracket applied as fallback; logged as `BRACKET_OVERFLOW` |
-| Payment webhook delayed | Credits stay `PENDING`; excluded from `totalAvailable`; UI shows "Purchase processing…" |
-| Duplicate payment webhook | `paymentProviderEventId` unique constraint silently deduplicates |
-| Refund after partial use | `creditsRemaining = creditsPurchased − consumed`; only `creditsRemaining` refunded; purchase marked `REFUNDED` |
+| No matching bracket                | Largest bracket applied as fallback; logged as `BRACKET_OVERFLOW`                                              |
+| Payment webhook delayed            | Credits stay `PENDING`; excluded from `totalAvailable`; UI shows "Purchase processing…"                        |
+| Duplicate payment webhook          | `paymentProviderEventId` unique constraint silently deduplicates                                               |
+| Refund after partial use           | `creditsRemaining = creditsPurchased − consumed`; only `creditsRemaining` refunded; purchase marked `REFUNDED` |

@@ -1,9 +1,9 @@
 import { PrismaClient, SessionStatus, Prisma } from './node_modules/@prisma/client/default.js';
 
 const p = new PrismaClient();
-const USER_ID    = '394819ee-7bde-44af-b472-ce1becdbe947';
+const USER_ID = '394819ee-7bde-44af-b472-ce1becdbe947';
 const COMPANY_ID = '176d420c-ed24-49ea-a6de-0b728290dae3';
-const RESUME_ID  = '0e602d56-1f1d-4919-aa9d-c767cf3097fb';
+const RESUME_ID = '0e602d56-1f1d-4919-aa9d-c767cf3097fb';
 
 async function api(method, path, body) {
   const o = { method, headers: { 'Content-Type': 'application/json' } };
@@ -14,13 +14,15 @@ async function api(method, path, body) {
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 async function mkSession(free) {
-  return p.session.create({ data: {
-    userId: USER_ID, companyId: COMPANY_ID, companyName: 'Google',
-    jobDescription: 'SWE', resumeId: RESUME_ID, DocumentId: '',
-    language: 'TypeScript', simpleLanguage: true, extraContext: '',
-    autoGenerateResponse: false, saveTranscription: false,
-    mode: 'manual', free, status: SessionStatus.PRE_CHECK,
-  }});
+  return p.session.create({
+    data: {
+      userId: USER_ID, companyId: COMPANY_ID, companyName: 'Google',
+      jobDescription: 'SWE', resumeId: RESUME_ID, DocumentId: '',
+      language: 'TypeScript', simpleLanguage: true, extraContext: '',
+      autoGenerateResponse: false, saveTranscription: false,
+      mode: 'manual', free, status: SessionStatus.PRE_CHECK,
+    }
+  });
 }
 
 async function setBalance(pc, hc, ta) {
@@ -46,7 +48,7 @@ async function main() {
   const br = await api('GET', '/api/credits/brackets');
   ok('2 active brackets', br.data?.length === 2, br.data?.length);
   ok('30-min creditsFull=0.5', br.data?.[0]?.creditsFull === '0.5', br.data?.[0]?.creditsFull);
-  ok('60-min creditsFull=1',   br.data?.[1]?.creditsFull === '1',   br.data?.[1]?.creditsFull);
+  ok('60-min creditsFull=1', br.data?.[1]?.creditsFull === '1', br.data?.[1]?.creditsFull);
 
   const b401 = await api('GET', '/api/credits/balance');
   ok('balance requires auth', Boolean(b401.error), b401);
@@ -66,17 +68,17 @@ async function main() {
   const s = await mkSession(false);
 
   const act = await api('POST', '/api/session/' + s.id + '/activate');
-  ok('activate succeeds',    act.success === true, act);
-  ok('creditsHeld = 1',      act.creditsHeld === '1', act.creditsHeld);
+  ok('activate succeeds', act.success === true, act);
+  ok('creditsHeld = 1', act.creditsHeld === '1', act.creditsHeld);
   ok('maxAllowedMinutes = 60', act.maxAllowedMinutes === 60, act.maxAllowedMinutes);
 
   const bal1 = await p.userCreditBalance.findUnique({ where: { userId: USER_ID } });
-  ok('DB heldCredits = 1',       bal1.heldCredits.toString() === '1', bal1.heldCredits);
-  ok('DB totalAvailable = 0',    bal1.totalAvailable.toString() === '0', bal1.totalAvailable);
+  ok('DB heldCredits = 1', bal1.heldCredits.toString() === '1', bal1.heldCredits);
+  ok('DB totalAvailable = 0', bal1.totalAvailable.toString() === '0', bal1.totalAvailable);
 
   const hb1 = await api('POST', '/api/session/' + s.id + '/heartbeat', { elapsedMinutes: 5 });
-  ok('heartbeat 5 min → NONE',       hb1.action === 'NONE', hb1);
-  ok('remainingMinutes = 55',        hb1.remainingMinutes === 55, hb1.remainingMinutes);
+  ok('heartbeat 5 min → NONE', hb1.action === 'NONE', hb1);
+  ok('remainingMinutes = 55', hb1.remainingMinutes === 55, hb1.remainingMinutes);
 
   const hbw = await api('POST', '/api/session/' + s.id + '/heartbeat', { elapsedMinutes: 59 });
   ok('heartbeat 59 min → CREDIT_WARNING', hbw.action === 'CREDIT_WARNING', hbw);
@@ -91,25 +93,25 @@ async function main() {
   await sleep(8000);
 
   const sf = await p.session.findUnique({ where: { id: s.id }, select: { status: true, creditsDeducted: true, deductionReason: true } });
-  ok('session → COMPLETED',        sf.status === 'COMPLETED', sf.status);
+  ok('session → COMPLETED', sf.status === 'COMPLETED', sf.status);
   ok('deductionReason = FREE_ZONE', sf.deductionReason === 'FREE_ZONE', sf.deductionReason);
-  ok('creditsDeducted = 0',         sf.creditsDeducted?.toString() === '0', sf.creditsDeducted);
+  ok('creditsDeducted = 0', sf.creditsDeducted?.toString() === '0', sf.creditsDeducted);
 
   const bf = await p.userCreditBalance.findUnique({ where: { userId: USER_ID } });
-  ok('heldCredits = 0 after worker',   bf.heldCredits.toString() === '0', bf.heldCredits);
-  ok('totalAvailable = 1 restored',    bf.totalAvailable.toString() === '1', bf.totalAvailable);
+  ok('heldCredits = 0 after worker', bf.heldCredits.toString() === '0', bf.heldCredits);
+  ok('totalAvailable = 1 restored', bf.totalAvailable.toString() === '1', bf.totalAvailable);
 
   const led = await p.creditLedger.findMany({ where: { sessionId: s.id } });
-  ok('ledger entry created',   led.length === 1, led.length);
-  ok('ledger type = DEBIT',    led[0]?.type === 'DEBIT', led[0]?.type);
+  ok('ledger entry created', led.length === 1, led.length);
+  ok('ledger type = DEBIT', led[0]?.type === 'DEBIT', led[0]?.type);
   ok('ledger reason = FREE_ZONE', led[0]?.reason === 'FREE_ZONE', led[0]?.reason);
 
   // ── TEST 4: Free session (no hold) ────────────────────────────────────────
   console.log('\n══ TEST 4: Free session lifecycle');
   const fs = await mkSession(true);
   const fa = await api('POST', '/api/session/' + fs.id + '/activate');
-  ok('free activate ok',       fa.success === true, fa);
-  ok('free creditsHeld = 0',   fa.creditsHeld === '0', fa.creditsHeld);
+  ok('free activate ok', fa.success === true, fa);
+  ok('free creditsHeld = 0', fa.creditsHeld === '0', fa.creditsHeld);
   const fd = await api('POST', '/api/session/' + fs.id + '/deactivate');
   ok('free deactivate ok', fd.success === true, fd);
   await sleep(3000);
@@ -130,7 +132,7 @@ async function main() {
   ok('delete returns no error', Boolean(delResp.id) || !delResp.error, delResp);
 
   const bpost = await p.userCreditBalance.findUnique({ where: { userId: USER_ID } });
-  ok('heldCredits = 0 after delete',    bpost.heldCredits.toString() === '0', bpost.heldCredits);
+  ok('heldCredits = 0 after delete', bpost.heldCredits.toString() === '0', bpost.heldCredits);
   ok('totalAvailable = 1 after delete', bpost.totalAvailable.toString() === '1', bpost.totalAvailable);
 
   // ── TEST 6: Insufficient credits → error ──────────────────────────────────

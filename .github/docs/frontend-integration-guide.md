@@ -40,13 +40,13 @@ Every session now has a `status` field (replaces the old `isActive` boolean).
 
 ## 2. Credit System — Concepts
 
-| Concept | Description |
-|---|---|
-| **Bracket** | A time tier (e.g. 30 min, 60 min) with a full-price and half-price credit cost |
-| **Hold** | Credits reserved at session activation — deducted from `totalAvailable` immediately |
-| **Free Zone** | First N minutes of a session (default 5) — no credits charged |
-| **Grace Zone** | Last N minutes before bracket boundary (default 5) — still charged at half rate |
-| **Deduction Reason** | `FREE_ZONE` / `HALF_BRACKET` / `FULL_BRACKET` / `EXHAUSTED` / `FORCE_ENDED` |
+| Concept              | Description                                                                         |
+| -------------------- | ----------------------------------------------------------------------------------- |
+| **Bracket**          | A time tier (e.g. 30 min, 60 min) with a full-price and half-price credit cost      |
+| **Hold**             | Credits reserved at session activation — deducted from `totalAvailable` immediately |
+| **Free Zone**        | First N minutes of a session (default 5) — no credits charged                       |
+| **Grace Zone**       | Last N minutes before bracket boundary (default 5) — still charged at half rate     |
+| **Deduction Reason** | `FREE_ZONE` / `HALF_BRACKET` / `FULL_BRACKET` / `EXHAUSTED` / `FORCE_ENDED`         |
 
 All credit values are returned as **decimal strings** (e.g. `"1.00"`, `"0.50"`) — never parse as float; display as-is or use a decimal library.
 
@@ -63,21 +63,21 @@ Content-Type: application/json   (or multipart/form-data)
 
 **Request Body:**
 
-| Field | Type | Required | Notes |
-|---|---|---|---|
-| `userId` | string | ✅ | Internal DB user UUID |
-| `companyName` | string | ✅ | Company auto-created if not found |
-| `jobDescription` | string | — | Job description text |
-| `resumeId` | string | — | UUID of uploaded resume |
-| `DocumentId` | string | — | UUID of uploaded document |
-| `language` | string | — | e.g. `"JavaScript"`, `"Python"` |
-| `simpleLanguage` | boolean | — | Default `true` |
-| `autoGenerateAI` | boolean | — | Auto-trigger AI answer |
-| `saveTranscript` | boolean | — | Save transcript at end |
-| `instructions` | string | — | Extra instructions (appended to extraContext) |
-| `extraContext` | string | — | Additional context |
-| `jobInputMode` | string | — | `"manual"` or `"upload"` |
-| `free` | boolean | — | `true` = skip credit system entirely |
+| Field            | Type    | Required | Notes                                         |
+| ---------------- | ------- | -------- | --------------------------------------------- |
+| `userId`         | string  | ✅       | Internal DB user UUID                         |
+| `companyName`    | string  | ✅       | Company auto-created if not found             |
+| `jobDescription` | string  | —        | Job description text                          |
+| `resumeId`       | string  | —        | UUID of uploaded resume                       |
+| `DocumentId`     | string  | —        | UUID of uploaded document                     |
+| `language`       | string  | —        | e.g. `"JavaScript"`, `"Python"`               |
+| `simpleLanguage` | boolean | —        | Default `true`                                |
+| `autoGenerateAI` | boolean | —        | Auto-trigger AI answer                        |
+| `saveTranscript` | boolean | —        | Save transcript at end                        |
+| `instructions`   | string  | —        | Extra instructions (appended to extraContext) |
+| `extraContext`   | string  | —        | Additional context                            |
+| `jobInputMode`   | string  | —        | `"manual"` or `"upload"`                      |
+| `free`           | boolean | —        | `true` = skip credit system entirely          |
 
 **Response `201`:**
 
@@ -85,7 +85,9 @@ Content-Type: application/json   (or multipart/form-data)
 {
   "success": true,
   "sessionId": "uuid",
-  "data": { /* full Session object */ }
+  "data": {
+    /* full Session object */
+  }
 }
 ```
 
@@ -128,17 +130,18 @@ No request body needed.
 ```
 
 **What happens server-side:**
+
 - For paid sessions: credits are held, `totalAvailable` decreases, `maxAllowedMinutes` is set
 - Session moves `PRE_CHECK → ACTIVE`
 - Calling activate on an already-`ACTIVE` session is **idempotent** (returns same 200)
 
 **Error responses:**
 
-| Status | Meaning |
-|---|---|
-| `402` | Insufficient credits (`INSUFFICIENT_CREDITS`) |
-| `404` | Session not found |
-| `409` | Session is not in `PRE_CHECK` status (already activated, completed, etc.) |
+| Status | Meaning                                                                   |
+| ------ | ------------------------------------------------------------------------- |
+| `402`  | Insufficient credits (`INSUFFICIENT_CREDITS`)                             |
+| `404`  | Session not found                                                         |
+| `409`  | Session is not in `PRE_CHECK` status (already activated, completed, etc.) |
 
 > **Store `maxAllowedMinutes` from this response** — you need it to drive the heartbeat timer.
 
@@ -173,10 +176,10 @@ Call this **every 60 seconds** while the session is ACTIVE. Pass the actual elap
 { "action": "CREDIT_EXHAUSTED" }
 ```
 
-| `action` | What to do in UI |
-|---|---|
-| `NONE` | Continue, update remaining time display |
-| `CREDIT_WARNING` | Show warning banner — "Less than 1 minute of credit remaining" |
+| `action`           | What to do in UI                                                                       |
+| ------------------ | -------------------------------------------------------------------------------------- |
+| `NONE`             | Continue, update remaining time display                                                |
+| `CREDIT_WARNING`   | Show warning banner — "Less than 1 minute of credit remaining"                         |
 | `CREDIT_EXHAUSTED` | Session was force-closed server-side. Stop UI, show "Session ended: credits exhausted" |
 
 > If the session ID doesn't exist or is not ACTIVE, the response is `{ "action": "NONE" }` (no error).
@@ -199,9 +202,9 @@ Content-Type: application/json
 }
 ```
 
-| Field | Type | Notes |
-|---|---|---|
-| `aiUsage` | number | Number of AI requests made during session |
+| Field        | Type   | Notes                                                   |
+| ------------ | ------ | ------------------------------------------------------- |
+| `aiUsage`    | number | Number of AI requests made during session               |
 | `transcript` | string | Full session transcript (triggers background analytics) |
 
 **Response `200`:**
@@ -217,6 +220,7 @@ Content-Type: application/json
 For **free sessions**, the status will be `"COMPLETED"` immediately (no async job).
 
 **What happens server-side:**
+
 - Session moves `ACTIVE → COMPLETING`
 - For paid sessions: a BullMQ job is queued to finalise credit deduction → session becomes `COMPLETED`
 - Calling deactivate again while `COMPLETING` is **idempotent** (returns the same 200, no extra job queued)
@@ -244,7 +248,9 @@ GET /api/session/:id
   "maxAllowedMinutes": 60,
   "startedAt": "...",
   "endedAt": "...",
-  "feedback": { /* SessionFeedback or null */ }
+  "feedback": {
+    /* SessionFeedback or null */
+  }
 }
 ```
 
@@ -256,12 +262,12 @@ GET /api/session/:id
 GET /api/session/list?userId=<uuid>&search=Google&from_date=2026-01-01&to_date=2026-04-28
 ```
 
-| Query | Type | Notes |
-|---|---|---|
-| `userId` | string | Required |
-| `search` | string | Filters by `companyName` (case-insensitive) |
-| `from_date` | string | ISO date string |
-| `to_date` | string | ISO date string (inclusive, to 23:59:59) |
+| Query       | Type   | Notes                                       |
+| ----------- | ------ | ------------------------------------------- |
+| `userId`    | string | Required                                    |
+| `search`    | string | Filters by `companyName` (case-insensitive) |
+| `from_date` | string | ISO date string                             |
+| `to_date`   | string | ISO date string (inclusive, to 23:59:59)    |
 
 ---
 
@@ -285,23 +291,23 @@ POST /api/session/:id/analyze-screen
 Content-Type: multipart/form-data
 ```
 
-| Field | Type | Notes |
-|---|---|---|
-| `screenshot` | file | PNG/JPEG screenshot |
-| `aiModel` | string | Human-readable model name (see table below) |
+| Field        | Type   | Notes                                       |
+| ------------ | ------ | ------------------------------------------- |
+| `screenshot` | file   | PNG/JPEG screenshot                         |
+| `aiModel`    | string | Human-readable model name (see table below) |
 
 **Accepted `aiModel` values:**
 
-| Frontend sends | OpenRouter model used |
-|---|---|
-| `Gemini 2.0 Flash` | `google/gemini-2.0-flash-001` |
+| Frontend sends         | OpenRouter model used              |
+| ---------------------- | ---------------------------------- |
+| `Gemini 2.0 Flash`     | `google/gemini-2.0-flash-001`      |
 | `Gemini 2.0 Flash Exp` | `google/gemini-2.0-flash-exp:free` |
-| `Gemini 1.5 Flash` | `google/gemini-flash-1.5` |
-| `Gemini 1.5 Pro` | `google/gemini-pro-1.5` |
-| `GPT-4o` | `openai/gpt-4o` |
-| `GPT-4o Mini` | `openai/gpt-4o-mini` |
-| `Claude 3.5 Sonnet` | `anthropic/claude-3.5-sonnet` |
-| `Claude 3 Haiku` | `anthropic/claude-3-haiku` |
+| `Gemini 1.5 Flash`     | `google/gemini-flash-1.5`          |
+| `Gemini 1.5 Pro`       | `google/gemini-pro-1.5`            |
+| `GPT-4o`               | `openai/gpt-4o`                    |
+| `GPT-4o Mini`          | `openai/gpt-4o-mini`               |
+| `Claude 3.5 Sonnet`    | `anthropic/claude-3.5-sonnet`      |
+| `Claude 3 Haiku`       | `anthropic/claude-3-haiku`         |
 
 > Model name matching is **case-insensitive**. Unknown strings are passed through as-is.
 
@@ -373,12 +379,12 @@ Authorization: Bearer <clerk-token>
 }
 ```
 
-| Field | Meaning |
-|---|---|
-| `purchasedCredits` | Total ever purchased |
-| `earnedCredits` | Bonus/referral credits |
-| `heldCredits` | Currently locked by an active session |
-| `totalAvailable` | **Spendable balance** — show this as the user's current balance |
+| Field              | Meaning                                                         |
+| ------------------ | --------------------------------------------------------------- |
+| `purchasedCredits` | Total ever purchased                                            |
+| `earnedCredits`    | Bonus/referral credits                                          |
+| `heldCredits`      | Currently locked by an active session                           |
+| `totalAvailable`   | **Spendable balance** — show this as the user's current balance |
 
 > Display `totalAvailable` as the user's usable balance. `heldCredits` represents an in-progress session reservation.
 
@@ -418,20 +424,20 @@ Authorization: Bearer <clerk-token>
 }
 ```
 
-| `type` | Meaning |
-|---|---|
-| `DEBIT` | Credits spent on a session |
+| `type`     | Meaning                    |
+| ---------- | -------------------------- |
+| `DEBIT`    | Credits spent on a session |
 | `PURCHASE` | Credits added via purchase |
-| `REFUND` | Credits returned |
-| `EARN` | Bonus credits awarded |
+| `REFUND`   | Credits returned           |
+| `EARN`     | Bonus credits awarded      |
 
-| `reason` (for DEBIT) | Meaning |
-|---|---|
-| `FREE_ZONE` | Session ended within free zone — 0 credits charged |
-| `HALF_BRACKET` | Session ended in grace zone — half rate charged |
-| `FULL_BRACKET` | Session used full bracket — full rate charged |
-| `EXHAUSTED` | Credits ran out mid-session |
-| `FORCE_ENDED` | Session was force-closed by admin/watchdog |
+| `reason` (for DEBIT) | Meaning                                            |
+| -------------------- | -------------------------------------------------- |
+| `FREE_ZONE`          | Session ended within free zone — 0 credits charged |
+| `HALF_BRACKET`       | Session ended in grace zone — half rate charged    |
+| `FULL_BRACKET`       | Session used full bracket — full rate charged      |
+| `EXHAUSTED`          | Credits ran out mid-session                        |
+| `FORCE_ENDED`        | Session was force-closed by admin/watchdog         |
 
 ---
 
@@ -484,16 +490,16 @@ PRE_CHECK
 
 **Status descriptions:**
 
-| Status | Meaning | UI Action |
-|---|---|---|
-| `PRE_CHECK` | Created, not started | Show "Start Session" button |
-| `ACTIVE` | Running — heartbeat required | Show timer, AI controls |
-| `PAUSED` | Paused (reserved for future) | Show "Resume" button |
-| `COMPLETING` | Deactivated, job pending | Show "Processing..." spinner |
-| `COMPLETED` | Fully closed, credits deducted | Show results/feedback |
+| Status             | Meaning                        | UI Action                       |
+| ------------------ | ------------------------------ | ------------------------------- |
+| `PRE_CHECK`        | Created, not started           | Show "Start Session" button     |
+| `ACTIVE`           | Running — heartbeat required   | Show timer, AI controls         |
+| `PAUSED`           | Paused (reserved for future)   | Show "Resume" button            |
+| `COMPLETING`       | Deactivated, job pending       | Show "Processing..." spinner    |
+| `COMPLETED`        | Fully closed, credits deducted | Show results/feedback           |
 | `CREDIT_EXHAUSTED` | Ran out of credits mid-session | Show "Credits exhausted" notice |
-| `FORCE_ENDED` | Closed by admin/system | Show "Session ended" notice |
-| `ABANDONED` | PRE_CHECK session timed out | Treat as expired |
+| `FORCE_ENDED`      | Closed by admin/system         | Show "Session ended" notice     |
+| `ABANDONED`        | PRE_CHECK session timed out    | Treat as expired                |
 
 ---
 
@@ -503,10 +509,10 @@ PRE_CHECK
 
 ```js
 // Fetch active brackets to show "this session will cost X credits"
-const { data: brackets } = await GET('/api/credits/brackets');
+const { data: brackets } = await GET("/api/credits/brackets");
 
 // Fetch user's current balance
-const { data: balance } = await GET('/api/credits/balance');  // authenticated
+const { data: balance } = await GET("/api/credits/balance"); // authenticated
 
 // Display: balance.totalAvailable credits available
 // Display: brackets[0] = 30 min for 0.50 credits, brackets[1] = 60 min for 1.00 credits
@@ -515,12 +521,12 @@ const { data: balance } = await GET('/api/credits/balance');  // authenticated
 ### Step 2 — Create Session
 
 ```js
-const { sessionId } = await POST('/api/session/create-session', {
+const { sessionId } = await POST("/api/session/create-session", {
   userId,
-  companyName: 'Google',
-  jobDescription: '...',
-  resumeId: '...',
-  free: false,   // paid session
+  companyName: "Google",
+  jobDescription: "...",
+  resumeId: "...",
+  free: false, // paid session
 });
 // session is now PRE_CHECK
 ```
@@ -530,7 +536,7 @@ const { sessionId } = await POST('/api/session/create-session', {
 ```js
 const result = await POST(`/api/session/${sessionId}/activate`);
 
-if (result.error === 'INSUFFICIENT_CREDITS') {
+if (result.error === "INSUFFICIENT_CREDITS") {
   // redirect to buy credits page
   return;
 }
@@ -551,13 +557,13 @@ const heartbeatInterval = setInterval(async () => {
     elapsedMinutes: Math.floor(elapsedMinutes),
   });
 
-  if (result.action === 'CREDIT_WARNING') {
+  if (result.action === "CREDIT_WARNING") {
     showWarning(`Only ${result.remainingMinutes} minute(s) of credit left!`);
   }
 
-  if (result.action === 'CREDIT_EXHAUSTED') {
+  if (result.action === "CREDIT_EXHAUSTED") {
     clearInterval(heartbeatInterval);
-    showError('Session ended — credits exhausted');
+    showError("Session ended — credits exhausted");
     navigateTo(`/session/${sessionId}/results`);
   }
 }, 60_000); // every 60 seconds
@@ -570,7 +576,7 @@ clearInterval(heartbeatInterval);
 
 await POST(`/api/session/${sessionId}/deactivate`, {
   aiUsage: aiRequestCount,
-  transcript: transcriptText,  // optional
+  transcript: transcriptText, // optional
 });
 // session is now COMPLETING (or COMPLETED for free sessions)
 ```
@@ -583,7 +589,7 @@ let session;
 do {
   await sleep(2000);
   session = await GET(`/api/session/${sessionId}`);
-} while (session.status === 'COMPLETING');
+} while (session.status === "COMPLETING");
 
 // session.deductionReason tells you what was charged
 // session.creditsDeducted = "0.00" for FREE_ZONE, etc.
@@ -607,20 +613,20 @@ class SessionHeartbeat {
 
       try {
         const res = await fetch(`/api/session/${sessionId}/heartbeat`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ elapsedMinutes: elapsed }),
         });
         const data = await res.json();
 
-        if (data.action === 'CREDIT_WARNING') {
+        if (data.action === "CREDIT_WARNING") {
           this.onWarning(data.remainingMinutes);
-        } else if (data.action === 'CREDIT_EXHAUSTED') {
+        } else if (data.action === "CREDIT_EXHAUSTED") {
           this.stop();
           this.onExhausted();
         }
       } catch (e) {
-        console.error('Heartbeat failed', e);
+        console.error("Heartbeat failed", e);
         // Do NOT stop on network failure — retry next tick
       }
     }, 60_000);
@@ -631,8 +637,12 @@ class SessionHeartbeat {
     this.interval = null;
   }
 
-  onWarning(remaining: number) { /* override */ }
-  onExhausted() { /* override */ }
+  onWarning(remaining: number) {
+    /* override */
+  }
+  onExhausted() {
+    /* override */
+  }
 }
 ```
 
@@ -640,15 +650,15 @@ class SessionHeartbeat {
 
 ## 8. UI Handling Per Status
 
-| Status | Suggested UI |
-|---|---|
-| `PRE_CHECK` | "Start Session" CTA, show estimated cost from brackets |
-| `ACTIVE` | Running timer, AI controls enabled, remaining-minutes badge if `maxAllowedMinutes` set |
-| `COMPLETING` | Disabled controls, "Finalising session..." spinner — poll every 2s |
-| `COMPLETED` | Show `deductionReason` + `creditsDeducted`, feedback tab, "Start New Session" CTA |
-| `CREDIT_EXHAUSTED` | Red banner "Session ended — credits ran out", show deduction info, "Buy Credits" CTA |
-| `FORCE_ENDED` | Yellow banner "Session was closed by the system" |
-| `ABANDONED` | Grey tag "Expired" |
+| Status             | Suggested UI                                                                           |
+| ------------------ | -------------------------------------------------------------------------------------- |
+| `PRE_CHECK`        | "Start Session" CTA, show estimated cost from brackets                                 |
+| `ACTIVE`           | Running timer, AI controls enabled, remaining-minutes badge if `maxAllowedMinutes` set |
+| `COMPLETING`       | Disabled controls, "Finalising session..." spinner — poll every 2s                     |
+| `COMPLETED`        | Show `deductionReason` + `creditsDeducted`, feedback tab, "Start New Session" CTA      |
+| `CREDIT_EXHAUSTED` | Red banner "Session ended — credits ran out", show deduction info, "Buy Credits" CTA   |
+| `FORCE_ENDED`      | Yellow banner "Session was closed by the system"                                       |
+| `ABANDONED`        | Grey tag "Expired"                                                                     |
 
 ### Remaining time display
 
@@ -668,7 +678,7 @@ const remaining = maxAllowedMinutes - elapsedMinutes;
 // 2. Session reaches COMPLETED (balance updated after deduction)
 // 3. User purchases credits
 
-const { data } = await GET('/api/credits/balance');
+const { data } = await GET("/api/credits/balance");
 display(`${data.totalAvailable} credits available`);
 if (Number(data.heldCredits) > 0) {
   display(`(${data.heldCredits} held by active session)`);
@@ -679,18 +689,19 @@ if (Number(data.heldCredits) > 0) {
 
 ## 9. Error Reference
 
-| Status | Error message | Meaning | Action |
-|---|---|---|---|
-| `400` | `userId is required` | Missing userId in create | Fix request |
-| `401` | `Authentication required` | Missing/invalid Clerk token | Redirect to login |
-| `402` | `INSUFFICIENT_CREDITS` | Not enough credits to activate | Redirect to buy credits |
-| `404` | `Session not found` | Wrong session ID | Show 404 UI |
-| `404` | `User not found` | Clerk user not in DB | Re-sync user record |
-| `409` | `Cannot activate session in status X` | Session already activated/completed | Refresh session status and handle accordingly |
-| `409` | `Cannot deactivate session in status X` | Session not ACTIVE/PAUSED | Refresh session status |
-| `500` | `No active credit brackets configured` | Admin config issue | Contact support |
+| Status | Error message                           | Meaning                             | Action                                        |
+| ------ | --------------------------------------- | ----------------------------------- | --------------------------------------------- |
+| `400`  | `userId is required`                    | Missing userId in create            | Fix request                                   |
+| `401`  | `Authentication required`               | Missing/invalid Clerk token         | Redirect to login                             |
+| `402`  | `INSUFFICIENT_CREDITS`                  | Not enough credits to activate      | Redirect to buy credits                       |
+| `404`  | `Session not found`                     | Wrong session ID                    | Show 404 UI                                   |
+| `404`  | `User not found`                        | Clerk user not in DB                | Re-sync user record                           |
+| `409`  | `Cannot activate session in status X`   | Session already activated/completed | Refresh session status and handle accordingly |
+| `409`  | `Cannot deactivate session in status X` | Session not ACTIVE/PAUSED           | Refresh session status                        |
+| `500`  | `No active credit brackets configured`  | Admin config issue                  | Contact support                               |
 
 All errors return:
+
 ```json
 { "error": "message" }
 ```
@@ -699,15 +710,15 @@ All errors return:
 
 ## 10. Breaking Changes from Previous Version
 
-| What changed | Before | After |
-|---|---|---|
-| **Session active flag** | `isActive: boolean` | `status: SessionStatus` (see state machine) |
-| **Activate response** | `{ success, sessionId }` | Now includes `creditsHeld`, `maxAllowedMinutes` |
-| **Deactivate response** | `{ success, sessionId }` | Now includes `status` (`"COMPLETING"` or `"COMPLETED"`) |
-| **Deactivate is async** (paid) | Session immediately COMPLETED | Session goes `COMPLETING` → background job → `COMPLETED`. **Poll until COMPLETED before showing results.** |
-| **Deactivate idempotent** | Second call returned 409 | Second call while `COMPLETING` returns 200 (safe to retry) |
-| **Delete releases hold** | Credits could be stuck | `DELETE /session/:id` on a `PRE_CHECK` session with a hold now auto-releases credits |
-| **Heartbeat endpoint** | Did not exist | `POST /session/:id/heartbeat` — **required** for paid sessions |
-| **New credit endpoints** | Did not exist | `GET /api/credits/balance`, `/brackets`, `/ledger`, `/purchases` |
-| **`free` field on session** | Not present | `free: true` skips entire credit system — heartbeat still safe to call but returns `NONE` |
-| **Model name normalisation** | Frontend had to send exact OpenRouter slug | Frontend can send human-readable names (e.g. `"Gemini 2.0 Flash"`) |
+| What changed                   | Before                                     | After                                                                                                      |
+| ------------------------------ | ------------------------------------------ | ---------------------------------------------------------------------------------------------------------- |
+| **Session active flag**        | `isActive: boolean`                        | `status: SessionStatus` (see state machine)                                                                |
+| **Activate response**          | `{ success, sessionId }`                   | Now includes `creditsHeld`, `maxAllowedMinutes`                                                            |
+| **Deactivate response**        | `{ success, sessionId }`                   | Now includes `status` (`"COMPLETING"` or `"COMPLETED"`)                                                    |
+| **Deactivate is async** (paid) | Session immediately COMPLETED              | Session goes `COMPLETING` → background job → `COMPLETED`. **Poll until COMPLETED before showing results.** |
+| **Deactivate idempotent**      | Second call returned 409                   | Second call while `COMPLETING` returns 200 (safe to retry)                                                 |
+| **Delete releases hold**       | Credits could be stuck                     | `DELETE /session/:id` on a `PRE_CHECK` session with a hold now auto-releases credits                       |
+| **Heartbeat endpoint**         | Did not exist                              | `POST /session/:id/heartbeat` — **required** for paid sessions                                             |
+| **New credit endpoints**       | Did not exist                              | `GET /api/credits/balance`, `/brackets`, `/ledger`, `/purchases`                                           |
+| **`free` field on session**    | Not present                                | `free: true` skips entire credit system — heartbeat still safe to call but returns `NONE`                  |
+| **Model name normalisation**   | Frontend had to send exact OpenRouter slug | Frontend can send human-readable names (e.g. `"Gemini 2.0 Flash"`)                                         |
