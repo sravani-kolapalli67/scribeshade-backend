@@ -105,6 +105,27 @@ enum IdempotencyStatus {
   FAILED
 }
 
+enum ChunkType {
+  QUESTION
+  ANSWER
+  CONTEXT
+  SYSTEM
+}
+
+enum MessageRole {
+  USER      @map("user")
+  ASSISTANT @map("assistant")
+  SYSTEM    @map("system")
+}
+
+enum SpeakerType {
+  INTERVIEWER @map("interviewer")
+  CANDIDATE   @map("candidate")
+  SYSTEM      @map("system")
+}
+
+
+
 model User {
   id        String   @id @default(uuid())
   clerkId   String   @unique
@@ -121,6 +142,9 @@ model User {
   projects  Project[]
   creditUsages CreditUsage[]
   builtResumes BuiltResume[]
+  // Ask AI relations
+  transcriptChunks TranscriptChunk[]
+  askAiMessages    AskAiMessage[]
   // Credit system relations
   creditBalance UserCreditBalance?
   ledgerEntries CreditLedger[]
@@ -274,11 +298,14 @@ model Session {
 
   feedback SessionFeedback?
   notes    SessionNotes?
+  transcriptChunks TranscriptChunk[]
+  askAiMessages    AskAiMessage[]
 
-  @@index([userId])
+  @@index([userId, createdAt(sort: Desc)])
   @@index([companyId])
   @@index([status])
 }
+
 
 model QA {
   id String @id @default(uuid())
@@ -579,3 +606,66 @@ model AiGenerationCache {
   @@index([userId])
   @@index([expiresAt])
 }
+
+model TranscriptChunk {
+  id              String   @id @default(uuid())
+  sessionId       String
+  session         Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  
+  userId          String
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  questionId      String?
+  question        String?  @db.Text
+  aiAnswer        String?  @db.Text
+  content         String   @db.Text // The chunk content (transcript text)
+  
+  technologies    String[]
+  difficulty      String?  
+  
+  startTime       Float?
+  endTime         Float?
+  speakerType     SpeakerType?  // interviewer, candidate
+
+
+  
+  // pgvector field - dimension for perplexity/pplx-embed-v1-4b
+  embedding       Unsupported("vector(2560)")?
+
+
+  questionGroupId String?
+  chunkOrder      Int?
+  isQuestion      Boolean @default(false)
+  chunkType       ChunkType?
+
+  createdAt       DateTime @default(now())
+
+  @@index([sessionId, createdAt])
+  @@index([sessionId, chunkOrder])
+  @@index([sessionId, questionGroupId])
+  @@index([sessionId, speakerType, createdAt])
+  @@index([userId])
+}
+
+
+model AskAiMessage {
+  id        String   @id @default(uuid())
+  sessionId String
+  session   Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  role      MessageRole
+  content   String   @db.Text
+
+
+  
+  citations Json?    // Array of TranscriptChunk metadata
+
+  createdAt DateTime @default(now())
+
+  @@index([sessionId, createdAt])
+  @@index([userId])
+}
+

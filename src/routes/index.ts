@@ -13,6 +13,8 @@ import { sessionNotesRouter } from "../features/session-notes/session-notes.rout
 import { aiRouter } from "../features/ai/ai.router";
 import { updatesRouter } from "../features/updates/updates.router";
 
+import { askAiRouter } from "../features/ask-ai/ask-ai.router";
+
 const router = Router();
 
 router.use("/auth", authRouter);
@@ -25,6 +27,7 @@ router.use("/projects", projectsRouter);
 router.use("/credits", creditsRouter);
 router.use("/policy", policyRouter);
 router.use("/session-notes", sessionNotesRouter);
+router.use("/ask-ai", askAiRouter);
 router.use("/", aiRouter);
 router.use("/updates", updatesRouter);
 

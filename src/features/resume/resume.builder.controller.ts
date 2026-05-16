@@ -18,6 +18,7 @@ import {
   rewriteResume,
   injectSkills,
   injectKeywords,
+  analyzeKeywordsForInjection,
   analyzeKeywordMatch,
   PdfExportError,
   PDF_ERROR_CODES,
@@ -34,6 +35,7 @@ import type {
   RewriteResumeInput,
   InjectSkillsInput,
   InjectKeywordsInput,
+  AnalyzeKeywordsInput,
   KeywordMatchInput,
 } from "./resume.types";
 
@@ -460,13 +462,13 @@ export async function builderAtsScoreHandler(
       return;
     }
 
-    const { resumeId } = req.body as { resumeId?: string };
+    const { resumeId, jobDescription } = req.body as { resumeId?: string; jobDescription?: string };
     if (!resumeId) {
       res.status(400).json({ error: "resumeId is required" });
       return;
     }
 
-    const result = await scoreBuilderAts({ userId, resumeId });
+    const result = await scoreBuilderAts({ userId, resumeId, jobDescription });
     res.json({ success: true, data: result });
   } catch (err) {
     next(err);
@@ -567,7 +569,7 @@ export async function injectKeywordsHandler(
       return;
     }
 
-    const { resumeId, jobDescription, fields } = req.body as InjectKeywordsInput;
+    const { resumeId, jobDescription, fields, selectedKeywords } = req.body as InjectKeywordsInput;
     if (!jobDescription || jobDescription.trim().length < 50) {
       res.status(400).json({ error: "jobDescription must be at least 50 characters" });
       return;
@@ -580,6 +582,47 @@ export async function injectKeywordsHandler(
     const result = await injectKeywords({
       userId,
       resumeId,
+      jobDescription,
+      fields,
+      selectedKeywords,
+      idempotencyKey: req.idempotencyKey ?? null,
+    });
+
+    res.json({ success: true, ...result });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * POST /resume/builder/analyze-keywords
+ * Extracts keywords from JD and suggests injection points. Costs 2 credits.
+ */
+export async function analyzeKeywordsHandler(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const bodyUserId = (req.body as Record<string, unknown>).userId as string | undefined;
+    const userId = bodyUserId || getCurrentUserId(req);
+    if (!userId) {
+      res.status(401).json({ error: "Unauthorized" });
+      return;
+    }
+
+    const { jobDescription, fields } = req.body as AnalyzeKeywordsInput;
+    if (!jobDescription || jobDescription.trim().length < 50) {
+      res.status(400).json({ error: "jobDescription must be at least 50 characters" });
+      return;
+    }
+    if (!fields) {
+      res.status(400).json({ error: "fields is required" });
+      return;
+    }
+
+    const result = await analyzeKeywordsForInjection({
+      userId,
       jobDescription,
       fields,
       idempotencyKey: req.idempotencyKey ?? null,

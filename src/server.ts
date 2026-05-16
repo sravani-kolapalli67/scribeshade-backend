@@ -6,6 +6,8 @@ import { creditDeductionWorker } from "./features/jobs/credit-deduction.job";
 import { sessionWatchdogWorker, scheduleWatchdog } from "./features/jobs/session-watchdog.job";
 import { holdExpiryWorker } from "./features/jobs/hold-expiry.job";
 import { warmBrowser } from "./features/resume/resume.builder.service";
+import { validateAiConfig } from "./shared/utils/ai-validator";
+
 
 const startServer = async () => {
   const app = createApp();
@@ -30,6 +32,10 @@ const startServer = async () => {
 
     // Pre-warm Chromium so the first PDF export doesn't pay the cold-start cost
     warmBrowser();
+
+    // Validate AI Configuration
+    validateAiConfig();
+
   });
 };
 

@@ -33,6 +33,7 @@ import {
   rewriteResumeHandler,
   injectSkillsHandler,
   injectKeywordsHandler,
+  analyzeKeywordsHandler,
   keywordMatchHandler,
 } from "./resume.builder.controller";
 import { requireAuth } from "../auth/auth.middleware";
@@ -91,6 +92,12 @@ router.post("/create-template", addTemplate);
 router.get("/all-templates", listTemplates);
 
 // ── Builder (CRUD) ────────────────────────────────────────────────────────────
+router.post(
+  "/builder/analyze-keywords",
+  requireAuth,
+  idempotencyKeyMiddleware,
+  analyzeKeywordsHandler,
+);
 router.post("/builder/save", requireAuth, saveBuiltResumeHandler);
 router.get("/builder/list", requireAuth, listBuiltResumesHandler);
 router.get("/builder/:id", requireAuth, getBuiltResumeHandler);

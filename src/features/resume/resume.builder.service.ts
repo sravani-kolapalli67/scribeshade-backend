@@ -25,6 +25,8 @@ import type {
   RewriteResumeInput,
   InjectSkillsInput,
   InjectKeywordsInput,
+  AnalyzeKeywordsInput,
+  KeywordInjectionSuggestion,
   KeywordMatchInput,
   KeywordMatchResult,
 } from "./resume.types";
@@ -246,38 +248,73 @@ export const PDF_PRINT_CSS = `
     text-shadow: none !important;
   }
 
-  /* ── Page margins: 0 — the Playwright page.pdf() margin option adds the
-     physical safe zone at every page edge. CSS @page margin is explicitly
-     zeroed so it does NOT reduce the CSS content area, ensuring the layout
-     viewport is exactly A4 (794 × 1123px) — identical to the preview iframe.
-     If both @page margin AND Playwright margin are non-zero they stack,
-     shrinking the printable height by ~112px/page and causing earlier page
-     breaks and layout reflow vs the preview. ── */
+  /* ── @page margin — moved from page.pdf() physical margin to CSS @page so
+     Chromium's layout engine knows about the safe zone BEFORE rendering.
+
+     Physical PDF margins (page.pdf() margin option) are applied AFTER layout:
+     Chromium renders at full A4 height (794 x 1123 px) then the PDF printer
+     physically crops the top and bottom edges. Any content that flowed into
+     the margin zone during layout is silently clipped — this is the "content
+     cut" bug.
+
+     CSS @page margins are read BEFORE layout: Chromium reserves the margin
+     space in the page flow and automatically pushes content above the margin
+     boundary. No content is ever clipped. page.pdf() is called with margin:0
+     so there is NO double-stacking. ── */
   @page {
-    margin: 0 !important;
+    size: A4;
+    margin: 10mm 0 !important; /* ~38px top/bottom — safe zone per page */
   }
 
   /* ═══════════════════════════════════════════════════════════════════════════
-     PAGINATION — natural flow
-     Strategy: let ALL content flow naturally across page breaks.
-     The physical page margin in page.pdf() (28px top/bottom) is the safe
-     zone guard — it creates blank space at the edges of each PDF page
-     without shrinking the CSS layout viewport.
-     We do NOT use break-inside:avoid on bullets, lists, or experience
-     entries; those rules cause content to jump pages and leave large
-     blank gaps that look far worse than a mid-bullet break.
+     PAGE BREAK — CONTENT CLIPPING FIX
+     ═══════════════════════════════════════════════════════════════════════════
+     Problem: Chromium clips elements mid-render when they straddle a page
+     edge without explicit break rules — this creates the dark "shutter" seen
+     in the screenshot where bullet points are cut at the bottom of the page.
+
+     Two-layer fix:
+       1. box-decoration-break: clone — repaints backgrounds/borders on the
+          continuation page so coloured blocks look correct after a break.
+       2. break-inside: avoid on self-contained entry blocks — prevents an
+          individual project/job/edu card from splitting across pages.
+          We only target .entry-level items, NOT entire .section blocks so
+          long sections still flow naturally across multiple pages.
      ═══════════════════════════════════════════════════════════════════════════ */
 
-  /* ── Orphan/widow control: prevent a lone last-line from sitting alone
-     at the top of a new page (widows) or a lone first-line stranded at
-     the bottom (orphans). 2 lines minimum keeps text readable. ── */
+  /* ── Repaint backgrounds and borders cleanly on each new page ── */
+  .sidebar,
+  .sidebar-section,
+  .entry,
+  .resume-entry-block,
+  .section,
+  .section-content,
+  [class*="exp-item"],
+  [class*="experience-entry"],
+  [class*="project-entry"],
+  [class*="edu-item"] {
+    box-decoration-break:         clone;
+    -webkit-box-decoration-break: clone;
+  }
+
+  /* ── Keep individual content cards together across page breaks ── */
+  .entry,
+  .resume-entry-block,
+  [class*="exp-item"],
+  [class*="experience-entry"],
+  [class*="project-entry"],
+  [class*="edu-item"] {
+    break-inside:      avoid;
+    page-break-inside: avoid;
+  }
+
+  /* ── Orphan/widow control ── */
   p, li, .summary, .exp-item, .experience-entry {
     orphans: 2;
     widows:  2;
   }
 
-  /* ── Section headings: never leave a heading stranded alone at the
-     bottom of a page with no content beneath it. ── */
+  /* ── Section headings: never strand alone at the bottom of a page ── */
   h1, h2, h3, h4, h5, h6,
   .section-title,
   .section-header {
@@ -285,11 +322,59 @@ export const PDF_PRINT_CSS = `
     page-break-after: avoid;
   }
 
-  /* ── Prevent empty trailing pages caused by bottom margins ── */
-  body > *:last-child,
-  .main > *:last-child {
-    page-break-after: avoid;
-    break-after:      avoid;
+  /* ═══════════════════════════════════════════════════════════════════════════
+     MODERN TEMPLATE — GRID TO PRINT COLUMN CONVERSION
+     ═══════════════════════════════════════════════════════════════════════════
+     The Modern template uses display:grid (sidebar 260px + main 1fr) which
+     does NOT repeat across PDF pages — the sidebar ends at its CSS height and
+     page 2 renders blank/dark on the left. Additionally, min-height:100vh
+     forces an extra empty page after the last content page.
+
+     Fix: @media print converts to a float-based two-column layout.
+     The sidebar floats left at a fixed width; .main offsets to the right.
+     Float-based columns DO extend naturally across page boundaries whereas
+     CSS Grid/Flexbox columns end at the element's intrinsic height.
+
+     The @media print wrapper ensures screen rendering is completely unaffected.
+     ═══════════════════════════════════════════════════════════════════════════ */
+
+  @media print {
+    /* ── Eliminate min-height:100vh that forces a blank trailing page ── */
+    body {
+      min-height: 0 !important;
+      height:     auto !important;
+    }
+
+    /* ── Modern template sidebar: float left so it auto-extends with content ── */
+    .sidebar {
+      float:        left  !important;
+      width:        230px !important;
+      min-height:   0     !important;
+      box-sizing:   border-box !important;
+      /* background-attachment: local ensures colour fills each page slice */
+      background-attachment: local !important;
+    }
+
+    /* ── Main content: offset to sit right of the floated sidebar ── */
+    .main {
+      margin-left: 240px !important;
+      width:       auto  !important;
+      box-sizing:  border-box !important;
+    }
+
+    /* ── Clear floats so trailing pages collapse correctly ── */
+    body::after {
+      content: "";
+      display: block;
+      clear:   both;
+    }
+
+    /* ── Prevent empty trailing pages caused by bottom margins ── */
+    body > *:last-child,
+    .main > *:last-child {
+      page-break-after: avoid;
+      break-after:      avoid;
+    }
   }
 `;
 
@@ -1697,13 +1782,12 @@ async function _exportResumeHtmlInner(
           format: "A4",
           printBackground: true,
           preferCSSPageSize: true,
-          // Left/right: 0 — templates control horizontal padding via body padding.
-          // Top/bottom: 28px — physical PDF margin only. CSS @page { margin } is
-          // explicitly set to 0 in PDF_PRINT_CSS so this is the ONLY margin
-          // source. Keeping them separate ensures the CSS layout viewport is
-          // the full A4 height (matching the preview iframe), while still
-          // providing a visible safe zone at every page edge in the PDF.
-          margin: { top: "28px", right: "0", bottom: "28px", left: "0" },
+          // All page margins are now handled via CSS @page { margin: 10mm 0 }
+          // in PDF_PRINT_CSS. Setting physical margin to 0 here prevents
+          // double-stacking (physical + CSS = content clipped by 2× margin).
+          // The CSS @page margin is read by Chromium before layout so content
+          // is pushed away from page edges rather than clipped after rendering.
+          margin: { top: "0", right: "0", bottom: "0", left: "0" },
         }),
         new Promise<never>((_, reject) => {
           _pdfTimeoutHandle = setTimeout(
@@ -2055,8 +2139,9 @@ function fieldsToPlainText(f: ResumeFields): string {
 export async function scoreBuilderAts(input: {
   userId: string;
   resumeId: string;
+  jobDescription?: string;
 }): Promise<BuilderAtsResult> {
-  const { resumeId } = input;
+  const { resumeId, jobDescription: providedJd } = input;
 
   const resume = await prisma.builtResume.findUnique({ where: { id: resumeId } });
   if (!resume) {
@@ -2100,7 +2185,7 @@ Rules:
 - Return ONLY the JSON — no markdown, no extra text
 
 ${resume.jobTitle ? `Target Role: ${resume.jobTitle}${resume.company ? ` at ${resume.company}` : ""}` : ""}
-${resume.jobDescription ? `Job Description:\n${resume.jobDescription.substring(0, 1500)}` : ""}
+${(providedJd || resume.jobDescription) ? `Job Description:\n${(providedJd || resume.jobDescription || "").substring(0, 1500)}` : ""}
 
 RESUME CONTENT:
 ${resumeText.substring(0, 6000)}
@@ -2204,8 +2289,8 @@ You are a world-class resume writer. Rewrite the following resume sections to be
 ${levelHint}
 
 IMPORTANT RULES:
-- NEVER change: name, email, employer names/companies, job titles, dates, degrees, institutions
-- Rewrite: summary, experience bullet points (same structure), skills, project descriptions
+- NEVER change: name, email, employer names/companies, past job titles (in experience section), dates, degrees, institutions
+- Rewrite: role (professional title/headline), summary, experience bullet points (same structure), skills, project descriptions
 - Use strong action verbs, quantified outcomes, and ATS-friendly keywords for a ${jobTitle}
 - Return ONLY a JSON object — no markdown, no extra text
 
@@ -2215,6 +2300,7 @@ ${JSON.stringify(currentFields, null, 2).substring(0, 4000)}
 Return JSON:
 {
   "tailoredFields": {
+    "role": "...",
     "summary": "...",
     "experience": "...",
     "skillsLanguages": "...",
@@ -2264,9 +2350,15 @@ Return JSON:
  *
  * Cost: 1 credit (resolved from FeatureCost `resume_inject_skills`).
  */
+export interface SkillSuggestion {
+  skill: string;
+  categoryKey: "skillsLanguages" | "skillsFrameworks" | "skillsDatabases" | "skillsTools";
+  categoryLabel: string;
+  reason: string;
+}
+
 export async function injectSkills(input: InjectSkillsInput): Promise<{
-  injectedFields: Partial<ResumeFields>;
-  suggestedSkills: string[];
+  suggestions: SkillSuggestion[];
   creditsUsed: number;
   creditsRemaining: number;
   cached: boolean;
@@ -2274,11 +2366,10 @@ export async function injectSkills(input: InjectSkillsInput): Promise<{
   const { userId, jobDescription, jobTitle, fields } = input;
 
   const cost = await getFeatureCost(RESUME_FEATURE_KEYS.INJECT_SKILLS, new Prisma.Decimal("1"));
-  const cacheKey = hashInput("inject_skills_v1", jobTitle ?? "", (jobDescription ?? "").substring(0, 500), fields.skillsLanguages ?? "", fields.skillsFrameworks ?? "");
+  const cacheKey = hashInput("inject_skills_v2", jobTitle ?? "", (jobDescription ?? "").substring(0, 500), fields.skillsLanguages ?? "", fields.skillsFrameworks ?? "");
 
   const { result, creditsUsed, creditsRemaining, cached } = await withCreditedAiAction<{
-    injectedFields: Partial<ResumeFields>;
-    suggestedSkills: string[];
+    suggestions: SkillSuggestion[];
   }>(
     {
       userId,
@@ -2298,56 +2389,64 @@ export async function injectSkills(input: InjectSkillsInput): Promise<{
       ].filter(Boolean).join(", ");
 
       const prompt = `
-You are a technical resume expert. Based on the target role and job description, identify skills that are missing from this candidate's resume and should be added.
+You are a senior technical recruiter and resume expert with deep knowledge of tech industry hiring standards.
+Your task: identify the TOP 5-10 high-signal technical skills that are MISSING from this candidate's resume for the given role.
 
-${jobTitle ? `Target role: ${jobTitle}` : ""}
-${jobDescription ? `Job Description:\n${jobDescription.substring(0, 2000)}` : ""}
+${jobTitle ? `Target role: ${jobTitle}` : "Target role: Software Engineer"}
+${jobDescription ? `Job Description (key sections):\n${jobDescription.substring(0, 1500)}` : ""}
 
-Existing skills: ${existingSkills || "(none listed)"}
+Candidate's existing skills: ${existingSkills || "(none listed — suggest foundational skills for this role)"}
 
-Instructions:
-- Only add skills that are GENUINELY relevant to the role and NOT already listed
-- Distribute added skills across the four categories below (languages, frameworks, databases, tools)
-- Preserve all existing skills — merge new ones in comma-separated format
-- Do not add soft skills, do not invent skills the candidate cannot plausibly have
-- Return ONLY valid JSON, no markdown
+INSTRUCTIONS (follow strictly):
+1. ALWAYS return 5-10 suggestions. If the resume has many skills, find NICHE or ADVANCED skills that are missing.
+2. Focus on skills explicitly or implicitly required by the JD / target role — don't pad with generic ones.
+3. Avoid exact duplicates of existing skills. Variants are OK (e.g., "PostgreSQL" when "SQL" exists).
+4. Do NOT suggest soft skills (communication, leadership, etc.).
+5. Map each skill to EXACTLY ONE categoryKey:
+   - "skillsLanguages" → programming/scripting languages only (Python, Go, SQL, Bash)
+   - "skillsFrameworks" → frameworks, libraries, runtimes (FastAPI, React, Kafka, Spark)
+   - "skillsDatabases" → databases and data stores (BigQuery, Snowflake, Redis, Cassandra)
+   - "skillsTools" → tools, platforms, cloud, DevOps (AWS, Docker, Airflow, dbt, Terraform)
+6. 'categoryLabel' is a human-readable category name (e.g. "Cloud", "Big Data", "ML Ops", "API Framework").
+7. 'reason' must be 1 sentence explaining WHY this skill matters for THIS role/JD specifically.
+8. Return ONLY a valid JSON object — no markdown fences, no explanation.
 
 Return JSON:
 {
-  "injectedFields": {
-    "skillsLanguages": "<existing + new, comma-separated>",
-    "skillsFrameworks": "<existing + new, comma-separated>",
-    "skillsDatabases": "<existing + new, comma-separated>",
-    "skillsTools": "<existing + new, comma-separated>"
-  },
-  "suggestedSkills": ["skill1", "skill2", "...(only the NEW ones added)"]
+  "suggestions": [
+    {
+      "skill": "Apache Airflow",
+      "categoryKey": "skillsTools",
+      "categoryLabel": "Data Pipeline",
+      "reason": "Standard orchestration tool for data engineering pipelines in modern data stacks."
+    }
+  ]
 }
       `.trim();
 
       const response = await ai.chat.send({
         chatRequest: {
-          model: OPENROUTER_MODEL,
+          model: TAILOR_MODEL,
+          maxTokens: 1200,
           messages: [{ role: "user", content: prompt }],
         },
       });
 
       const aiText = response.choices[0]?.message?.content ?? "";
-      const parsed = parseJsonResponse<{ injectedFields: Partial<ResumeFields>; suggestedSkills: string[] }>(aiText);
-      if (!parsed?.injectedFields) {
+      const parsed = parseJsonResponse<{ suggestions: SkillSuggestion[] }>(aiText);
+      if (!parsed?.suggestions) {
         throw new AppError(502, "AI returned an unparseable skill injection response");
       }
 
       return {
-        injectedFields: parsed.injectedFields,
-        suggestedSkills: parsed.suggestedSkills ?? [],
-        _aiUsage: { aiModel: OPENROUTER_MODEL },
+        suggestions: parsed.suggestions,
+        _aiUsage: { aiModel: TAILOR_MODEL },
       };
     },
   );
 
   return {
-    injectedFields: result.injectedFields,
-    suggestedSkills: result.suggestedSkills,
+    suggestions: result.suggestions,
     creditsUsed,
     creditsRemaining,
     cached,
@@ -2365,9 +2464,8 @@ Return JSON:
  *
  * Cost: 2 credits (resolved from FeatureCost `resume_inject_keywords`).
  */
-export async function injectKeywords(input: InjectKeywordsInput): Promise<{
-  injectedFields: Partial<ResumeFields>;
-  injectedKeywords: string[];
+export async function analyzeKeywordsForInjection(input: AnalyzeKeywordsInput): Promise<{
+  suggestions: KeywordInjectionSuggestion[];
   creditsUsed: number;
   creditsRemaining: number;
   cached: boolean;
@@ -2375,7 +2473,78 @@ export async function injectKeywords(input: InjectKeywordsInput): Promise<{
   const { userId, jobDescription, fields } = input;
 
   const cost = await getFeatureCost(RESUME_FEATURE_KEYS.INJECT_KEYWORDS, new Prisma.Decimal("2"));
-  const cacheKey = hashInput("inject_keywords_v1", jobDescription.substring(0, 500), fields.summary ?? "", fields.experience?.substring(0, 200) ?? "");
+  const cacheKey = hashInput("analyze_keywords_v1", jobDescription.substring(0, 500), fields.summary ?? "");
+
+  const { result, creditsUsed, creditsRemaining, cached } = await withCreditedAiAction<{
+    suggestions: KeywordInjectionSuggestion[];
+  }>(
+    {
+      userId,
+      operation: "RESUME_ANALYZE_KEYWORDS",
+      cost,
+      idempotencyKey: input.idempotencyKey,
+      cacheKey,
+      metadata: {},
+    },
+    async () => {
+      const prompt = `
+You are an ATS expert. Analyze the following Job Description and candidate resume sections.
+Identify the top 10-15 missing high-value keywords/skills from the JD.
+For each keyword, suggest where it should be injected (Target Section) and a brief instruction on how to weave it in naturally (Suggested Context).
+
+Job Description:
+${jobDescription.substring(0, 3000)}
+
+Current resume sections:
+summary: ${fields.summary ?? ""}
+experience: ${(fields.experience ?? "").substring(0, 1500)}
+projects: ${(fields.projects ?? "").substring(0, 800)}
+
+Return ONLY a JSON array of suggestions.
+Example entry: { "keyword": "Kubernetes", "targetSection": "Skills -> Cloud", "suggestedContext": "Add to cloud stack alongside AWS", "inject": true }
+
+Return JSON Array:
+      `.trim();
+
+      const response = await ai.chat.send({
+        chatRequest: {
+          model: TAILOR_MODEL,
+          messages: [{ role: "user", content: prompt }],
+        },
+      });
+
+      const aiText = response.choices[0]?.message?.content ?? "";
+      const suggestions = parseJsonResponse<KeywordInjectionSuggestion[]>(aiText);
+
+      return {
+        suggestions: Array.isArray(suggestions) ? suggestions : [],
+        _aiUsage: { aiModel: TAILOR_MODEL },
+      };
+    },
+  );
+
+  return { suggestions: result.suggestions, creditsUsed, creditsRemaining, cached };
+}
+
+/**
+ * Weaves missing JD keywords naturally into specific resume sections.
+ * If selectedKeywords is provided, only those are injected.
+ * 
+ * Cost: 0 credits (covered by the Analysis step).
+ */
+export async function injectKeywords(input: InjectKeywordsInput): Promise<{
+  injectedFields: Partial<ResumeFields>;
+  injectedKeywords: string[];
+  creditsUsed: number;
+  creditsRemaining: number;
+  cached: boolean;
+}> {
+  const { userId, jobDescription, fields, selectedKeywords } = input;
+
+  // Injection is free if analysis was already paid for, or very cheap.
+  // We'll use 0 cost here assuming the Analysis step was the primary charge.
+  const cost = new Prisma.Decimal("0");
+  const cacheKey = hashInput("inject_keywords_v2", jobDescription.substring(0, 500), JSON.stringify(selectedKeywords), fields.summary ?? "");
 
   const { result, creditsUsed, creditsRemaining, cached } = await withCreditedAiAction<{
     injectedFields: Partial<ResumeFields>;
@@ -2388,9 +2557,13 @@ export async function injectKeywords(input: InjectKeywordsInput): Promise<{
       idempotencyKey: input.idempotencyKey,
       resumeId: input.resumeId,
       cacheKey,
-      metadata: {},
+      metadata: { keywordCount: selectedKeywords?.length },
     },
     async () => {
+      const keywordHint = selectedKeywords?.length 
+        ? `Focus ONLY on injecting these specific keywords: ${selectedKeywords.join(", ")}.`
+        : "Extract the top 10-15 ATS keywords from the JD that are ABSENT from the resume and inject them.";
+
       const prompt = `
 You are an ATS expert. Your job is to inject missing job-description keywords naturally into a candidate's resume — without inventing facts, changing job titles, or altering employer names/dates.
 
@@ -2403,7 +2576,7 @@ experience: ${(fields.experience ?? "").substring(0, 1500)}
 projects: ${(fields.projects ?? "").substring(0, 800)}
 
 Instructions:
-- Extract the top 10-15 ATS keywords from the JD that are ABSENT from the resume
+- ${keywordHint}
 - Weave them naturally into the summary, experience bullets, and project descriptions
 - NEVER: invent employers, change dates, change job titles, or add bullet points that describe things the candidate never did
 - Return ONLY valid JSON, no markdown
@@ -2411,9 +2584,9 @@ Instructions:
 Return JSON:
 {
   "injectedFields": {
-    "summary": "<rewritten summary with keywords woven in>",
-    "experience": "<rewritten experience with keywords woven into bullets>",
-    "projects": "<rewritten projects with keywords>"
+    "summary": "...",
+    "experience": "...",
+    "projects": "..."
   },
   "injectedKeywords": ["keyword1", "keyword2", "..."]
 }
@@ -2469,39 +2642,107 @@ export function analyzeKeywordMatch(input: KeywordMatchInput): KeywordMatchResul
     .toLowerCase();
 
   // Extract candidate keywords from JD:
-  // 1. Split on whitespace/punctuation
+  // 1. Split on whitespace and certain punctuation, but preserve hyphens and dots within words (e.g. node.js, ai-powered)
   // 2. Filter: 3+ chars, not common stop words, not purely numeric
   const STOP_WORDS = new Set([
+    // Basic connectors/pronouns
     "the", "and", "for", "are", "you", "will", "with", "our", "have", "that",
     "this", "from", "they", "been", "has", "not", "but", "can", "its", "was",
     "all", "one", "your", "who", "how", "out", "use", "any", "each", "about",
-    "more", "also", "than", "into", "such", "work", "team", "role", "job",
-    "skills", "experience", "looking", "join", "seek", "must", "able",
-    "strong", "good", "great", "excellent", "preferred", "required",
+    "more", "also", "than", "into", "such", "other", "their", "when", "where",
+    "which", "while", "these", "those", "under", "over", "between", "through",
+    
+    // JD Filler / Generic Professional terms
+    "work", "team", "role", "job", "skills", "experience", "looking", "join", 
+    "seek", "must", "able", "strong", "good", "great", "excellent", "preferred", 
+    "required", "description", "title", "overview", "ideal", "candidate", "should",
+    "responsibilities", "requirements", "plus", "benefits", "salary", "location",
+    "remote", "hybrid", "onsite", "full-time", "part-time", "contract", "visa",
+    "sponsorship", "apply", "now", "immediately", "urgent", "hiring", "company",
+    "industry", "business", "professional", "opportunity", "growth", "career",
+    "environment", "culture", "mission", "vision", "values", "people", "customer",
+    "client", "service", "support", "management", "leadership", "provide",
+    "contribute", "collaborate", "communicate", "effectively", "verbal", "written",
+    "presentation", "interpersonal", "detail-oriented", "organized", "passion",
+    "passionate", "motivated", "self-starter", "fast-paced", "deadline", "tasks",
+    "projects", "goals", "objectives", "success", "successful", "key", "main",
+    "major", "primary", "secondary", "others", "etc", "using", "through",
+    "based", "including", "across", "within", "around", "towards", "highly",
+    "deeply", "proven", "track", "record", "minimum", "maximum", "years",
+    "degree", "bachelors", "masters", "phd", "education", "training", "knowledge",
+    "ability", "background", "history", "related", "field", "area", "various",
+    "diverse", "global", "local", "office", "headquarters", "location",
+    "large", "small", "medium", "startup", "scaleup", "enterprise",
+    "build", "develop", "create", "design", "maintain", "optimize", "improve",
+    "enhance", "implement", "execute", "manage", "lead", "direct", "oversee",
+    "coordinate", "support", "help", "assist", "ensure", "quality", "standards",
+    "best", "practices", "modern", "latest", "tools", "technologies", "stack",
+    "software", "engineer", "developer", "architect", "manager", "director",
+    "lead", "senior", "junior", "mid-level", "entry-level", "expert", "specialist",
+    "candidate", "should", "needs", "wants", "provides", "offering", "package",
+    "working", "integrated", "integrating", "focused", "focus", "high", "low",
+    "daily", "weekly", "monthly", "yearly", "annual", "quarterly", "report",
+    "reporting", "metrics", "kpis", "performance", "delivery", "delivering",
+    "production", "grade", "level", "standard", "robust", "scalable", "flexible",
   ]);
 
   const rawTokens = jobDescription
     .toLowerCase()
-    .split(/[\s,;:\-–()\[\].!?/|+&]+/)
+    // Split by whitespace or punctuation, but keep dots/hyphens if they are internal to a word
+    .split(/[\s,;:\(\)\[\]!?/|+&]+/)
+    // Clean up trailing dots/hyphens from split tokens
+    .map(t => t.replace(/[.\-–]+$/, "").replace(/^[.\-–]+/, ""))
     .filter((t) => t.length >= 3 && !STOP_WORDS.has(t) && !/^\d+$/.test(t));
 
-  // Deduplicate while preserving order of first occurrence
-  const seen = new Set<string>();
-  const keywords: string[] = [];
+  // Deduplicate while counting occurrences
+  const frequencyMap = new Map<string, number>();
   for (const t of rawTokens) {
-    if (!seen.has(t)) {
-      seen.add(t);
-      keywords.push(t);
-    }
+    frequencyMap.set(t, (frequencyMap.get(t) || 0) + 1);
   }
 
-  // Cap at 60 most relevant keywords (first 60 from JD tend to be the most important)
-  const topKeywords = keywords.slice(0, 60);
+  // Sort by frequency (descending)
+  const sortedKeywords = Array.from(frequencyMap.entries())
+    .sort((a, b) => b[1] - a[1])
+    .map(([kw]) => kw);
+
+  // Cap at 60 most relevant keywords (now sorted by frequency)
+  const topKeywords = sortedKeywords.slice(0, 60);
 
   const present: string[] = [];
   const missing: string[] = [];
+  const visualMap: Record<string, string[]> = {};
+
+  // Group sections for mapping
+  const sectionGroups = {
+    Summary: fields.summary || "",
+    Experience: fields.experience || "",
+    Projects: fields.projects || "",
+    Education: fields.education || "",
+    Skills: [
+      fields.skillsLanguages,
+      fields.skillsFrameworks,
+      fields.skillsDatabases,
+      fields.skillsTools,
+    ]
+      .filter(Boolean)
+      .join(" "),
+  };
+
   for (const kw of topKeywords) {
-    if (resumeText.includes(kw)) {
+    visualMap[kw] = [];
+    let isPresent = false;
+
+    // Use regex for smarter word-boundary matching
+    const regex = new RegExp(`\\b${kw}\\b`, "i");
+
+    for (const [sectionName, text] of Object.entries(sectionGroups)) {
+      if (regex.test(text)) {
+        visualMap[kw].push(sectionName);
+        isPresent = true;
+      }
+    }
+
+    if (isPresent) {
       present.push(kw);
     } else {
       missing.push(kw);
@@ -2512,5 +2753,5 @@ export function analyzeKeywordMatch(input: KeywordMatchInput): KeywordMatchResul
     ? Math.round((present.length / topKeywords.length) * 100)
     : 0;
 
-  return { present, missing, matchScore };
+  return { present, missing, matchScore, visualMap };
 }

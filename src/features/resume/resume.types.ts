@@ -190,6 +190,22 @@ export interface InjectKeywordsInput {
   jobDescription: string;
   /** Current resume fields whose editable sections will receive keywords. */
   fields: Partial<ResumeFields>;
+  /** Specific keywords selected by the user to be injected. */
+  selectedKeywords?: string[];
+  idempotencyKey?: string | null;
+}
+
+export interface KeywordInjectionSuggestion {
+  keyword: string;
+  targetSection: string;
+  suggestedContext: string;
+  inject: boolean;
+}
+
+export interface AnalyzeKeywordsInput {
+  userId: string;
+  jobDescription: string;
+  fields: Partial<ResumeFields>;
   idempotencyKey?: string | null;
 }
 
@@ -203,4 +219,6 @@ export interface KeywordMatchResult {
   present: string[];
   missing: string[];
   matchScore: number;
+  /** Map of keyword to sections where it appears. */
+  visualMap: Record<string, string[]>;
 }
