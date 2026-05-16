@@ -71,19 +71,41 @@ router.get("/latest.json", async (req: Request, res: Response, next: NextFunctio
       return;
     }
 
-    const manifest = await assetRes.json() as UpdateManifest;
+    const manifest = (await assetRes.json()) as UpdateManifest;
 
     // 4. Rewrite each platform's download URL to go through this server's
-    //    /api/updates/download proxy so the desktop client (which has no
-    //    GITHUB_TOKEN) can download from the private repo.
+    //    /api/updates/download proxy. We match the filename from the manifest
+    //    url with the asset ID from the GitHub release metadata so we can
+    //    perform an authenticated API download.
     const proto = req.headers["x-forwarded-proto"] ?? req.protocol;
     const host = req.headers["x-forwarded-host"] ?? req.get("host");
     const base = `${proto}://${host}`;
 
     for (const platform of Object.keys(manifest.platforms)) {
-      const original = manifest.platforms[platform].url;
-      manifest.platforms[platform].url =
-        `${base}/api/updates/download?url=${encodeURIComponent(original)}`;
+      const originalUrl = manifest.platforms[platform].url;
+      let filename = originalUrl.split("/").pop() || "download";
+      
+      // Feature: For Mac users, prefer the .dmg installer if available,
+      // as the .tar.gz in latest.json is intended for the auto-updater.
+      if (platform.startsWith("darwin")) {
+        const dmgAsset = release.assets.find(a => a.name.endsWith(".dmg"));
+        if (dmgAsset) {
+          filename = dmgAsset.name;
+          const assetId = dmgAsset.id;
+          manifest.platforms[platform].url = `${base}/api/updates/download/${encodeURIComponent(filename)}?assetId=${assetId}`;
+          continue;
+        }
+      }
+
+      const assetMatch = release.assets.find((a) => a.name === filename);
+
+      if (assetMatch) {
+        // Use path-based filename for better browser compatibility
+        manifest.platforms[platform].url = `${base}/api/updates/download/${encodeURIComponent(filename)}?assetId=${assetMatch.id}`;
+      } else {
+        // Fallback for non-matching assets
+        manifest.platforms[platform].url = `${base}/api/updates/download/${encodeURIComponent(filename)}?url=${encodeURIComponent(originalUrl)}`;
+      }
     }
 
     res.setHeader("Content-Type", "application/json");
@@ -95,67 +117,77 @@ router.get("/latest.json", async (req: Request, res: Response, next: NextFunctio
 });
 
 /**
- * GET /api/updates/download?url=<encoded-github-release-url>
+ * GET /api/updates/download/:filename
  *
- * Streams a private GitHub release asset to the Tauri client using the
- * server-side GITHUB_TOKEN.  Only GitHub release URLs for this repo are
- * permitted — all other origins are rejected to prevent open-redirect abuse.
+ * Streams a private GitHub release asset to the Tauri client.
+ * Using the filename in the path ensures browsers correctly identify the
+ * download even if the Content-Disposition header is strictly handled.
  */
-router.get("/download", async (req: Request, res: Response, next: NextFunction) => {
+router.get("/download/:filename", async (req: Request, res: Response, next: NextFunction) => {
   try {
     if (!GITHUB_TOKEN) {
       res.status(503).json({ error: "Update server not configured" });
       return;
     }
 
-    const rawUrl = req.query.url;
-    if (typeof rawUrl !== "string" || !rawUrl) {
-      res.status(400).json({ error: "Missing or invalid url parameter" });
+    const { assetId, url } = req.query;
+    const { filename } = req.params;
+    let downloadUrl = "";
+
+    if (assetId) {
+      downloadUrl = `https://api.github.com/repos/${REPO}/releases/assets/${assetId}`;
+    } else if (typeof url === "string" && url) {
+      downloadUrl = decodeURIComponent(url);
+      if (!downloadUrl.startsWith(REPO_RELEASES_PREFIX)) {
+        res.status(403).json({ error: "Forbidden" });
+        return;
+      }
+    } else {
+      res.status(400).json({ error: "Missing asset source" });
       return;
     }
 
-    const decoded = decodeURIComponent(rawUrl);
-
-    // Allow-list: only stream release assets from this specific repo.
-    if (!decoded.startsWith(REPO_RELEASES_PREFIX)) {
-      res.status(403).json({ error: "Forbidden: URL is not a release asset for this repo" });
-      return;
-    }
-
-    const assetRes = await fetch(decoded, {
+    const assetRes = await fetch(downloadUrl, {
       headers: {
-        Authorization: `Bearer ${GITHUB_TOKEN}`,
+        ...githubHeaders(),
         Accept: "application/octet-stream",
-        "User-Agent": "ScribeShade-UpdateServer/1.0",
       },
       redirect: "follow",
     });
 
     if (!assetRes.ok) {
-      res.status(502).json({ error: `GitHub returned ${assetRes.status} for asset download` });
+      res.status(assetRes.status === 404 ? 404 : 502).json({
+        error: `GitHub returned ${assetRes.status}`,
+      });
       return;
     }
 
-    // Forward content headers so the Tauri client gets correct metadata
+    // Forward content headers
     const contentType = assetRes.headers.get("content-type") ?? "application/octet-stream";
     const contentLength = assetRes.headers.get("content-length");
+    
     res.setHeader("Content-Type", contentType);
     res.setHeader("Cache-Control", "no-cache");
+    // Explicitly set the filename in the attachment header as well
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
     if (contentLength) res.setHeader("Content-Length", contentLength);
 
-    // Stream bytes directly — never buffer a 100MB+ installer in memory
     if (!assetRes.body) {
-      res.status(502).json({ error: "No response body from GitHub" });
+      res.status(502).json({ error: "No body" });
       return;
     }
+
     const reader = assetRes.body.getReader();
     const pump = async () => {
       while (true) {
         const { done, value } = await reader.read();
-        if (done) { res.end(); return; }
-        const ok = res.write(value);
-        // Respect backpressure — wait for drain before writing more
-        if (!ok) await new Promise<void>((resolve) => res.once("drain", resolve));
+        if (done) {
+          res.end();
+          return;
+        }
+        if (!res.write(value)) {
+          await new Promise<void>((resolve) => res.once("drain", resolve));
+        }
       }
     };
     await pump();
