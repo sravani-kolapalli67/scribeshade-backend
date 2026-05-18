@@ -40,14 +40,17 @@ export function buildSystemMessage(context: any) {
       : "No projects provided. Use resume and documents for experience context.",
     "",
     "═══════════════════════════════════════════════════",
-    "RECENT CONVERSATION HISTORY (CONTEXT ONLY — DO NOT RE-ANSWER)",
+    "RECENT CONVERSATION HISTORY (PAST CONTEXT — READ CAREFULLY)",
     "═══════════════════════════════════════════════════",
-    "The Q/A pairs below are PAST interactions in this session. They exist ONLY so you can:",
-    "  (a) avoid repeating yourself,",
-    "  (b) reference earlier explanations briefly if the new question follows up on them.",
-    "You MUST NOT treat any question listed here as a new question to answer. Answer ONLY the question(s) in the user message at the bottom of this conversation. If the user message contains zero new questions, output exactly the single line: ===NO_NEW_QUESTION===",
+    "The numbered turns below are PAST Q&A pairs already answered in this session. They exist ONLY so you can:",
+    "  (a) avoid repeating yourself verbatim,",
+    "  (b) detect when the new question is a FOLLOW-UP that references or extends a prior answer,",
+    "  (c) build on prior answers when the new question asks for more detail, clarification, or an example.",
+    "You MUST NOT treat any question listed here as a brand-new standalone question to answer from scratch.",
+    "HOWEVER: if the new user message is a FOLLOW-UP to a prior turn (see RULE 8 below), you MUST answer it fully — treat it as a new question that builds on the referenced prior answer.",
+    "If the user message contains zero new questions AND is not a follow-up, output exactly the single line: ===NO_NEW_QUESTION===",
     "",
-    context?.history || "No previous interactions.",
+    context?.history || "No previous interactions in this session.",
     "",
     "═══════════════════════════════════════════════════",
     "SPECIAL INSTRUCTIONS FROM CANDIDATE",
@@ -144,6 +147,14 @@ export function buildSystemMessage(context: any) {
     "  → NEVER write a preamble, summary, header, or meta sentence before the first **QUESTION:**. Your output MUST start with the literal characters '**QUESTION:**' as the very first non-whitespace tokens. NO 'I can see...', 'I will answer...', 'SUMMARY:', 'Here are the answers...', or any other lead-in text. The user's UI parses your output starting at the first QUESTION marker; anything before it is a UI bug.",
     "  → NEVER write a closing summary, recap, or 'Let me know if...' sentence after the last **ANSWER:**. End your output immediately after the final answer's last line.",
     "  → Never output meta-commentary like \"I'll answer the first one\", \"continuing with the rest\", or \"due to length I'll cover the top ones\". Just answer all of them.",
+    "",
+    "RULE 8 — FOLLOW-UP QUESTIONS (CRITICAL — READ BEFORE USING THE SENTINEL):",
+    "  → A FOLLOW-UP is any input that refers to, extends, or asks for more detail about a prior turn in the RECENT CONVERSATION HISTORY.",
+    "  → Follow-up signals include (but are not limited to): 'explain more', 'why', 'how exactly', 'can you elaborate', 'give an example', 'what about X in that context', 'you mentioned', 'the previous answer', 'that', 'it', 'expand on', 'tell me more', 'clarify', 'go deeper', or any question whose topic only makes sense relative to a prior turn.",
+    "  → When you detect a FOLLOW-UP: answer it fully as a NEW question. Treat the relevant prior turn(s) as context — build on, expand, or clarify the prior answer. Output a standard **QUESTION:** / **ANSWER:** block. NEVER output ===NO_NEW_QUESTION=== for a follow-up.",
+    "  → When referencing a prior answer in a follow-up, briefly state the connection ('Building on the earlier JWT answer...') then deliver the new detail. Keep the total answer within the normal length budget.",
+    "  → The sentinel ===NO_NEW_QUESTION=== is ONLY valid when the input is literally empty, filler noise ('okay', 'right', 'mm-hmm'), or audio transcription artefacts with no discernible question or follow-up intent. It is NEVER valid when the input contains a recognizable question or topic reference.",
+    "",
     "  → RESPONSE FORMAT IS STRICT: each block is exactly:",
     "        **QUESTION:** <one-line clean question text without leading or trailing '**'>",
     "        **ANSWER:** <answer body>",
@@ -199,13 +210,18 @@ ${transcript}`;
   return `Task: Identify the question(s) asked by the interviewer in the INPUT BLOCK BELOW ONLY. Provide a full, interview-ready answer for EACH question that appears in the INPUT BLOCK.${projectReminder}
 
 CRITICAL SCOPING RULES:
-- The "RECENT CONVERSATION HISTORY" in the system prompt is PAST context. You MUST NOT answer any question that appears only in the history. Re-answering a previously answered question is a hard failure.
-- Only the text inside the INPUT BLOCK below counts as a new question. If multiple distinct questions appear in the INPUT BLOCK, answer each.
+- The "RECENT CONVERSATION HISTORY" in the system prompt is PAST context. You MUST NOT answer any question that appears only in the history as if it were brand new. However, if the INPUT BLOCK is a FOLLOW-UP that builds on a prior turn, you MUST answer it — see FOLLOW-UP RULES below.
+- Only the text inside the INPUT BLOCK below counts as a new question or follow-up. If multiple distinct questions appear in the INPUT BLOCK, answer each.
 - A scenario / situational question made of MANY descriptive sentences followed by one or two actual questions is ONE question, not many. Treat the whole scenario as the context for the final question(s) and produce a SINGLE consolidated answer (or one per explicit sub-question), not one answer per sentence.
 - SENTINEL RULE — use ===NO_NEW_QUESTION=== ONLY when the INPUT BLOCK is literally empty or contains NOTHING except filler/noise: single words like "okay", "right", "continue", "yes", "mm-hmm", incomplete sentence fragments with no discernible question or topic, or audio transcription artefacts.
   • DO NOT use the sentinel because a question resembles something in conversation history — history is for context, not for blocking answers. If the INPUT BLOCK contains a real question (even if similar to a past one), ANSWER IT.
-  • DO NOT use the sentinel for scenario questions, follow-up questions, or anything with a sentence structure.
+  • DO NOT use the sentinel for follow-up questions. A follow-up is always a new question.
   • When you emit the sentinel, your ENTIRE response is exactly one line: ===NO_NEW_QUESTION===  — nothing before it, nothing after it. No "Explanation:", no JSON, no commentary. The system parses this line literally; any extra text breaks the parser.
+
+FOLLOW-UP RULES (check BEFORE deciding to use the sentinel):
+- If the INPUT BLOCK references or extends a prior answer from the RECENT CONVERSATION HISTORY (signals: 'explain more', 'why', 'how', 'give an example', 'elaborate', 'you mentioned', 'that', 'it', 'tell me more', 'expand', 'clarify', 'go deeper', or any topic that only makes sense relative to a prior turn), treat it as a NEW question.
+- Answer follow-ups by building on the relevant prior answer: briefly acknowledge the connection, then deliver the new detail or expanded explanation within the normal length budget.
+- NEVER emit ===NO_NEW_QUESTION=== for a follow-up. Follow-ups are always new questions.
 
 LANGUAGE MODE:
 - Simple Language is ${context?.simpleLanguage ? "ON" : "OFF"} for this session.

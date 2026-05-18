@@ -284,7 +284,8 @@ export async function getActiveBrackets() {
 
 /**
  * Given available credits, computes how many minutes the user can afford.
- * Throws AppError(402) if the user cannot afford even 1 paid minute.
+ * Rate and grace threshold are read from the first active CreditConfig row.
+ * Users always receive at least `graceZoneMinutes` for free.
  * Does NOT move any credits — purely a read + compute.
  */
 export async function computeMaxAllowedMinutes(
@@ -300,26 +301,28 @@ export async function computeMaxAllowedMinutes(
   }
 
   const chosen = brackets[0];
-  const ratePerMin = 0.5;
-  const freeMins = chosen.freeZoneMinutes;
 
-  // With full-duration billing (past the free zone we charge from minute 0),
-  // the maximum session length a user can afford is:
-  //   availableCredits / ratePerMin  total minutes
-  // They always get the free zone — if they can't afford a single paid minute
-  // beyond the free zone they still get `freeMins` for free.
-  const affordableTotalMinutes = Math.floor(availableCredits.toNumber() / ratePerMin);
+  // Rate and grace threshold come from DB — not hardcoded.
+  const ratePerMin = chosen.creditsPerMinute.toNumber();
+  const graceMins  = chosen.graceZoneMinutes;
 
-  // If they can't even afford 1 full minute at rate, allow the free zone only.
-  const maxMinutes = Math.max(freeMins, affordableTotalMinutes);
+  // Maximum minutes the user can afford at the DB-configured rate.
+  // Beyond the grace zone the full duration (including grace) is charged,
+  // so: maxAffordable = floor(availableCredits / ratePerMin)
+  // They always get at least the grace zone for free.
+  const affordableTotalMinutes = ratePerMin > 0
+    ? Math.floor(availableCredits.toNumber() / ratePerMin)
+    : Number.MAX_SAFE_INTEGER;
+
+  const maxMinutes = Math.max(graceMins, affordableTotalMinutes);
 
   const snapshot: BracketSnapshot = {
     id: chosen.id,
     bracketMinutes: maxMinutes,
     creditsFull: chosen.creditsFull.toString(),
     creditsHalf: chosen.creditsHalf.toString(),
-    freeZoneMinutes: chosen.freeZoneMinutes,
-    graceZoneMinutes: chosen.graceZoneMinutes,
+    creditsPerMinute: ratePerMin,
+    graceZoneMinutes: graceMins,
   };
 
   return { maxMinutes, snapshot };
@@ -330,10 +333,10 @@ export async function computeMaxAllowedMinutes(
 /**
  * Core bracket deduction. Runs inside a Prisma $transaction.
  *
- * Decision tree:
- *   activeDurationMinutes <= freeZone → FREE_ZONE  (deduct 0)
- *   else                              → deduct for the FULL duration (0 → end)
- *                                       at 0.5 credits/min
+ * Decision tree (rate and grace from bracketConfigSnapshot):
+ *   activeDurationMinutes <= graceZoneMinutes → FREE_ZONE  (deduct 0)
+ *   else                                      → deduct for the FULL duration (0 → end)
+ *                                               at creditsPerMinute from CreditConfig
  */
 export async function deductCredits(
   userId: string,
@@ -343,21 +346,39 @@ export async function deductCredits(
   isExhausted: boolean,
   tx: Prisma.TransactionClient,
 ): Promise<DeductionResult> {
-  const {
-    freeZoneMinutes,
-  } = snapshot;
+  // Resolve rate + grace from snapshot.
+  // Pre-migration snapshots lack `creditsPerMinute` — fetch the live CreditConfig
+  // rather than falling back to a hardcoded constant, so any DB update is honoured.
+  let ratePerMin: number;
+  let graceMins: number;
+
+  if ((snapshot as any).creditsPerMinute !== undefined) {
+    ratePerMin = Number((snapshot as any).creditsPerMinute);
+    graceMins  = snapshot.graceZoneMinutes;
+  } else {
+    const config = await tx.creditConfig.findFirst({
+      where: { isActive: true },
+      orderBy: { bracketMinutes: "asc" },
+    });
+    if (!config) throw new AppError(500, "No active credit brackets configured");
+    ratePerMin = config.creditsPerMinute.toNumber();
+    graceMins  = config.graceZoneMinutes;
+  }
 
   // ── Decision tree ──────────────────────────────────────────────────────────
+  // Rule:
+  //   session ≤ graceZoneMinutes  → FREE (charge nothing)
+  //   session >  graceZoneMinutes → charge ALL minutes from minute 0
+  //                                  (grace zone is retroactively billed)
   let deductAmount: Prisma.Decimal;
   let reason: string;
 
-  if (activeDurationMinutes <= freeZoneMinutes) {
+  if (activeDurationMinutes <= graceMins) {
     deductAmount = d(0);
     reason = "FREE_ZONE";
   } else {
-    // Beyond the free zone → charge for the FULL session duration from minute 0.
-    // Example: 5m 30s → ceil to 6 minutes → 6 × 0.5 = 3 credits
-    deductAmount = d(activeDurationMinutes).mul(0.5);
+    // Charge for the full duration including the grace zone.
+    deductAmount = d(activeDurationMinutes).mul(ratePerMin);
     reason = isExhausted ? "EXHAUSTED" : "PER_MINUTE_DEDUCTION";
   }
 

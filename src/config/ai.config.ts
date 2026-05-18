@@ -1,8 +1,8 @@
 export const AI_CONFIG = {
   models: {
     chat: {
-      primary: "deepseek/deepseek-v4-flash:free",
-      fallback: "google/gemini-flash-1.5",
+      primary: "google/gemini-2.0-flash-001",
+      fallback: "openai/gpt-4o-mini",
     },
     embeddings: {
       primary: "perplexity/pplx-embed-v1-4b",

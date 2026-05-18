@@ -145,6 +145,8 @@ model User {
   // Ask AI relations
   transcriptChunks TranscriptChunk[]
   askAiMessages    AskAiMessage[]
+  // Assistant module
+  assistantChats   AssistantChat[]
   // Credit system relations
   creditBalance UserCreditBalance?
   ledgerEntries CreditLedger[]
@@ -252,7 +254,7 @@ model Session {
 
   jobDescription       String
   resumeId             String
-  DocumentId           String
+  documentId           String   @map("DocumentId")
   language             String
   simpleLanguage       Boolean @default(true)
   extraContext         String
@@ -468,14 +470,14 @@ model CreditPack {
 }
 
 model CreditConfig {
-  id               String   @id @default(uuid())
-  bracketMinutes   Int      @unique
-  creditsFull      Decimal  @db.Decimal(10, 2)
-  creditsHalf      Decimal  @db.Decimal(10, 2)
-  freeZoneMinutes  Int      @default(5)
-  graceZoneMinutes Int      @default(5)
-  isActive         Boolean  @default(true)
-  updatedAt        DateTime @updatedAt
+  id                String   @id @default(uuid())
+  bracketMinutes    Int      @unique
+  creditsFull       Decimal  @db.Decimal(10, 2)
+  creditsHalf       Decimal  @db.Decimal(10, 2)
+  creditsPerMinute  Decimal  @db.Decimal(10, 4) @default(0.5)
+  graceZoneMinutes  Int      @default(5)
+  isActive          Boolean  @default(true)
+  updatedAt         DateTime @updatedAt
 }
 
 /// Configurable credit cost per product feature.
@@ -666,6 +668,35 @@ model AskAiMessage {
   createdAt DateTime @default(now())
 
   @@index([sessionId, createdAt])
+  @@index([userId])
+}
+
+// ─── Assistant Module ──────────────────────────────────────────────────────────
+
+model AssistantChat {
+  id        String             @id @default(uuid())
+  userId    String
+  user      User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title     String             @default("New Chat")
+  sessionId String?            // Optional: narrow to a specific session
+  messages  AssistantMessage[]
+  createdAt DateTime           @default(now())
+  updatedAt DateTime           @updatedAt
+
+  @@index([userId, updatedAt(sort: Desc)])
+}
+
+model AssistantMessage {
+  id        String        @id @default(uuid())
+  chatId    String
+  chat      AssistantChat @relation(fields: [chatId], references: [id], onDelete: Cascade)
+  userId    String
+  role      MessageRole
+  content   String        @db.Text
+  citations Json?
+  createdAt DateTime      @default(now())
+
+  @@index([chatId, createdAt])
   @@index([userId])
 }
 

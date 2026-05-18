@@ -171,7 +171,7 @@ export async function createSession(data: CreateSessionData) {
       companyId: finalCompanyId,
       jobDescription: data.jobDescription || "",
       resumeId: data.resumeId || "",
-      DocumentId: data.DocumentId || "",
+      documentId: data.DocumentId || "",
       language: data.language || "",
       simpleLanguage: data.simpleLanguage,
       extraContext: data.extraContext || "",
@@ -545,8 +545,8 @@ export async function getSessionFullContext(sessionId: string) {
     session.resumeId
       ? prisma.resume.findUnique({ where: { id: session.resumeId } }).catch((e) => { console.warn("Failed to fetch resume:", e); return null; })
       : Promise.resolve(null),
-    session.DocumentId
-      ? prisma.document.findUnique({ where: { id: session.DocumentId } }).catch((e) => { console.warn("Failed to fetch document:", e); return null; })
+    session.documentId
+      ? prisma.document.findUnique({ where: { id: session.documentId } }).catch((e) => { console.warn("Failed to fetch document:", e); return null; })
       : Promise.resolve(null),
     projectIds.length > 0
       ? prisma.project.findMany({ where: { id: { in: projectIds } } }).catch((e) => { console.warn("Failed to fetch projects:", e); return []; })
@@ -682,14 +682,25 @@ export async function getSessionFullContext(sessionId: string) {
       .join("\n\n════════════════════════════════════════\n\n");
   }
 
-  // 3. Fetch recent message history for conversation context
+  // 3. Fetch recent Q&A history for conversation context.
+  // Only AI_ASSISTANT entries have both a question AND answer — raw INTERVIEWER/USER
+  // transcript lines have no answer and confuse the model into thinking they are
+  // new unanswered questions (triggering false NO_NEW_QUESTION sentinels).
   const messages = Array.isArray(session.messages)
     ? (session.messages as any[])
     : [];
-  const recentHistory = messages
-    .slice(-5) // Last 5 messages for context
-    .map((m) => `Q: ${m.question}\nA: ${m.answer}`)
-    .join("\n\n");
+  const qaMessages = messages
+    .filter((m) => m.role === "AI_ASSISTANT" && m.question && m.answer)
+    .slice(-8); // Keep last 8 answered Q&A pairs for follow-up context
+  const recentHistory =
+    qaMessages.length > 0
+      ? qaMessages
+          .map(
+            (m, i) =>
+              `Turn ${i + 1} (Interviewer asked):\n  Q: ${m.question.trim()}\n  A: ${m.answer.trim()}`,
+          )
+          .join("\n\n")
+      : "";
 
   return {
     company: session.company?.name || session.companyName || "Unknown",
@@ -892,6 +903,15 @@ export async function getAIAnswer(
 
   const context = await getSessionFullContext(id);
 
+  // For regenerate calls the user is explicitly asking to re-answer a specific
+  // question. Strip conversation history from the context so RULE 8 (follow-up
+  // detection) cannot misidentify the question as a follow-up to a recent
+  // prior answer (e.g. regenerating "Explain the first line of the code" after
+  // a Databricks question should NOT produce a Databricks answer).
+  const contextForCall = isRegenerate
+    ? { ...context, history: "No previous interactions in this session." }
+    : context;
+
   try {
     const targetModel = resolveModelId(aiModel) || model;
     const result = ai.callModel({
@@ -902,12 +922,12 @@ export async function getAIAnswer(
         {
           role: "system",
           type: "message",
-          content: buildSystemMessage(context),
+          content: buildSystemMessage(contextForCall),
         } as any,
         {
           role: "user",
           type: "message",
-          content: buildUserMessage(transcript, isCustomQuery, isRegenerate, context),
+          content: buildUserMessage(transcript, isCustomQuery, isRegenerate, contextForCall),
         },
       ],
     });
@@ -1073,10 +1093,10 @@ export async function generateSessionFeedback(
 
   // Fetch Document context if available
   let documentContext = "";
-  if (session.DocumentId) {
+  if (session.documentId) {
     try {
       const doc = await prisma.document.findUnique({
-        where: { id: session.DocumentId },
+        where: { id: session.documentId },
       });
       if (doc) {
         const ext = path.extname(doc.path).toLowerCase();

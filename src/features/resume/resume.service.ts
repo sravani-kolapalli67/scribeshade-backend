@@ -1,17 +1,30 @@
 import path from "path";
 import fs from "fs";
 
-import type { Prisma } from "@prisma/client";
+import { Prisma } from "@prisma/client";
 import { OpenRouter } from "@openrouter/sdk";
 import mammoth from "mammoth";
 import { PDFParse } from "pdf-parse";
 
 import { prisma } from "../../shared/lib/prisma";
 import {
+  withCreditedAiAction,
+  getFeatureCost,
+} from "../credits/ai-credit-meter.service";
+import {
   AtsAnalysisResult,
   CoverLetterRequest,
   CreateTemplateRequest,
 } from "./resume.types";
+
+// ─── Feature keys + default costs (mirrors resume.builder.service.ts pattern) ─
+const RESUME_SERVICE_KEYS = {
+  COVER_LETTER: "resume_cover_letter",
+  ATS_SCORE: "resume_ats_score",
+} as const;
+
+const DEFAULT_COST_COVER_LETTER = new Prisma.Decimal("1");
+const DEFAULT_COST_ATS_SCORE = new Prisma.Decimal("2");
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Constants
@@ -282,14 +295,17 @@ export async function getAtsResumesByUser(userId: string) {
 }
 
 /**
- * Runs an ATS analysis via Gemini on an existing resume, persisting the result
+ * Runs an ATS analysis on an existing resume, persisting the result
  * to the database and flagging the resume as analysed.
+ *
+ * Cost: resolved from FeatureCost (`resume_ats_score`) — default 2 credits.
+ * userId is derived from the resume record automatically.
  *
  * Returns the parsed ATS result.
  */
 export async function runAtsAnalysis(
   resumeId: string,
-): Promise<AtsAnalysisResult> {
+): Promise<AtsAnalysisResult & { creditsUsed: number; creditsRemaining: number }> {
   const resume = await prisma.resume.findUnique({ where: { id: resumeId } });
 
   if (!resume) {
@@ -305,6 +321,8 @@ export async function runAtsAnalysis(
 
   const ext = path.extname(resume.path).toLowerCase();
   const resumeText = await extractTextFromFile(resume.path, ext);
+
+  const cost = await getFeatureCost(RESUME_SERVICE_KEYS.ATS_SCORE, DEFAULT_COST_ATS_SCORE);
 
   const prompt = `
 You are an ATS (Applicant Tracking System) expert.
@@ -336,59 +354,71 @@ Rules:
 - Return ONLY the JSON — no markdown, no extra text
   `.trim();
 
-  const response = await ai.chat.send({
-    chatRequest: {
-      model: OPENROUTER_MODEL,
-      messages: [
-        {
-          role: "system",
-          content: "You are an ATS (Applicant Tracking System) expert.",
+  const { result, creditsUsed, creditsRemaining } = await withCreditedAiAction<AtsAnalysisResult & Record<string, unknown>>(
+    {
+      userId: resume.userId,
+      operation: "RESUME_ATS_SCORE",
+      cost,
+      metadata: { resumeId },
+    },
+    async () => {
+      const response = await ai.chat.send({
+        chatRequest: {
+          model: OPENROUTER_MODEL,
+          messages: [
+            {
+              role: "system",
+              content: "You are an ATS (Applicant Tracking System) expert.",
+            },
+            {
+              role: "user",
+              content: `${prompt}\n\nRESUME CONTENT:\n${resumeText}`,
+            },
+          ],
         },
-        {
-          role: "user",
-          content: `${prompt}\n\nRESUME CONTENT:\n${resumeText}`,
+      });
+
+      const aiText = response.choices[0]?.message?.content || "";
+      const parsed = parseJsonResponse<AtsAnalysisResult>(aiText);
+      if (!parsed) {
+        throw new Error("Failed to parse ATS response from AI");
+      }
+
+      const grade = parsed.grade ?? deriveGrade(parsed.score);
+
+      await prisma.aTSAnalysis.upsert({
+        where: { resumeId },
+        update: {
+          score: parsed.score,
+          summary: parsed.summary,
+          strengths: parsed.strengths,
+          weaknesses: parsed.weaknesses,
+          missingKeywords: parsed.missingKeywords,
+          suggestions: parsed.suggestions,
         },
-      ],
+        create: {
+          resumeId,
+          score: parsed.score,
+          summary: parsed.summary,
+          strengths: parsed.strengths,
+          weaknesses: parsed.weaknesses,
+          missingKeywords: parsed.missingKeywords,
+          suggestions: parsed.suggestions,
+        },
+      });
+
+      await prisma.resume.update({ where: { id: resumeId }, data: { ats: true } });
+
+      return {
+        ...parsed,
+        grade,
+        sectionScores: parsed.sectionScores ?? {},
+        _aiUsage: { aiModel: OPENROUTER_MODEL ?? "" },
+      };
     },
-  });
+  );
 
-  const aiText = response.choices[0]?.message?.content || "";
-  const parsed = parseJsonResponse<AtsAnalysisResult>(aiText);
-  if (!parsed) {
-    throw new Error("Failed to parse ATS response from AI");
-  }
-
-  // Derive grade from score if AI didn't return it
-  const grade = parsed.grade ?? deriveGrade(parsed.score);
-
-  await prisma.aTSAnalysis.upsert({
-    where: { resumeId },
-    update: {
-      score: parsed.score,
-      summary: parsed.summary,
-      strengths: parsed.strengths,
-      weaknesses: parsed.weaknesses,
-      missingKeywords: parsed.missingKeywords,
-      suggestions: parsed.suggestions,
-    },
-    create: {
-      resumeId,
-      score: parsed.score,
-      summary: parsed.summary,
-      strengths: parsed.strengths,
-      weaknesses: parsed.weaknesses,
-      missingKeywords: parsed.missingKeywords,
-      suggestions: parsed.suggestions,
-    },
-  });
-
-  await prisma.resume.update({ where: { id: resumeId }, data: { ats: true } });
-
-  return {
-    ...parsed,
-    grade,
-    sectionScores: parsed.sectionScores ?? {},
-  };
+  return { ...result, creditsUsed, creditsRemaining };
 }
 
 /**
@@ -424,16 +454,19 @@ function serializeBuiltResumeFields(fields: Record<string, string>): string {
 }
 
 /**
- * Generates a cover letter for a given resume using Gemini.
+ * Generates a cover letter for a given resume.
  * Accepts both uploaded-resume IDs (prisma.resume) and builder-resume IDs
  * (prisma.builtResume) — the function checks both tables automatically.
+ *
+ * Cost: resolved from FeatureCost (`resume_cover_letter`) — default 1 credit.
  */
 export async function generateCoverLetter(
   params: CoverLetterRequest,
-): Promise<{ coverLetter: string; wordCount: number }> {
-  const { resumeId, jobRole, company, jobDescription, tone, userName, userEmail } = params;
+): Promise<{ coverLetter: string; wordCount: number; creditsUsed: number; creditsRemaining: number }> {
+  const { resumeId, userId, jobRole, company, jobDescription, tone, userName, userEmail } = params;
 
   let resumeText: string;
+  let resolvedUserId = userId;
 
   // Try uploaded (file-based) resume first
   const uploadedResume = await prisma.resume.findUnique({ where: { id: resumeId } });
@@ -441,6 +474,7 @@ export async function generateCoverLetter(
   if (uploadedResume) {
     const ext = path.extname(uploadedResume.path).toLowerCase();
     resumeText = await extractTextFromFile(uploadedResume.path, ext);
+    resolvedUserId ??= uploadedResume.userId;
   } else {
     // Fall back to builder resume
     const builtResume = await prisma.builtResume.findUnique({ where: { id: resumeId } });
@@ -448,7 +482,14 @@ export async function generateCoverLetter(
       throw Object.assign(new Error("Resume not found"), { statusCode: 404 });
     }
     resumeText = serializeBuiltResumeFields(builtResume.fields as Record<string, string>);
+    resolvedUserId ??= builtResume.userId;
   }
+
+  if (!resolvedUserId) {
+    throw Object.assign(new Error("userId is required for cover letter generation"), { statusCode: 400 });
+  }
+
+  const cost = await getFeatureCost(RESUME_SERVICE_KEYS.COVER_LETTER, DEFAULT_COST_COVER_LETTER);
 
   const prompt = `
 Generate a ${tone ?? "professional"} cover letter.
@@ -470,17 +511,36 @@ Instructions:
 
   const finalPrompt = `${prompt}\n\nRESUME CONTENT:\n${resumeText}`;
 
-  const response = await ai.chat.send({
-    chatRequest: {
-      model: OPENROUTER_MODEL,
-      messages: [{ role: "user", content: finalPrompt }],
+  const { result, creditsUsed, creditsRemaining } = await withCreditedAiAction<{
+    coverLetter: string;
+    wordCount: number;
+  }>(
+    {
+      userId: resolvedUserId,
+      operation: "RESUME_COVER_LETTER",
+      cost,
+      metadata: { jobRole, company },
     },
-  });
+    async () => {
+      const response = await ai.chat.send({
+        chatRequest: {
+          model: OPENROUTER_MODEL,
+          messages: [{ role: "user", content: finalPrompt }],
+        },
+      });
 
-  const coverLetter = response.choices[0]?.message?.content ?? "";
-  const wordCount = coverLetter.trim().split(/\s+/).filter(Boolean).length;
+      const coverLetter = response.choices[0]?.message?.content ?? "";
+      const wordCount = coverLetter.trim().split(/\s+/).filter(Boolean).length;
 
-  return { coverLetter, wordCount };
+      return {
+        coverLetter,
+        wordCount,
+        _aiUsage: { aiModel: OPENROUTER_MODEL ?? "" },
+      };
+    },
+  );
+
+  return { coverLetter: result.coverLetter, wordCount: result.wordCount, creditsUsed, creditsRemaining };
 }
 
 /**

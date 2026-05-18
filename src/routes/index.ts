@@ -14,6 +14,7 @@ import { aiRouter } from "../features/ai/ai.router";
 import { updatesRouter } from "../features/updates/updates.router";
 
 import { askAiRouter } from "../features/ask-ai/ask-ai.router";
+import { assistantRouter } from "../features/assistant/assistant.router";
 
 const router = Router();
 
@@ -28,6 +29,7 @@ router.use("/credits", creditsRouter);
 router.use("/policy", policyRouter);
 router.use("/session-notes", sessionNotesRouter);
 router.use("/ask-ai", askAiRouter);
+router.use("/assistant", assistantRouter);
 router.use("/", aiRouter);
 router.use("/updates", updatesRouter);
 

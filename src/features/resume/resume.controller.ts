@@ -187,8 +187,8 @@ export async function scoreAts(req: Request, res: Response): Promise<void> {
   }
 
   try {
-    const result = await runAtsAnalysis(resumeId);
-    res.json(result);
+    const { creditsUsed, creditsRemaining, ...analysis } = await runAtsAnalysis(resumeId);
+    res.json({ ...analysis, creditsUsed, creditsRemaining });
   } catch (err) {
     console.error("[resume/ats-score]", err);
     const status = getStatusCode(err);
@@ -201,7 +201,7 @@ export async function scoreAts(req: Request, res: Response): Promise<void> {
  * Generates a tailored cover letter based on the resume and job details.
  */
 export async function coverLetter(req: Request, res: Response): Promise<void> {
-  const { resumeId, jobRole, company, jobDescription, tone, userName, userEmail } =
+  const { resumeId, userId, jobRole, company, jobDescription, tone, userName, userEmail } =
     req.body as CoverLetterRequest & { resumeId?: string };
 
   if (!resumeId) {
@@ -212,6 +212,7 @@ export async function coverLetter(req: Request, res: Response): Promise<void> {
   try {
     const result = await generateCoverLetter({
       resumeId,
+      userId,
       jobRole,
       company,
       jobDescription,

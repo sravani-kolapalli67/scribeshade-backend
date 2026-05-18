@@ -27,32 +27,39 @@ export class AskAiService {
     }
 
     try {
-      // 1. Retrieve Relevant Context
-      const contextChunks = await this.ragService.retrieveContext(sessionId, userId, query);
-      
+      // 1. Vector RAG — retrieve then re-fetch after auto-indexing if empty
+      let contextChunks = await this.ragService.retrieveContext(sessionId, userId, query);
       if (contextChunks.length === 0) {
-        // Auto-index if no context found
+        console.log(`[AskAiService] No chunks for session ${sessionId}, indexing now...`);
         await this.ragService.processSession(sessionId, userId);
+        contextChunks = await this.ragService.retrieveContext(sessionId, userId, query);
       }
 
-      const contextText = contextChunks
-        .map((c, i) => `[Ref ${i+1}]\nQuestion: ${c.question}\nAI Answer: ${c.aiAnswer}\n`)
-        .join("\n---\n");
+      const ragText = contextChunks
+        .map((c, i) => `[Ref ${i + 1}]\nQ: ${c.question}\nA: ${c.aiAnswer}`)
+        .join("\n\n---\n\n");
 
-      // 2. Build AI Context
-      const systemPrompt = `You are a professional Interview Intelligence Copilot.
-Your goal is to help the user review their interview performance based ONLY on the provided session context.
+      // 2. Direct session data fallback (always runs — supplements RAG)
+      const directContext = await this.buildDirectSessionContext(sessionId);
 
-Rules:
-1. Answer strictly based on the provided Context.
-2. If the information is not in the context, say "I don't have enough information from this session to answer that."
-3. Be concise, technical, and professional.
-4. Refer to specific questions using the [Ref N] labels.
-5. Format your response with markdown for readability.
+      const hasContext = ragText.trim().length > 0 || directContext.trim().length > 0;
 
-Context:
-${contextText || "No session data indexed yet."}
-`;
+      // 3. Build grounded system prompt
+      const systemPrompt = `You are an interview analytics assistant. Your ONLY job is to analyze the interview data below and answer the user's question concisely.
+
+STRICT RULES:
+- DO NOT reproduce, copy, or quote large sections of the context data verbatim.
+- DO NOT output the context as your answer.
+- ANALYZE the data and produce a SHORT, structured answer using markdown.
+- Use bullet points, bold key terms, and ## headers for sections.
+- If asked about technologies: list only the technology names found in the Q&A data.
+- If asked about weak answers: summarize which topics the user answered poorly.
+- If the context is empty: say "No session data is available yet for this session."
+- Keep answers concise. Maximum 400 words unless a detailed report is explicitly requested.
+
+---
+${hasContext ? `SESSION DATA:\n${ragText || ""}\n\n${directContext || ""}` : "No session data available."}
+---`;
 
       const history = await prisma.askAiMessage.findMany({
         where: { sessionId, userId },
@@ -164,9 +171,11 @@ ${contextText || "No session data indexed yet."}
     });
 
     return messages.map(m => ({
-      role: m.role,
+      id: m.id,
+      role: m.role.toLowerCase() as "user" | "assistant",
       content: m.content,
-      citations: m.citations
+      citations: m.citations,
+      timestamp: m.createdAt,
     }));
   }
 
@@ -178,5 +187,61 @@ ${contextText || "No session data indexed yet."}
 
   async indexSession(sessionId: string, userId: string) {
     return this.ragService.processSession(sessionId, userId);
+  }
+
+  /**
+   * Builds direct DB context from session messages + QA records.
+   * Used as fallback when embeddings haven't been indexed yet.
+   */
+  private async buildDirectSessionContext(sessionId: string): Promise<string> {
+    const parts: string[] = [];
+    try {
+      const session = await prisma.session.findUnique({
+        where: { id: sessionId },
+        select: {
+          companyName: true,
+          status: true,
+          durationSeconds: true,
+          createdAt: true,
+        },
+      });
+
+      if (session) {
+        parts.push(
+          `Session: ${session.companyName} | Status: ${session.status} | Duration: ${session.durationSeconds ? Math.round(session.durationSeconds / 60) + " min" : "N/A"} | Date: ${session.createdAt.toISOString().split("T")[0]}`,
+        );
+      }
+
+      const qaRecords = await prisma.qA.findMany({
+        where: { sessionId },
+        orderBy: { createdAt: "desc" },
+        take: 20,
+        select: { ques: true, answer: true, difficulty: true, industry: true },
+      });
+
+      if (qaRecords.length > 0) {
+        parts.push(`\n### Q&A Records (${qaRecords.length})`);
+        for (const qa of qaRecords) {
+          parts.push(
+            `**[${qa.difficulty}/${qa.industry}]** ${qa.ques}\n→ ${(qa.answer || "No answer recorded").slice(0, 300)}`,
+          );
+        }
+      }
+
+      const notes = await prisma.sessionNotes.findFirst({
+        where: { sessionId },
+        select: { summary: true, questions: true },
+      });
+      if (notes?.summary) {
+        parts.push(`\n### Session Notes Summary\n${notes.summary}`);
+        const qs = (notes.questions as any[]) || [];
+        if (qs.length > 0) {
+          parts.push(`**Topics covered:** ${qs.map((q: any) => q.question || q).join(" | ")}`);
+        }
+      }
+    } catch (err) {
+      console.warn("[AskAiService] Direct context build failed:", err);
+    }
+    return parts.join("\n");
   }
 }

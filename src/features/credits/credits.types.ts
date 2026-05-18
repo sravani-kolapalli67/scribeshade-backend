@@ -1,10 +1,10 @@
 export interface BracketSnapshot {
   id: string;
   bracketMinutes: number;
-  creditsFull: string; // Decimal serialised as string for JSON storage
+  creditsFull: string;      // Decimal serialised as string for JSON storage
   creditsHalf: string;
-  freeZoneMinutes: number;
-  graceZoneMinutes: number;
+  creditsPerMinute: number; // Rate from CreditConfig — e.g. 0.5 credits/min
+  graceZoneMinutes: number; // Session ≤ this → free; above → charge all minutes
 }
 
 export interface HoldResult {
