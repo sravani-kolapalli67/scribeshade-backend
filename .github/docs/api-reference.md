@@ -1819,6 +1819,140 @@ Error examples:
 
 ---
 
+## Updates APIs
+
+### GET /updates/latest.json
+**No auth required.** Proxies the Tauri auto-updater manifest from GitHub releases.
+
+The client-side Tauri updater calls this endpoint to check for app updates.
+
+Success `200`: UpdateManifest
+```json
+{
+  "version": "1.1.1",
+  "notes": "Bug fixes and performance improvements",
+  "pub_date": "2026-05-18T10:00:00.000Z",
+  "platforms": {
+    "darwin-aarch64": {
+      "url": "https://test.backend.scribeshade.org/api/updates/download/ScribeShade_1.1.1_aarch64.app.tar.gz?assetId=123456",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIG1pbmlzaWduIHByaXZhdGUga2V5Ci..."
+    },
+    "darwin-x86_64": {
+      "url": "https://test.backend.scribeshade.org/api/updates/download/ScribeShade_1.1.1_x86_64.app.tar.gz?assetId=123457",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIG1pbmlzaWduIHByaXZhdGUga2V5Ci..."
+    },
+    "windows-x86_64": {
+      "url": "https://test.backend.scribeshade.org/api/updates/download/ScribeShade_1.1.1_x64-setup.msi?assetId=123458",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIG1pbmlzaWduIHByaXZhdGUga2V5Ci..."
+    }
+  }
+}
+```
+
+Error examples:
+- `503`
+```json
+{ "error": "Update server not configured" }
+```
+- `502`
+```json
+{ "error": "Failed to fetch release info from GitHub" }
+```
+- `404`
+```json
+{ "error": "latest.json not found in release assets" }
+```
+
+**Architecture:**
+- Fetches the latest GitHub release metadata
+- Downloads the `latest.json` asset from the private GitHub release
+- Rewrites download URLs to route through `/api/updates/download/:filename` (bypasses need for client to hit GitHub directly)
+- Returns the manifest with updated URLs and platform signatures
+
+**Requirements:**
+- Backend must have `GITHUB_TOKEN` env var set (GitHub Personal Access Token with `repo` scope)
+
+---
+
+### GET /updates/download/:filename
+**No auth required.** Streams a GitHub release asset to the Tauri client.
+
+Downloads the actual app binary (`.app.tar.gz`, `.msi`, etc.) that was proxied in the manifest.
+
+Query parameters:
+- `assetId` (optional) — GitHub asset ID; if present, downloads directly from GitHub API
+- `url` (optional) — GitHub release URL; used as fallback if `assetId` not provided
+
+Success `200`: binary file
+```
+[binary app bundle data]
+```
+
+Error examples:
+- `400`
+```json
+{ "error": "Missing asset source" }
+```
+- `403`
+```json
+{ "error": "Forbidden" }
+```
+- `404`
+```json
+{ "error": "GitHub returned 404" }
+```
+- `503`
+```json
+{ "error": "Update server not configured" }
+```
+
+**Notes:**
+- Downloads are streamed for memory efficiency
+- Tauri client verifies the downloaded file signature against the public key in `tauri.conf.json`
+- If signature verification fails, the download is rejected
+
+---
+
+### GET /updates/health
+**No auth required.** Health check endpoint for the updater system.
+
+Verifies:
+1. GitHub API is reachable
+2. `GITHUB_TOKEN` is configured
+3. Latest release exists
+4. `latest.json` asset exists and is valid
+5. All platform keys are present
+6. All platform signatures are non-empty
+
+Success `200`:
+```json
+{
+  "status": "ok",
+  "timestamp": "2026-05-18T10:00:00.000Z",
+  "checks": {
+    "githubToken": "present",
+    "githubApi": "ok",
+    "latestRelease": "v1.1.1",
+    "assetCount": 8,
+    "latestJsonAsset": "found",
+    "latestJsonValid": true,
+    "manifestVersion": "1.1.1",
+    "platforms": {
+      "count": 3,
+      "keys": ["darwin-aarch64", "darwin-x86_64", "windows-x86_64"],
+      "allHaveSignatures": true
+    }
+  }
+}
+```
+
+Error examples (returns detailed diagnostics):
+- `503` — GitHub token not configured
+- `502` — GitHub API unreachable
+- `500` — Unexpected error
+
+---
+
 ## Session Status and Credit Flow (Frontend Integration Notes)
 
 Session status lifecycle used by APIs:
@@ -1840,6 +1974,7 @@ Recommended client flow:
 
 | Version | Date | Summary |
 |---|---|---|
+| v1.9.0 | 2026-05-18 | Added 3 Updates API endpoints: `GET /updates/latest.json` (Tauri updater manifest proxy), `GET /updates/download/:filename` (app binary streaming), `GET /updates/health` (updater system diagnostics). All endpoints documented with error handling and architectural notes. |
 | v1.8.0 | 2026-05-07 | Updated `GET /resume/list` to accept optional `search` for resume-name / JD / keyword search across uploaded and built resumes. Documented searchable sources and response `source` field example. |
 | v1.7.0 | 2026-05-04 | Added 4 previously undocumented endpoints: `POST /auth/tauri-ticket` (Tauri desktop sign-in token), `GET /session/:id/events` (SSE real-time stream), `POST /session-notes/:sessionId/generate` (AI session notes generation), `GET /session-notes/:sessionId` (retrieve notes). Added **Session Notes APIs** section. |
 | v1.6.0 | 2026-05-05 | Updated `POST /resume/ats-score` response to include `grade` (letter grade A+–F) and `sectionScores` (per-section numeric scores). Updated `POST /resume/generate-cover-letter` response to include `wordCount`; request now accepts optional `userName` and `userEmail`. Updated `POST /resume/create-template` to require `name` field; `GET /resume/all-templates` now returns `name`. Three default templates (Classic, Modern, Minimal) seeded via `pnpm seed:templates`. |

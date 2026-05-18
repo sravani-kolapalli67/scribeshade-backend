@@ -83,19 +83,7 @@ router.get("/latest.json", async (req: Request, res: Response, next: NextFunctio
 
     for (const platform of Object.keys(manifest.platforms)) {
       const originalUrl = manifest.platforms[platform].url;
-      let filename = originalUrl.split("/").pop() || "download";
-      
-      // Feature: For Mac users, prefer the .dmg installer if available,
-      // as the .tar.gz in latest.json is intended for the auto-updater.
-      if (platform.startsWith("darwin")) {
-        const dmgAsset = release.assets.find(a => a.name.endsWith(".dmg"));
-        if (dmgAsset) {
-          filename = dmgAsset.name;
-          const assetId = dmgAsset.id;
-          manifest.platforms[platform].url = `${base}/api/updates/download/${encodeURIComponent(filename)}?assetId=${assetId}`;
-          continue;
-        }
-      }
+      const filename = originalUrl.split("/").pop() || "download";
 
       const assetMatch = release.assets.find((a) => a.name === filename);
 
@@ -193,6 +181,99 @@ router.get("/download/:filename", async (req: Request, res: Response, next: Next
     await pump();
   } catch (err) {
     next(err);
+  }
+});
+
+/**
+ * GET /api/updates/health
+ *
+ * Health check endpoint for the updater system. Verifies:
+ * 1. GitHub API is reachable
+ * 2. GITHUB_TOKEN is valid
+ * 3. Latest release exists
+ * 4. latest.json asset exists and is valid
+ * 5. All platform keys are present
+ */
+router.get("/health", async (req: Request, res: Response, next: NextFunction) => {
+  const diagnostics: Record<string, unknown> = {
+    status: "error",
+    timestamp: new Date().toISOString(),
+    checks: {},
+  };
+
+  try {
+    if (!GITHUB_TOKEN) {
+      diagnostics.checks = { githubToken: "missing — set GITHUB_TOKEN env var" };
+      res.status(503).json(diagnostics);
+      return;
+    }
+    (diagnostics.checks as Record<string, unknown>).githubToken = "present";
+
+    // Check GitHub connectivity
+    const releaseRes = await fetch(
+      `https://api.github.com/repos/${REPO}/releases/latest`,
+      { headers: githubHeaders() }
+    );
+
+    if (!releaseRes.ok) {
+      (diagnostics.checks as Record<string, unknown>).githubApi = `error: ${releaseRes.status}`;
+      res.status(502).json(diagnostics);
+      return;
+    }
+    (diagnostics.checks as Record<string, unknown>).githubApi = "ok";
+
+    const release = await releaseRes.json() as {
+      tag_name: string;
+      assets: Array<{ name: string; id: number; url: string }>;
+    };
+    (diagnostics.checks as Record<string, unknown>).latestRelease = release.tag_name;
+    (diagnostics.checks as Record<string, unknown>).assetCount = release.assets.length;
+
+    // Check latest.json asset
+    const latestJsonAsset = release.assets.find((a) => a.name === "latest.json");
+    if (!latestJsonAsset) {
+      (diagnostics.checks as Record<string, unknown>).latestJsonAsset = "missing";
+      res.status(502).json(diagnostics);
+      return;
+    }
+    (diagnostics.checks as Record<string, unknown>).latestJsonAsset = "found";
+
+    // Download and validate latest.json
+    const assetRes = await fetch(latestJsonAsset.url, {
+      headers: {
+        ...githubHeaders(),
+        Accept: "application/octet-stream",
+      },
+    });
+
+    if (!assetRes.ok) {
+      (diagnostics.checks as Record<string, unknown>).latestJsonDownload = `error: ${assetRes.status}`;
+      res.status(502).json(diagnostics);
+      return;
+    }
+
+    const manifest = (await assetRes.json()) as {
+      version: string;
+      platforms: Record<string, { url: string; signature: string }>;
+    };
+    (diagnostics.checks as Record<string, unknown>).latestJsonValid = true;
+    (diagnostics.checks as Record<string, unknown>).manifestVersion = manifest.version;
+
+    // Validate platforms
+    const platformKeys = Object.keys(manifest.platforms);
+    (diagnostics.checks as Record<string, unknown>).platforms = {
+      count: platformKeys.length,
+      keys: platformKeys,
+      allHaveSignatures: platformKeys.every(
+        (p) => manifest.platforms[p].signature && manifest.platforms[p].signature.length > 0
+      ),
+    };
+
+    diagnostics.status = "ok";
+    res.status(200).json(diagnostics);
+  } catch (err) {
+    (diagnostics.checks as Record<string, unknown>).exception = (err as Error).message;
+    res.status(500).json(diagnostics);
   }
 });
 
