@@ -530,7 +530,7 @@ export async function creditExhaustionClose(
 /**
  * Aggregates all available context for a session (JD, Resume, Documents, Instructions).
  */
-export async function getSessionFullContext(sessionId: string) {
+export async function getSessionFullContext(sessionId: string, query?: string) {
   const session = await prisma.session.findUnique({
     where: { id: sessionId },
     include: { company: true },
@@ -538,31 +538,69 @@ export async function getSessionFullContext(sessionId: string) {
 
   if (!session) return null;
 
-  // Fetch resume + document records in parallel, then extract document text.
-  const projectIds = Array.isArray(session.projectIds) ? (session.projectIds as string[]) : [];
+  // 1. Fetch resumes: try the session's resumeId if valid, and also fetch all resumes for the user
+  const resumes = await prisma.resume.findMany({
+    where: { userId: session.userId },
+    orderBy: { uploadedAt: "desc" },
+    include: { atsAnalysis: true }
+  }).catch((e) => { console.warn("Failed to fetch user resumes:", e); return []; });
 
-  const [resumeRecord, docRecord, projectRecords] = await Promise.all([
-    session.resumeId
-      ? prisma.resume.findUnique({ where: { id: session.resumeId } }).catch((e) => { console.warn("Failed to fetch resume:", e); return null; })
-      : Promise.resolve(null),
-    session.documentId
-      ? prisma.document.findUnique({ where: { id: session.documentId } }).catch((e) => { console.warn("Failed to fetch document:", e); return null; })
-      : Promise.resolve(null),
-    projectIds.length > 0
-      ? prisma.project.findMany({ where: { id: { in: projectIds } } }).catch((e) => { console.warn("Failed to fetch projects:", e); return []; })
-      : Promise.resolve([]),
-  ]);
+  let resumeContextText = "";
+  if (resumes.length > 0) {
+    resumeContextText = resumes.map((r, idx) => {
+      let rText = `━━━ RESUME ${idx + 1}: ${r.filename} (Uploaded: ${r.uploadedAt.toISOString().split("T")[0]}) ━━━\n${r.resumeContext || "No text parsed from this resume."}`;
+      if (r.atsAnalysis) {
+        const ats = r.atsAnalysis;
+        rText += `\n\n[Resume ATS Analysis]:\nScore: ${ats.score}/100\nSummary: ${ats.summary}\nStrengths:\n${ats.strengths.map(s => `  • ${s}`).join("\n")}\nWeaknesses:\n${ats.weaknesses.map(w => `  • ${w}`).join("\n")}\nSuggestions:\n${ats.suggestions.map(sg => `  • ${sg}`).join("\n")}`;
+      }
+      if (r.parsedData) {
+        try {
+          rText += `\n\n[Parsed Skills & Metadata]:\n${JSON.stringify(r.parsedData, null, 2)}`;
+        } catch { /* ignore */ }
+      }
+      return rText;
+    }).join("\n\n════════════════════════════════════════\n\n");
+  } else {
+    resumeContextText = "No resume provided.";
+  }
 
-  const resumeContext = resumeRecord?.resumeContext || "";
+  // 2. Fetch documents: try both session.documentId (if any) and all documents of this user
+  const documents = await prisma.document.findMany({
+    where: { userId: session.userId },
+    orderBy: { uploadedAt: "desc" }
+  }).catch((e) => { console.warn("Failed to fetch user documents:", e); return []; });
 
   let documentText = "";
-  if (docRecord) {
-    try {
-      const ext = path.extname(docRecord.path).toLowerCase();
-      documentText = await documentService.extractTextFromFile(docRecord.path, ext);
-    } catch (e) {
-      console.warn("Failed to extract document text:", e);
+  if (documents.length > 0) {
+    const docsTexts = [];
+    for (const doc of documents) {
+      try {
+        const ext = path.extname(doc.path).toLowerCase();
+        const text = await documentService.extractTextFromFile(doc.path, ext);
+        if (text) {
+          docsTexts.push(`━━━ DOCUMENT: ${doc.filename} (Uploaded: ${doc.uploadedAt.toISOString().split("T")[0]}) ━━━\n${text}`);
+        }
+      } catch (e) {
+        console.warn(`Failed to extract text from document ${doc.filename}:`, e);
+      }
     }
+    documentText = docsTexts.join("\n\n════════════════════════════════════════\n\n");
+  }
+  if (!documentText) documentText = "None provided.";
+
+  // 3. Fetch projects: try session.projectIds or all projects of this user
+  const projectIds = Array.isArray(session.projectIds) ? (session.projectIds as string[]) : [];
+  let projectRecords: any[] = [];
+  if (projectIds.length > 0) {
+    projectRecords = await prisma.project.findMany({
+      where: { id: { in: projectIds } }
+    }).catch((e) => { console.warn("Failed to fetch specific projects:", e); return []; });
+  }
+  
+  if (projectRecords.length === 0) {
+    projectRecords = await prisma.project.findMany({
+      where: { userId: session.userId }
+    }).catch((e) => { console.warn("Failed to fetch all user projects:", e); return []; });
   }
 
   // Serialize selected AI projects into a rich, readable context string.
@@ -682,10 +720,7 @@ export async function getSessionFullContext(sessionId: string) {
       .join("\n\n════════════════════════════════════════\n\n");
   }
 
-  // 3. Fetch recent Q&A history for conversation context.
-  // Only AI_ASSISTANT entries have both a question AND answer — raw INTERVIEWER/USER
-  // transcript lines have no answer and confuse the model into thinking they are
-  // new unanswered questions (triggering false NO_NEW_QUESTION sentinels).
+  // 4. Fetch recent Q&A history for conversation context.
   const messages = Array.isArray(session.messages)
     ? (session.messages as any[])
     : [];
@@ -702,16 +737,118 @@ export async function getSessionFullContext(sessionId: string) {
           .join("\n\n")
       : "";
 
+  // 5. Fetch past sessions and user Q&As for historical context
+  const pastSessions = await prisma.session.findMany({
+    where: {
+      userId: session.userId,
+      id: { not: sessionId }
+    },
+    orderBy: { createdAt: "desc" },
+    take: 3,
+    select: {
+      companyName: true,
+      jobDescription: true,
+      messages: true,
+      createdAt: true
+    }
+  }).catch((e) => { console.warn("Failed to fetch past sessions:", e); return []; });
+
+  let pastSessionsContext = "";
+  if (pastSessions.length > 0) {
+    pastSessionsContext = pastSessions.map((ps, idx) => {
+      const msgs = Array.isArray(ps.messages) ? (ps.messages as any[]) : [];
+      const qaPairs = msgs
+        .filter(m => m.role === "AI_ASSISTANT" && m.question && m.answer)
+        .slice(-2) // last 2 Q&As
+        .map(m => `  Q: ${m.question.trim()}\n  A: ${m.answer.trim()}`)
+        .join("\n\n");
+      return `[Past Session ${idx + 1} at ${ps.companyName || "Unknown Company"} - ${ps.jobDescription || "General"} on ${ps.createdAt.toISOString().split("T")[0]}]:\n${qaPairs || "  No Q&As recorded."}`;
+    }).join("\n\n---\n\n");
+  }
+
+  const userQAs = await prisma.qA.findMany({
+    where: { userId: session.userId },
+    orderBy: { createdAt: "desc" },
+    take: 10,
+    select: {
+      ques: true,
+      answer: true,
+      difficulty: true,
+      industry: true
+    }
+  }).catch((e) => { console.warn("Failed to fetch user QAs:", e); return []; });
+
+  let pastQAsContext = "";
+  if (userQAs.length > 0) {
+    pastQAsContext = userQAs
+      .map(qa => `  Q [${qa.difficulty}/${qa.industry}]: ${qa.ques}\n  A: ${qa.answer || "No answer recorded."}`)
+      .join("\n\n");
+  }
+
+  let combinedPreviousContext = "";
+  if (pastSessionsContext) {
+    combinedPreviousContext += `━━━ PAST INTERVIEW SESSIONS ━━━\n${pastSessionsContext}\n\n`;
+  }
+  if (pastQAsContext) {
+    combinedPreviousContext += `━━━ HISTORICAL Q&A ARCHIVE ━━━\n${pastQAsContext}`;
+  }
+
+  let historyAndPastContext = recentHistory || "No previous interactions in this session.";
+  if (combinedPreviousContext) {
+    historyAndPastContext += `\n\n════════════════════════════════════════\n${combinedPreviousContext}`;
+  }
+
+  // 6. Semantic RAG Search over all user transcript chunks
+  let vectorContext = "";
+  if (query) {
+    try {
+      const { RagService } = require("../ask-ai/rag.service");
+      const ragService = new RagService();
+      let chunks = await ragService.retrieveContext(sessionId, session.userId, query);
+      
+      // Fallback: If no relevant chunks found in the current session, retrieve from any of this user's sessions
+      if ((!chunks || chunks.length === 0) && ragService.embeddingService) {
+        const { embedding } = await ragService.embeddingService.generateEmbedding(query);
+        const embeddingStr = `[${embedding.join(",")}]`;
+        const { AI_CONFIG } = require("../../config/ai.config");
+        
+        const allUserChunks = await prisma.$queryRawUnsafe<any[]>(
+          `SELECT 
+            id, question, "aiAnswer", content, technologies,
+            (embedding <=> $1::vector) as distance
+          FROM "TranscriptChunk"
+          WHERE "userId" = $2
+          ORDER BY distance ASC
+          LIMIT $3`,
+          embeddingStr,
+          session.userId,
+          AI_CONFIG?.rag?.topK || 4
+        ).catch(() => []);
+        
+        chunks = allUserChunks.filter((r: any) => r.distance < 0.6);
+      }
+
+      if (chunks && chunks.length > 0) {
+        vectorContext = chunks
+          .map((c: any, idx: number) => `[Semantic Chunk Ref ${idx + 1}]:\nQuestion: ${c.question}\nAnswer: ${c.aiAnswer}\nTranscript excerpt: ${c.content}`)
+          .join("\n\n---\n\n");
+      }
+    } catch (e) {
+      console.warn("Failed to fetch vector context:", e);
+    }
+  }
+
   return {
     company: session.company?.name || session.companyName || "Unknown",
     role: session.jobDescription || "Interviewee",
     language: session.language || "General",
     simpleLanguage: session.simpleLanguage,
     instructions: session.extraContext || "None",
-    resume: resumeContext || "No resume context provided.",
-    document: documentText ? documentText.substring(0, 5000) : "None",
+    resume: resumeContextText,
+    document: documentText,
     projects: projectsText || null,
-    history: recentHistory || "No previous interactions in this session.",
+    history: historyAndPastContext,
+    vectorContext: vectorContext || null,
   };
 }
 
@@ -901,7 +1038,7 @@ export async function getAIAnswer(
     throw new Error("Session not found");
   }
 
-  const context = await getSessionFullContext(id);
+  const context = await getSessionFullContext(id, transcript);
 
   // For regenerate calls the user is explicitly asking to re-answer a specific
   // question. Strip conversation history from the context so RULE 8 (follow-up

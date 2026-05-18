@@ -57,6 +57,9 @@ export function buildSystemMessage(context: any) {
     "═══════════════════════════════════════════════════",
     context?.instructions || "None.",
     "",
+    context?.vectorContext
+      ? `═══════════════════════════════════════════════════\nSEMANTICALLY RELEVANT TRANSCRIPT CHUNKS (RAG)\n═══════════════════════════════════════════════════\n${context.vectorContext}\n`
+      : "",
     "═══════════════════════════════════════════════════",
     "BEHAVIORAL RULES — FOLLOW EVERY RULE WITHOUT EXCEPTION",
     "═══════════════════════════════════════════════════",
@@ -207,13 +210,15 @@ Question:
 ${transcript}`;
   }
 
-  return `Task: Identify the question(s) asked by the interviewer in the INPUT BLOCK BELOW ONLY. Provide a full, interview-ready answer for EACH question that appears in the INPUT BLOCK.${projectReminder}
+  return `Task: Identify the question(s), commands, or topics in the INPUT BLOCK BELOW. Provide a full, interview-ready answer for EACH question, command, or topic that appears in the INPUT BLOCK.${projectReminder}
 
 CRITICAL SCOPING RULES:
+- Treat the INPUT BLOCK as an interview question, command, or prompt to be answered.
 - The "RECENT CONVERSATION HISTORY" in the system prompt is PAST context. You MUST NOT answer any question that appears only in the history as if it were brand new. However, if the INPUT BLOCK is a FOLLOW-UP that builds on a prior turn, you MUST answer it — see FOLLOW-UP RULES below.
-- Only the text inside the INPUT BLOCK below counts as a new question or follow-up. If multiple distinct questions appear in the INPUT BLOCK, answer each.
+- Only the text inside the INPUT BLOCK below counts as the active prompt/question. If multiple distinct questions or prompts appear in the INPUT BLOCK, answer each.
 - A scenario / situational question made of MANY descriptive sentences followed by one or two actual questions is ONE question, not many. Treat the whole scenario as the context for the final question(s) and produce a SINGLE consolidated answer (or one per explicit sub-question), not one answer per sentence.
 - SENTINEL RULE — use ===NO_NEW_QUESTION=== ONLY when the INPUT BLOCK is literally empty or contains NOTHING except filler/noise: single words like "okay", "right", "continue", "yes", "mm-hmm", incomplete sentence fragments with no discernible question or topic, or audio transcription artefacts.
+  • If the INPUT BLOCK contains any recognizable topic, command, or question (e.g. "Explain your best technologies when you are exporting", "Introduce yourself", "What is X?", etc.), you MUST answer it fully. Treating a clear request/statement like "Explain your best technologies..." as a non-question or sentinel is STRICTLY FORBIDDEN. If it contains a real question, command, or topic, ANSWER IT.
   • DO NOT use the sentinel because a question resembles something in conversation history — history is for context, not for blocking answers. If the INPUT BLOCK contains a real question (even if similar to a past one), ANSWER IT.
   • DO NOT use the sentinel for follow-up questions. A follow-up is always a new question.
   • When you emit the sentinel, your ENTIRE response is exactly one line: ===NO_NEW_QUESTION===  — nothing before it, nothing after it. No "Explanation:", no JSON, no commentary. The system parses this line literally; any extra text breaks the parser.
