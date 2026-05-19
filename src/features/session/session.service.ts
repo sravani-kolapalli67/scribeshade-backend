@@ -861,6 +861,36 @@ function processAIStream(
   sessionId: string,
   fallbackQuestion: string,
 ) {
+  const segmentMarker = /\n?={3,}NEXT_QUESTION={3,}\n?/i;
+  const extractPairs = (text: string) => {
+    const segments = text
+      .split(segmentMarker)
+      .map((segment) => segment.trim())
+      .filter(Boolean)
+      .filter((segment) => !/={3,}\s*NO_NEW_QUESTION\s*={3,}/i.test(segment));
+
+    const sourceSegments = segments.length > 0 ? segments : [text.trim()];
+
+    return sourceSegments
+      .map((segment) => {
+        const questionMatch = segment.match(
+          /\*?\*?QUESTION:\*?\*?\s*([\s\S]*?)\s*\*?\*?ANSWER:/i,
+        );
+        const answerMatch = segment.match(/\*?\*?ANSWER:\*?\*?\s*([\s\S]*)/i);
+        const question =
+          questionMatch?.[1]
+            ?.trim()
+            ?.replace(
+              /^(\d+[\s.)-]+\s*|Question\s*\d+[:\s-]*|Q\d+[:\s-]*)/i,
+              "",
+            ) || fallbackQuestion;
+        const answer = answerMatch?.[1]?.trim() || segment;
+
+        return { question, answer };
+      })
+      .filter((pair) => pair.answer);
+  };
+
   async function* streamGenerator() {
     let fullResponse = "";
     let lastYieldedLength = 0;
@@ -895,41 +925,32 @@ function processAIStream(
           return;
         }
 
-        const questionMatch = finalResponse.match(
-          /QUESTION:\*?\*?\s*([\s\S]*?)\s*\*?\*?ANSWER:/i,
-        );
-        const answerMatch = finalResponse.match(/ANSWER:\*?\*?\s*([\s\S]*)/i);
-        const extractedQuestion =
-          questionMatch?.[1]
-            ?.trim()
-            ?.replace(
-              /^(\d+[\s.)-]+\s*|Question\s*\d+[:\s-]*|Q\d+[:\s-]*)/i,
-              "",
-            ) || fallbackQuestion;
-        const extractedAnswer = answerMatch?.[1]?.trim() || finalResponse;
+        const extractedPairs = extractPairs(finalResponse);
 
-        if (extractedAnswer && session) {
+        if (extractedPairs.length > 0 && session) {
           // Ephemeral sessions — skip all persistence (QA table + messages).
           // The user opted out of transcript saving; no data should outlive the session.
           if (session.saveTranscription !== false) {
-            await qaService
-              .createQA({
-                userId: session.userId,
-                sessionId,
-                companyId: session.companyId,
-                ques: extractedQuestion,
-                answer: extractedAnswer,
-                language: mapLanguage(session.language),
-                industry: mapIndustry(session.jobDescription),
-              })
-              .catch((e) => console.error("Auto-save QA Error:", e));
+            for (const { question, answer } of extractedPairs) {
+              await qaService
+                .createQA({
+                  userId: session.userId,
+                  sessionId,
+                  companyId: session.companyId,
+                  ques: question,
+                  answer,
+                  language: mapLanguage(session.language),
+                  industry: mapIndustry(session.jobDescription),
+                })
+                .catch((e) => console.error("Auto-save QA Error:", e));
 
-            await appendMessage(
-              sessionId,
-              "AI_ASSISTANT",
-              extractedQuestion,
-              extractedAnswer,
-            ).catch((e) => console.error("appendMessage Error:", e));
+              await appendMessage(
+                sessionId,
+                "AI_ASSISTANT",
+                question,
+                answer,
+              ).catch((e) => console.error("appendMessage Error:", e));
+            }
           }
         }
       } catch (e) {

@@ -16,8 +16,21 @@ class SSEManager {
     }
     this.clients.get(sessionId)?.add(res);
 
+    const keepAlive = setInterval(() => {
+      if (res.destroyed || res.writableEnded) {
+        clearInterval(keepAlive);
+        return;
+      }
+
+      res.write(": keep-alive\n\n");
+      if ((res as any).flush) {
+        (res as any).flush();
+      }
+    }, 25_000);
+
     // Remove client on connection close
     res.on("close", () => {
+      clearInterval(keepAlive);
       this.clients.get(sessionId)?.delete(res);
       if (this.clients.get(sessionId)?.size === 0) {
         this.clients.delete(sessionId);
