@@ -597,3 +597,90 @@ export async function deleteResume(id: string): Promise<void> {
 
   await prisma.resume.delete({ where: { id } });
 }
+
+export interface UnifiedResumeContext {
+  id: string;
+  userId: string;
+  filename: string;
+  resumeContext: string;
+  parsedData: any | null;
+  metadataIndex: any | null;
+  atsAnalysis: {
+    score: number;
+    summary: string;
+    strengths: string[];
+    weaknesses: string[];
+    suggestions: string[];
+  } | null;
+  source: "uploaded" | "builder";
+}
+
+export async function getUnifiedResumeContext(resumeId: string): Promise<UnifiedResumeContext | null> {
+  // 1. Try uploaded raw resume first
+  const uploaded = await prisma.resume.findUnique({
+    where: { id: resumeId },
+    include: { atsAnalysis: true }
+  }).catch(() => null);
+
+  if (uploaded) {
+    return {
+      id: uploaded.id,
+      userId: uploaded.userId,
+      filename: uploaded.filename,
+      resumeContext: uploaded.resumeContext || "",
+      parsedData: uploaded.parsedData,
+      metadataIndex: uploaded.metadataIndex,
+      atsAnalysis: uploaded.atsAnalysis ? {
+        score: uploaded.atsAnalysis.score,
+        summary: uploaded.atsAnalysis.summary,
+        strengths: uploaded.atsAnalysis.strengths,
+        weaknesses: uploaded.atsAnalysis.weaknesses,
+        suggestions: uploaded.atsAnalysis.suggestions
+      } : null,
+      source: "uploaded"
+    };
+  }
+
+  // 2. Fall back to builder resume
+  const built = await prisma.builtResume.findUnique({
+    where: { id: resumeId }
+  }).catch(() => null);
+
+  if (built) {
+    const fields = (built.fields || {}) as Record<string, string>;
+    const textContext = serializeBuiltResumeFields(fields);
+    
+    let atsAnalysis = null;
+    if (built.atsScore !== null || built.lastAtsResult) {
+      const ats = (built.lastAtsResult || {}) as any;
+      atsAnalysis = {
+        score: built.atsScore ?? ats.score ?? 0,
+        summary: ats.summary || "",
+        strengths: Array.isArray(ats.strengths) ? ats.strengths : [],
+        weaknesses: Array.isArray(ats.weaknesses) ? ats.weaknesses : [],
+        suggestions: Array.isArray(ats.suggestions) ? ats.suggestions : []
+      };
+    }
+
+    return {
+      id: built.id,
+      userId: built.userId,
+      filename: `${built.title}.pdf`,
+      resumeContext: textContext,
+      parsedData: {
+        skills: [
+          fields.skillsLanguages,
+          fields.skillsFrameworks,
+          fields.skillsDatabases,
+          fields.skillsTools
+        ].filter(Boolean).flatMap(s => s.split(/,\s*/))
+      },
+      metadataIndex: null,
+      atsAnalysis,
+      source: "builder"
+    };
+  }
+
+  return null;
+}
+

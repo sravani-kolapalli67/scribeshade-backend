@@ -106,10 +106,10 @@ enum IdempotencyStatus {
 }
 
 enum ChunkType {
-  QUESTION
-  ANSWER
-  CONTEXT
-  SYSTEM
+  QUESTION @map("question")
+  ANSWER   @map("answer")
+  CONTEXT  @map("context")
+  SYSTEM   @map("system")
 }
 
 enum MessageRole {
@@ -122,6 +122,7 @@ enum SpeakerType {
   INTERVIEWER @map("interviewer")
   CANDIDATE   @map("candidate")
   SYSTEM      @map("system")
+  ASSISTANT   @map("assistant")
 }
 
 
@@ -302,6 +303,7 @@ model Session {
   notes    SessionNotes?
   transcriptChunks TranscriptChunk[]
   askAiMessages    AskAiMessage[]
+  snapshots        AnswerGenerationSnapshot[]
 
   @@index([userId, createdAt(sort: Desc)])
   @@index([companyId])
@@ -698,5 +700,26 @@ model AssistantMessage {
 
   @@index([chatId, createdAt])
   @@index([userId])
+}
+
+model AnswerGenerationSnapshot {
+  id                         String   @id @default(uuid())
+  sessionId                  String
+  session                    Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  originalQuestionTranscript String   @db.Text
+  transcriptWindowBefore     Json     @default("[]") // string[]
+  transcriptWindowActive     String   @db.Text       // string
+  transcriptWindowAfter      Json     @default("[]") // string[]
+  timestampRangeStart        Float
+  timestampRangeEnd          Float
+  selectedResumeContext      String?  @db.Text
+  selectedProjectContext     Json?    @default("[]") // string[]
+  selectedDocumentContext    Json?    @default("[]") // string[]
+  ragContext                 Json?    @default("[]") // string[]
+  generatedAnswer            String   @db.Text
+  modelUsed                  String
+  createdAt                  DateTime @default(now())
+
+  @@index([sessionId])
 }
 

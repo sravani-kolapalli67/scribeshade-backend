@@ -10,6 +10,9 @@ import { AppError } from "../../shared/middleware/error.middleware";
 import * as creditsService from "../credits/credits.service";
 import { creditDeductionQueue } from "../jobs/queue";
 import { buildSystemMessage, buildUserMessage, buildScreenAnalysisMessage } from "../../shared/lib/prompt";
+import { buildOptimizedContext, estimatePromptTokens } from "./cie.service";
+import { getUnifiedResumeContext } from "../resume/resume.service";
+import crypto from "crypto";
 import {
   ANALYTICS_SYSTEM_PROMPT,
   buildAnalyticsUserPrompt,
@@ -538,69 +541,52 @@ export async function getSessionFullContext(sessionId: string, query?: string) {
 
   if (!session) return null;
 
-  // 1. Fetch resumes: try the session's resumeId if valid, and also fetch all resumes for the user
-  const resumes = await prisma.resume.findMany({
-    where: { userId: session.userId },
-    orderBy: { uploadedAt: "desc" },
-    include: { atsAnalysis: true }
-  }).catch((e) => { console.warn("Failed to fetch user resumes:", e); return []; });
+  // 1. Fetch resume: use session-specific resumeId only
+  let resumeContextText = "No resume provided.";
+  if (session.resumeId) {
+    const resume = await getUnifiedResumeContext(session.resumeId)
+      .catch((e) => { console.warn("Failed to fetch session resume:", e); return null; });
 
-  let resumeContextText = "";
-  if (resumes.length > 0) {
-    resumeContextText = resumes.map((r, idx) => {
-      let rText = `━━━ RESUME ${idx + 1}: ${r.filename} (Uploaded: ${r.uploadedAt.toISOString().split("T")[0]}) ━━━\n${r.resumeContext || "No text parsed from this resume."}`;
-      if (r.atsAnalysis) {
-        const ats = r.atsAnalysis;
+    if (resume) {
+      const sourceLabel = resume.source === "builder" ? "Built-in Wizard" : "Uploaded";
+      let rText = `━━━ RESUME (${sourceLabel}): ${resume.filename} ━━━\n${resume.resumeContext || "No text parsed from this resume."}`;
+      if (resume.atsAnalysis) {
+        const ats = resume.atsAnalysis;
         rText += `\n\n[Resume ATS Analysis]:\nScore: ${ats.score}/100\nSummary: ${ats.summary}\nStrengths:\n${ats.strengths.map(s => `  • ${s}`).join("\n")}\nWeaknesses:\n${ats.weaknesses.map(w => `  • ${w}`).join("\n")}\nSuggestions:\n${ats.suggestions.map(sg => `  • ${sg}`).join("\n")}`;
       }
-      if (r.parsedData) {
-        try {
-          rText += `\n\n[Parsed Skills & Metadata]:\n${JSON.stringify(r.parsedData, null, 2)}`;
-        } catch { /* ignore */ }
-      }
-      return rText;
-    }).join("\n\n════════════════════════════════════════\n\n");
-  } else {
-    resumeContextText = "No resume provided.";
+      resumeContextText = rText;
+    }
   }
 
-  // 2. Fetch documents: try both session.documentId (if any) and all documents of this user
-  const documents = await prisma.document.findMany({
-    where: { userId: session.userId },
-    orderBy: { uploadedAt: "desc" }
-  }).catch((e) => { console.warn("Failed to fetch user documents:", e); return []; });
+  // 2. Fetch document: use session-specific documentId only
+  let documentText = "None provided.";
+  if (session.documentId) {
+    const document = await prisma.document.findUnique({
+      where: { id: session.documentId }
+    }).catch((e) => { console.warn("Failed to fetch session document:", e); return null; });
 
-  let documentText = "";
-  if (documents.length > 0) {
-    const docsTexts = [];
-    for (const doc of documents) {
+    if (document) {
       try {
-        const ext = path.extname(doc.path).toLowerCase();
-        const text = await documentService.extractTextFromFile(doc.path, ext);
+        const ext = path.extname(document.path).toLowerCase();
+        const text = await documentService.extractTextFromFile(document.path, ext);
         if (text) {
-          docsTexts.push(`━━━ DOCUMENT: ${doc.filename} (Uploaded: ${doc.uploadedAt.toISOString().split("T")[0]}) ━━━\n${text}`);
+          // Truncate document text to 2000 chars max to control token usage
+          const truncatedText = text.length > 2000 ? text.substring(0, 2000) + "... (truncated)" : text;
+          documentText = `━━━ DOCUMENT: ${document.filename} (Uploaded: ${document.uploadedAt.toISOString().split("T")[0]}) ━━━\n${truncatedText}`;
         }
       } catch (e) {
-        console.warn(`Failed to extract text from document ${doc.filename}:`, e);
+        console.warn(`Failed to extract text from document ${document.filename}:`, e);
       }
     }
-    documentText = docsTexts.join("\n\n════════════════════════════════════════\n\n");
   }
-  if (!documentText) documentText = "None provided.";
 
-  // 3. Fetch projects: try session.projectIds or all projects of this user
+  // 3. Fetch projects: use session-specific projectIds only
   const projectIds = Array.isArray(session.projectIds) ? (session.projectIds as string[]) : [];
   let projectRecords: any[] = [];
   if (projectIds.length > 0) {
     projectRecords = await prisma.project.findMany({
       where: { id: { in: projectIds } }
-    }).catch((e) => { console.warn("Failed to fetch specific projects:", e); return []; });
-  }
-  
-  if (projectRecords.length === 0) {
-    projectRecords = await prisma.project.findMany({
-      where: { userId: session.userId }
-    }).catch((e) => { console.warn("Failed to fetch all user projects:", e); return []; });
+    }).catch((e) => { console.warn("Failed to fetch session projects:", e); return []; });
   }
 
   // Serialize selected AI projects into a rich, readable context string.
@@ -730,11 +716,11 @@ export async function getSessionFullContext(sessionId: string, query?: string) {
   const recentHistory =
     qaMessages.length > 0
       ? qaMessages
-          .map(
-            (m, i) =>
-              `Turn ${i + 1} (Interviewer asked):\n  Q: ${m.question.trim()}\n  A: ${m.answer.trim()}`,
-          )
-          .join("\n\n")
+        .map(
+          (m, i) =>
+            `Turn ${i + 1} (Interviewer asked):\n  Q: ${m.question.trim()}\n  A: ${m.answer.trim()}`,
+        )
+        .join("\n\n")
       : "";
 
   // 5. Fetch past sessions and user Q&As for historical context
@@ -805,28 +791,29 @@ export async function getSessionFullContext(sessionId: string, query?: string) {
       const { RagService } = require("../ask-ai/rag.service");
       const ragService = new RagService();
       let chunks = await ragService.retrieveContext(sessionId, session.userId, query);
-      
-      // Fallback: If no relevant chunks found in the current session, retrieve from any of this user's sessions
-      if ((!chunks || chunks.length === 0) && ragService.embeddingService) {
-        const { embedding } = await ragService.embeddingService.generateEmbedding(query);
-        const embeddingStr = `[${embedding.join(",")}]`;
-        const { AI_CONFIG } = require("../../config/ai.config");
-        
-        const allUserChunks = await prisma.$queryRawUnsafe<any[]>(
-          `SELECT 
-            id, question, "aiAnswer", content, technologies,
-            (embedding <=> $1::vector) as distance
-          FROM "TranscriptChunk"
-          WHERE "userId" = $2
-          ORDER BY distance ASC
-          LIMIT $3`,
-          embeddingStr,
-          session.userId,
-          AI_CONFIG?.rag?.topK || 4
-        ).catch(() => []);
-        
-        chunks = allUserChunks.filter((r: any) => r.distance < 0.6);
-      }
+
+      // DISABLED cross-session fallback to prevent massive token usage
+      // Only use chunks from current session to control costs
+      // if ((!chunks || chunks.length === 0) && ragService.embeddingService) {
+      //   const { embedding } = await ragService.embeddingService.generateEmbedding(query);
+      //   const embeddingStr = `[${embedding.join(",")}]`;
+      //   const { AI_CONFIG } = require("../../config/ai.config");
+      //   
+      //   const allUserChunks = await prisma.$queryRawUnsafe<any[]>(
+      //     `SELECT 
+      //       id, question, "aiAnswer", content, technologies,
+      //       (embedding <=> $1::vector) as distance
+      //     FROM "TranscriptChunk"
+      //     WHERE "userId" = $2
+      //     ORDER BY distance ASC
+      //     LIMIT $3`,
+      //     embeddingStr,
+      //     session.userId,
+      //     AI_CONFIG?.rag?.topK || 4
+      //   ).catch(() => []);
+      //   
+      //   chunks = allUserChunks.filter((r: any) => r.distance < 0.6);
+      // }
 
       if (chunks && chunks.length > 0) {
         vectorContext = chunks
@@ -860,14 +847,17 @@ function processAIStream(
   session: any,
   sessionId: string,
   fallbackQuestion: string,
+  contextForCall?: any,
+  targetModel?: string,
+  snapshotId?: string,
+  isRegenerate: boolean = false,
 ) {
   const segmentMarker = /\n?={3,}NEXT_QUESTION={3,}\n?/i;
   const extractPairs = (text: string) => {
     const segments = text
       .split(segmentMarker)
       .map((segment) => segment.trim())
-      .filter(Boolean)
-      .filter((segment) => !/={3,}\s*NO_NEW_QUESTION\s*={3,}/i.test(segment));
+      .filter(Boolean);
 
     const sourceSegments = segments.length > 0 ? segments : [text.trim()];
 
@@ -914,17 +904,14 @@ function processAIStream(
       }
     }
 
+    if (snapshotId) {
+      yield { text: `\n===SNAPSHOT_ID=${snapshotId}===` };
+    }
+
     // Post-processing: extract Q&A and persist (fire-and-forget)
     (async () => {
       try {
         const finalResponse = await result.getText();
-
-        // Sentinel: model decided the input had no genuine new question.
-        // Skip ALL persistence — no QA row, no message append, no card.
-        if (/={3,}\s*NO_NEW_QUESTION\s*={3,}/i.test(finalResponse)) {
-          return;
-        }
-
         const extractedPairs = extractPairs(finalResponse);
 
         if (extractedPairs.length > 0 && session) {
@@ -944,12 +931,35 @@ function processAIStream(
                 })
                 .catch((e) => console.error("Auto-save QA Error:", e));
 
-              await appendMessage(
-                sessionId,
-                "AI_ASSISTANT",
-                question,
-                answer,
-              ).catch((e) => console.error("appendMessage Error:", e));
+              if (snapshotId && contextForCall && targetModel && !isRegenerate) {
+                const { createGenerationSnapshot } = require("./cie.service");
+                await createGenerationSnapshot({
+                  id: snapshotId,
+                  sessionId,
+                  originalQuestionTranscript: question,
+                  generatedAnswer: answer,
+                  modelUsed: targetModel,
+                  context: contextForCall,
+                }).catch((e: any) => console.error("createGenerationSnapshot Error:", e));
+              }
+
+              if (isRegenerate && snapshotId) {
+                await updateMessageAnswer(
+                  sessionId,
+                  snapshotId,
+                  question,
+                  answer,
+                ).catch((e: any) => console.error("updateMessageAnswer Error:", e));
+              } else {
+                await appendMessage(
+                  sessionId,
+                  "AI_ASSISTANT",
+                  question,
+                  answer,
+                  undefined,
+                  snapshotId,
+                ).catch((e) => console.error("appendMessage Error:", e));
+              }
             }
           }
         }
@@ -986,7 +996,7 @@ export async function analyzeScreen(
   const [compressed, session, context] = await Promise.all([
     compressPromise,
     prisma.session.findUnique({ where: { id }, include: { company: true } }),
-    getSessionFullContext(id),
+    buildOptimizedContext(id),
   ]);
 
   if (!session) {
@@ -995,6 +1005,13 @@ export async function analyzeScreen(
 
   try {
     const targetModel = resolveModelId(aiModel) || model;
+    // ── Full Prompt Budget Accounting (screen analysis) ──────────────────
+    const screenSystemPrompt = buildSystemMessage(context);
+    const screenUserText = buildScreenAnalysisMessage(context);
+    const screenSystemTokens = estimatePromptTokens(screenSystemPrompt);
+    const screenUserTokens = estimatePromptTokens(screenUserText);
+    console.log(`[CIE] Screen analysis prompt | system: ${screenSystemTokens}t | user: ${screenUserTokens}t | total: ${screenSystemTokens + screenUserTokens}t | complexity: ${context?.complexity || 'unknown'}`);
+
     const result = ai.callModel({
       model: targetModel,
       // Raised so multi-question screenshots (e.g. 10 numbered questions) are
@@ -1005,7 +1022,7 @@ export async function analyzeScreen(
         {
           role: "system",
           type: "message",
-          content: buildSystemMessage(context),
+          content: screenSystemPrompt,
         } as any,
         {
           role: "user",
@@ -1013,7 +1030,7 @@ export async function analyzeScreen(
           content: [
             {
               type: "input_text",
-              text: buildScreenAnalysisMessage(context),
+              text: screenUserText,
             },
             {
               type: "input_image",
@@ -1049,6 +1066,7 @@ export async function getAIAnswer(
   isCustomQuery: boolean = false,
   isRegenerate: boolean = false,
   aiModel?: string,
+  snapshotId?: string,
 ) {
   const session = await prisma.session.findUnique({
     where: { id },
@@ -1059,33 +1077,76 @@ export async function getAIAnswer(
     throw new Error("Session not found");
   }
 
-  const context = await getSessionFullContext(id, transcript);
+  let contextForCall: any;
+  let targetModel = resolveModelId(aiModel) || model;
+  let finalTranscript = transcript;
+  let finalSnapshotId = snapshotId;
 
-  // For regenerate calls the user is explicitly asking to re-answer a specific
-  // question. Strip conversation history from the context so RULE 8 (follow-up
-  // detection) cannot misidentify the question as a follow-up to a recent
-  // prior answer (e.g. regenerating "Explain the first line of the code" after
-  // a Databricks question should NOT produce a Databricks answer).
-  const contextForCall = isRegenerate
-    ? { ...context, history: "No previous interactions in this session." }
-    : context;
+  if (isRegenerate && snapshotId) {
+    const snapshot = await prisma.answerGenerationSnapshot.findUnique({
+      where: { id: snapshotId },
+    });
+    if (!snapshot) {
+      throw new Error(`Snapshot ${snapshotId} not found`);
+    }
+
+    finalTranscript = snapshot.originalQuestionTranscript;
+
+    const docText = Array.isArray(snapshot.selectedDocumentContext)
+      ? (snapshot.selectedDocumentContext as string[]).join("\n\n")
+      : (snapshot.selectedDocumentContext as string || "");
+
+    const projText = Array.isArray(snapshot.selectedProjectContext)
+      ? (snapshot.selectedProjectContext as string[]).join("\n\n")
+      : (snapshot.selectedProjectContext as string || "");
+
+    const ragText = Array.isArray(snapshot.ragContext)
+      ? (snapshot.ragContext as string[]).join("\n\n")
+      : (snapshot.ragContext as string || "");
+
+    contextForCall = {
+      company: session.company?.name || session.companyName || "Unknown",
+      role: session.jobDescription || "Interviewee",
+      language: session.language || "General",
+      simpleLanguage: session.simpleLanguage,
+      instructions: session.extraContext || "None",
+      resume: snapshot.selectedResumeContext || "No resume provided.",
+      document: docText || "None provided.",
+      projects: projText || "No projects provided.",
+      history: "No previous interactions in this session.",
+      vectorContext: ragText || null,
+    };
+  } else {
+    contextForCall = await buildOptimizedContext(id, transcript);
+    if (!contextForCall) {
+      throw new Error("Failed to build context");
+    }
+    if (!finalSnapshotId) {
+      finalSnapshotId = crypto.randomUUID();
+    }
+  }
 
   try {
-    const targetModel = resolveModelId(aiModel) || model;
+    // ── Full Prompt Budget Accounting ──────────────────────────────────────
+    const systemPrompt = buildSystemMessage(contextForCall);
+    const userMessage = buildUserMessage(finalTranscript, isCustomQuery, isRegenerate, contextForCall);
+    const systemTokens = estimatePromptTokens(systemPrompt);
+    const userTokens = estimatePromptTokens(userMessage);
+    console.log(`[CIE] Prompt breakdown | system: ${systemTokens}t | user: ${userTokens}t | total: ${systemTokens + userTokens}t | complexity: ${contextForCall?.complexity || 'unknown'}`);
+
     const result = ai.callModel({
       model: targetModel,
-      // Raised to support multi-question transcripts without truncation.
       maxOutputTokens: 8000,
       input: [
         {
           role: "system",
           type: "message",
-          content: buildSystemMessage(contextForCall),
+          content: systemPrompt,
         } as any,
         {
           role: "user",
           type: "message",
-          content: buildUserMessage(transcript, isCustomQuery, isRegenerate, contextForCall),
+          content: userMessage,
         },
       ],
     });
@@ -1094,7 +1155,11 @@ export async function getAIAnswer(
       result,
       session,
       id,
-      isCustomQuery ? transcript : transcript.slice(0, 300),
+      isCustomQuery ? finalTranscript : finalTranscript.slice(0, 300),
+      contextForCall,
+      targetModel,
+      finalSnapshotId,
+      isRegenerate
     );
   } catch (err: any) {
     console.error("OpenRouter Streaming Error (getAIAnswer):", err);
@@ -1128,6 +1193,7 @@ export async function appendMessage(
   question: string,
   answer: string,
   time?: string,
+  snapshotId?: string,
 ) {
   const session = await prisma.session.findUnique({
     where: { id: sessionId },
@@ -1154,6 +1220,7 @@ export async function appendMessage(
     answer,
     timestamp: new Date().toISOString(),
     time,
+    snapshotId,
   };
 
   const transcriptEntry = {
@@ -1165,6 +1232,7 @@ export async function appendMessage(
       time ||
       new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
     createdAt: new Date().toISOString(),
+    snapshotId,
   };
 
   return prisma.session.update({
@@ -1172,6 +1240,79 @@ export async function appendMessage(
     data: {
       messages: [...currentMessages, newMessage],
       transcript: [...currentTranscript, transcriptEntry],
+    },
+  });
+}
+
+export async function updateMessageAnswer(
+  sessionId: string,
+  snapshotId: string,
+  question: string,
+  answer: string
+) {
+  const session = await prisma.session.findUnique({
+    where: { id: sessionId },
+    select: { messages: true, transcript: true, saveTranscription: true },
+  });
+
+  if (!session) throw new Error("Session not found");
+  if (session.saveTranscription === false) return;
+
+  let messages = Array.isArray(session.messages) ? (session.messages as any[]) : [];
+  let transcript = Array.isArray(session.transcript) ? (session.transcript as any[]) : [];
+
+  let found = false;
+
+  messages = messages.map((m) => {
+    if (m.snapshotId === snapshotId) {
+      found = true;
+      return {
+        ...m,
+        question,
+        answer,
+        timestamp: new Date().toISOString(),
+      };
+    }
+    return m;
+  });
+
+  transcript = transcript.map((t) => {
+    if (t.snapshotId === snapshotId) {
+      return {
+        ...t,
+        question,
+        answer,
+        content: `Q: ${question}\n\nA: ${answer}`,
+      };
+    }
+    return t;
+  });
+
+  if (!found) {
+    const newMessage = {
+      role: "AI_ASSISTANT",
+      question,
+      answer,
+      timestamp: new Date().toISOString(),
+      snapshotId,
+    };
+    const transcriptEntry = {
+      role: "AI_ASSISTANT",
+      question,
+      answer,
+      content: `Q: ${question}\n\nA: ${answer}`,
+      createdAt: new Date().toISOString(),
+      snapshotId,
+    };
+    messages.push(newMessage);
+    transcript.push(transcriptEntry);
+  }
+
+  return prisma.session.update({
+    where: { id: sessionId },
+    data: {
+      messages,
+      transcript,
     },
   });
 }
@@ -1240,9 +1381,7 @@ export async function generateSessionFeedback(
   let resumeContext = "";
   if (session.resumeId) {
     try {
-      const resume = await prisma.resume.findUnique({
-        where: { id: session.resumeId },
-      });
+      const resume = await getUnifiedResumeContext(session.resumeId);
       resumeContext = resume?.resumeContext || "";
     } catch (e) {
       console.warn("Failed to fetch resume context for analytics:", e);

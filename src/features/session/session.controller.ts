@@ -360,13 +360,21 @@ export async function transcribe(req: Request, res: Response) {
 export async function getAIAnswer(req: Request, res: Response) {
   try {
     const id = req.params.id as string;
-    const { transcript, isCustomQuery, isRegenerate, aiModel } = req.body;
+    const { transcript, isCustomQuery, isRegenerate, regenerate, snapshotId, aiModel } = req.body;
+    const isRegen = !!isRegenerate || !!regenerate;
 
-    if (!transcript) {
-      return res.status(400).json({ error: "No transcript provided" });
+    if (!transcript && !snapshotId) {
+      return res.status(400).json({ error: "No transcript or snapshotId provided" });
     }
 
-    const result = await sessionService.getAIAnswer(id, transcript, !!isCustomQuery, !!isRegenerate, aiModel);
+    const result = await sessionService.getAIAnswer(
+      id,
+      transcript || "",
+      !!isCustomQuery,
+      isRegen,
+      aiModel,
+      snapshotId
+    );
 
     // Set streaming headers
     res.setHeader("Content-Type", "text/plain; charset=utf-8");

@@ -149,7 +149,7 @@ export async function* streamAIProjects(params: GenerateProjectRequest) {
   let resumeContext = providedResumeText || "";
 
   if (resumeId) {
-    const resume = await prisma.resume.findUnique({ where: { id: resumeId } });
+    const resume = await resumeService.getUnifiedResumeContext(resumeId);
     if (resume) {
       // Prefer structured parsedData for skill extraction (higher fidelity)
       if (resume.parsedData) {
@@ -177,12 +177,10 @@ export async function* streamAIProjects(params: GenerateProjectRequest) {
           resumeContext = `EXTRACTED SKILLS LIST:\n${uniqueSkills.join(", ")}\n\nProjects MUST stay within this skill boundary. Do not use technologies not listed above.`;
         } else {
           // Fewer than 2 structured skills — fall back to full text
-          const ext = path.extname(resume.path).toLowerCase();
-          resumeContext = await resumeService.extractTextFromFile(resume.path, ext);
+          resumeContext = resume.resumeContext || "";
         }
       } else {
-        const ext = path.extname(resume.path).toLowerCase();
-        resumeContext = await resumeService.extractTextFromFile(resume.path, ext);
+        resumeContext = resume.resumeContext || "";
       }
     }
   }

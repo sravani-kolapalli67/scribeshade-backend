@@ -2,6 +2,7 @@ import { OpenRouter } from "@openrouter/sdk";
 import { Prisma } from "@prisma/client";
 import { AppError } from "../../shared/middleware/error.middleware";
 import { prisma } from "../../shared/lib/prisma";
+import { getUnifiedResumeContext } from "../resume/resume.service";
 import type {
   ProjectGenerationRequest,
   ProjectGenerationResponse,
@@ -356,24 +357,17 @@ export async function generateProjectGeneration(
   payload: ProjectGenerationRequest,
 ): Promise<ProjectGenerationResponse> {
   const resume = payload.resume_id
-    ? await prisma.resume.findFirst({
-        where: { id: payload.resume_id, userId: dbUserId },
-      })
+    ? await getUnifiedResumeContext(payload.resume_id)
     : null;
 
-  const resumeCompat = resume as
-    | (Record<string, unknown> & {
-        id: string;
-        resumeContext?: string | null;
-        parsedData?: unknown;
-        metadataIndex?: unknown;
-      })
-    | null;
+  if (resume && resume.userId !== dbUserId) {
+    throw new AppError(403, "Forbidden");
+  }
 
   const extracted = extractSkillsFromResumeArtifacts(
-    resumeCompat?.parsedData,
-    resumeCompat?.metadataIndex,
-    (resumeCompat?.resumeContext as string | null | undefined) || null,
+    resume?.parsedData,
+    resume?.metadataIndex,
+    resume?.resumeContext || null,
   );
 
   const allKnownSkills = unique([...(payload.resume_skills || []), ...extracted]);
@@ -462,16 +456,16 @@ export async function generateProjectGeneration(
     credits_consumed: Number(PROJECT_GENERATION_COST),
   };
 
-  if (resumeCompat) {
+  if (resume && resume.source === "uploaded") {
     const parsedData =
-      (resumeCompat.parsedData as Record<string, unknown> | null) || {};
+      (resume.parsedData as Record<string, unknown> | null) || {};
     const currentProjects = Array.isArray(parsedData.projects)
       ? parsedData.projects
       : [];
 
     await (prisma.resume as unknown as { update: (args: unknown) => Promise<unknown> }).update(
       {
-        where: { id: resumeCompat.id },
+        where: { id: resume.id },
         data: {
           parsedData: {
             ...parsedData,
