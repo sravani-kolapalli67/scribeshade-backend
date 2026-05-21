@@ -13,6 +13,8 @@ type UpdateManifest = {
   platforms: Record<string, { url: string; signature: string }>;
 };
 
+type ReleaseAsset = { name: string; id: number; url: string };
+
 function githubHeaders(): Record<string, string> {
   return {
     Authorization: `Bearer ${GITHUB_TOKEN}`,
@@ -20,6 +22,37 @@ function githubHeaders(): Record<string, string> {
     "X-GitHub-Api-Version": "2022-11-28",
     "User-Agent": "ScribeShade-UpdateServer/1.0",
   };
+}
+
+function isAlreadyProxiedDownloadUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    return parsed.pathname.includes("/api/updates/download/");
+  } catch {
+    return url.includes("/api/updates/download/");
+  }
+}
+
+function extractFilenameFromUrl(url: string): string {
+  try {
+    const parsed = new URL(url);
+    return parsed.pathname.split("/").pop() || "download";
+  } catch {
+    const withoutQuery = url.split("?")[0] ?? url;
+    return withoutQuery.split("/").pop() || "download";
+  }
+}
+
+async function readReleaseAssetText(asset: ReleaseAsset): Promise<string | null> {
+  const res = await fetch(asset.url, {
+    headers: {
+      ...githubHeaders(),
+      Accept: "application/octet-stream",
+    },
+  });
+
+  if (!res.ok) return null;
+  return (await res.text()).trim();
 }
 
 /**
@@ -47,9 +80,7 @@ router.get("/latest.json", async (req: Request, res: Response, next: NextFunctio
       return;
     }
 
-    const release = await releaseRes.json() as {
-      assets: Array<{ name: string; id: number; url: string }>;
-    };
+    const release = await releaseRes.json() as { assets: ReleaseAsset[] };
 
     // 2. Find the latest.json asset
     const asset = release.assets.find((a) => a.name === "latest.json");
@@ -81,9 +112,32 @@ router.get("/latest.json", async (req: Request, res: Response, next: NextFunctio
     const host = req.headers["x-forwarded-host"] ?? req.get("host");
     const base = `${proto}://${host}`;
 
+    // Some CI pipelines publish macOS artifacts but ship a latest.json without
+    // a darwin entry. Add a fallback platform entry so web download buttons
+    // can still resolve the DMG from release assets.
+    const hasDarwinEntry = Object.keys(manifest.platforms).some((k) => k.startsWith("darwin"));
+    if (!hasDarwinEntry) {
+      const macDmgAsset = release.assets.find((a) => a.name.toLowerCase().endsWith(".dmg"));
+      if (macDmgAsset) {
+        const sigAsset = release.assets.find((a) => a.name === `${macDmgAsset.name}.sig`);
+        const signature = sigAsset ? await readReleaseAssetText(sigAsset) : null;
+
+        manifest.platforms["darwin-universal"] = {
+          url: `${base}/api/updates/download/${encodeURIComponent(macDmgAsset.name)}?assetId=${macDmgAsset.id}`,
+          signature: signature ?? "",
+        };
+      }
+    }
+
     for (const platform of Object.keys(manifest.platforms)) {
       const originalUrl = manifest.platforms[platform].url;
-      const filename = originalUrl.split("/").pop() || "download";
+
+      // Avoid double-rewriting links already pointing to this proxy endpoint.
+      if (isAlreadyProxiedDownloadUrl(originalUrl)) {
+        continue;
+      }
+
+      const filename = extractFilenameFromUrl(originalUrl);
 
       const assetMatch = release.assets.find((a) => a.name === filename);
 

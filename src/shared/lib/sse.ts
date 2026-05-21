@@ -46,13 +46,37 @@ class SSEManager {
     if (!clients) return;
 
     const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+    const deadClients: Response[] = [];
+    
     clients.forEach((res) => {
-      res.write(payload);
-      // For some environments like Heroku/NGINX, we might need to flush
-      if ((res as any).flush) {
-        (res as any).flush();
+      // Check if response is still writable before attempting to write
+      if (res.writableEnded || !res.writable) {
+        deadClients.push(res);
+        return;
+      }
+      
+      try {
+        res.write(payload);
+        // For some environments like Heroku/NGINX, we might need to flush
+        if ((res as any).flush) {
+          (res as any).flush();
+        }
+      } catch (err) {
+        // Write failed, mark client as dead for cleanup
+        console.error("[SSE Manager] Failed to write to client:", err);
+        deadClients.push(res);
       }
     });
+    
+    // Clean up dead clients from the Set
+    deadClients.forEach((res) => {
+      clients.delete(res);
+    });
+    
+    // Remove session entry if no clients remain
+    if (clients.size === 0) {
+      this.clients.delete(sessionId);
+    }
   }
 }
 
