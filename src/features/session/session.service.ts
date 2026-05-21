@@ -17,6 +17,7 @@ import {
   ANALYTICS_SYSTEM_PROMPT,
   buildAnalyticsUserPrompt,
 } from "../../shared/prompts/analytics";
+import type { AIAnswerLiveContextMetadata } from "./ai-answer.dto";
 
 const ai = new OpenRouter({
   apiKey: process.env.OPENROUTER_API_KEY || "",
@@ -1067,6 +1068,7 @@ export async function getAIAnswer(
   isRegenerate: boolean = false,
   aiModel?: string,
   snapshotId?: string,
+  _liveContextMetadata?: AIAnswerLiveContextMetadata,
 ) {
   const session = await prisma.session.findUnique({
     where: { id },
@@ -1127,6 +1129,12 @@ export async function getAIAnswer(
   }
 
   try {
+    if (process.env.NODE_ENV !== "production") {
+      console.log("[AI Answer Debug] CIE snapshot:", {
+        resolvedQuestionLength: transcript?.length || 0,
+        cieTierSelected: contextForCall?.complexity || "unknown",
+      });
+    }
     // ── Full Prompt Budget Accounting ──────────────────────────────────────
     const systemPrompt = buildSystemMessage(contextForCall);
     const userMessage = buildUserMessage(finalTranscript, isCustomQuery, isRegenerate, contextForCall);
@@ -1194,6 +1202,7 @@ export async function appendMessage(
   answer: string,
   time?: string,
   snapshotId?: string,
+  messageId?: string,
 ) {
   const session = await prisma.session.findUnique({
     where: { id: sessionId },
@@ -1215,6 +1224,7 @@ export async function appendMessage(
     : [];
 
   const newMessage = {
+    messageId,
     role,
     question,
     answer,
@@ -1224,6 +1234,7 @@ export async function appendMessage(
   };
 
   const transcriptEntry = {
+    messageId,
     role,
     question,
     answer,
@@ -1241,6 +1252,158 @@ export async function appendMessage(
       messages: [...currentMessages, newMessage],
       transcript: [...currentTranscript, transcriptEntry],
     },
+  });
+}
+
+function normalizePatchText(text: string): string {
+  return (text || "").toLowerCase().replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
+}
+
+export async function patchTranscriptMessage(
+  sessionId: string,
+  messageId: string,
+  payload: {
+    patchedText: string;
+    originalText?: string;
+    patchedAt?: string;
+    patchedByUser?: boolean;
+    sender?: "User" | "Interviewer";
+    timestamp?: number;
+  },
+) {
+  const session = await prisma.session.findUnique({
+    where: { id: sessionId },
+    select: { messages: true, transcript: true, saveTranscription: true },
+  });
+
+  if (!session) throw new Error("Session not found");
+  if (session.saveTranscription === false) return;
+
+  const patchedText = payload.patchedText?.trim();
+  if (!patchedText) throw new Error("patchedText is required");
+
+  const patchedAt = payload.patchedAt || new Date().toISOString();
+  const patchedByUser = payload.patchedByUser !== false;
+  const originalTextNormalized = normalizePatchText(payload.originalText || "");
+  const senderRole =
+    payload.sender === "User"
+      ? "USER"
+      : payload.sender === "Interviewer"
+        ? "INTERVIEWER"
+        : undefined;
+
+  const messages = Array.isArray(session.messages) ? ([...session.messages] as any[]) : [];
+  const transcript = Array.isArray(session.transcript) ? ([...session.transcript] as any[]) : [];
+
+  const findLegacyMessageIndex = () => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i];
+      if (senderRole && m.role !== senderRole) continue;
+      const qNorm = normalizePatchText(m.question || "");
+      if (originalTextNormalized && qNorm === originalTextNormalized) return i;
+      if (
+        payload.timestamp &&
+        m.timestamp &&
+        Math.abs(new Date(m.timestamp).getTime() - payload.timestamp) < 15000
+      ) {
+        return i;
+      }
+    }
+    return -1;
+  };
+
+  const findLegacyTranscriptIndex = () => {
+    for (let i = transcript.length - 1; i >= 0; i--) {
+      const t = transcript[i];
+      if (senderRole && t.role !== senderRole) continue;
+      const cNorm = normalizePatchText(t.content || t.question || "");
+      if (originalTextNormalized && cNorm === originalTextNormalized) return i;
+      if (
+        payload.timestamp &&
+        t.createdAt &&
+        Math.abs(new Date(t.createdAt).getTime() - payload.timestamp) < 15000
+      ) {
+        return i;
+      }
+    }
+    return -1;
+  };
+
+  let messageUpdated = false;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].messageId && messages[i].messageId === messageId) {
+      const prev = messages[i];
+      messages[i] = {
+        ...prev,
+        messageId,
+        originalText: prev.originalText || prev.question,
+        patchedText,
+        patchedAt,
+        patchedByUser,
+        question: patchedText,
+      };
+      messageUpdated = true;
+      break;
+    }
+  }
+  if (!messageUpdated) {
+    const idx = findLegacyMessageIndex();
+    if (idx >= 0) {
+      const prev = messages[idx];
+      messages[idx] = {
+        ...prev,
+        messageId,
+        originalText: prev.originalText || prev.question,
+        patchedText,
+        patchedAt,
+        patchedByUser,
+        question: patchedText,
+      };
+    }
+  }
+
+  let transcriptUpdated = false;
+  for (let i = transcript.length - 1; i >= 0; i--) {
+    if (transcript[i].messageId && transcript[i].messageId === messageId) {
+      const prev = transcript[i];
+      transcript[i] = {
+        ...prev,
+        messageId,
+        originalText: prev.originalText || prev.content || prev.question,
+        patchedText,
+        patchedAt,
+        patchedByUser,
+        question: patchedText,
+        content: patchedText,
+      };
+      transcriptUpdated = true;
+      break;
+    }
+  }
+  if (!transcriptUpdated) {
+    const idx = findLegacyTranscriptIndex();
+    if (idx >= 0) {
+      const prev = transcript[idx];
+      transcript[idx] = {
+        ...prev,
+        messageId,
+        originalText: prev.originalText || prev.content || prev.question,
+        patchedText,
+        patchedAt,
+        patchedByUser,
+        question: patchedText,
+        content: patchedText,
+      };
+    }
+  }
+
+  return prisma.session.update({
+    where: { id: sessionId },
+    data: {
+      messages,
+      transcript,
+    },
+    select: { id: true, messages: true, transcript: true },
   });
 }
 

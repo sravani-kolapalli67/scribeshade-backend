@@ -3,6 +3,7 @@ import * as sessionService from "./session.service";
 import { prisma } from "../../shared/lib/prisma";
 import { SessionStatus } from "@prisma/client";
 import { AppError } from "../../shared/middleware/error.middleware";
+import { normalizeAIAnswerRequestBody } from "./ai-answer.dto";
 
 /**
  * Handles the creation of a new session.
@@ -360,20 +361,46 @@ export async function transcribe(req: Request, res: Response) {
 export async function getAIAnswer(req: Request, res: Response) {
   try {
     const id = req.params.id as string;
-    const { transcript, isCustomQuery, isRegenerate, regenerate, snapshotId, aiModel } = req.body;
+    const { isCustomQuery, isRegenerate, regenerate, snapshotId, aiModel } = req.body;
     const isRegen = !!isRegenerate || !!regenerate;
+    const normalized = normalizeAIAnswerRequestBody(req.body);
+    const resolvedQuestion = normalized.resolvedQuestion;
 
-    if (!transcript && !snapshotId) {
+    if (!resolvedQuestion && !snapshotId) {
       return res.status(400).json({ error: "No transcript or snapshotId provided" });
+    }
+
+    if (process.env.NODE_ENV !== "production") {
+      const payloadKeys = Object.keys(req.body || {});
+      console.log("[AI Answer Debug][BE] Raw request body:", req.body);
+      console.log("[AI Answer Debug][BE] Normalized request object:", normalized);
+      console.log("[AI Answer Debug] Request snapshot:", {
+        sourcePlatform: normalized.liveContextMetadata?.sourcePlatform || "unknown",
+        payloadKeysReceived: payloadKeys,
+        resolvedQuestion,
+        resolvedFrom: normalized.resolvedFrom || "none",
+        resolvedQuestionLength: resolvedQuestion?.length || 0,
+        recentTranscriptWindowCount:
+          normalized.liveContextMetadata?.recentTranscriptWindow?.length || 0,
+        previousAiAnswerPresent:
+          !!normalized.liveContextMetadata?.previousAiAnswer,
+        answerMode: normalized.liveContextMetadata?.answerMode || "auto",
+      });
+      console.log("[AI Answer Debug][BE] Processing pipeline:", {
+        step1: "normalizeAIAnswerRequestBody",
+        step2: "resolvedQuestion priority: patchedTranscript > currentQuestion > transcript",
+        step3: "sessionService.getAIAnswer(sessionId, resolvedQuestion, ...flags)",
+      });
     }
 
     const result = await sessionService.getAIAnswer(
       id,
-      transcript || "",
+      resolvedQuestion || "",
       !!isCustomQuery,
       isRegen,
       aiModel,
-      snapshotId
+      snapshotId,
+      normalized.liveContextMetadata,
     );
 
     // Set streaming headers
@@ -408,7 +435,7 @@ export async function getAIAnswer(req: Request, res: Response) {
 export async function saveMessage(req: Request, res: Response) {
   try {
     const id = req.params.id as string;
-    const { role, question, answer, time } = req.body;
+    const { role, question, answer, time, messageId } = req.body;
 
     if (!role || !question) {
       return res.status(400).json({ error: "role and question are required" });
@@ -419,7 +446,9 @@ export async function saveMessage(req: Request, res: Response) {
       role as any,
       question,
       answer ?? "",
-      time
+      time,
+      undefined,
+      messageId
     );
     // appendMessage returns undefined for ephemeral sessions (saveTranscription === false).
     // Respond with an empty messages array so the client behaves consistently.
@@ -429,6 +458,32 @@ export async function saveMessage(req: Request, res: Response) {
     return res
       .status(500)
       .json({ error: error.message || "Internal server error" });
+  }
+}
+
+export async function patchTranscriptMessage(req: Request, res: Response) {
+  try {
+    const id = req.params.id as string;
+    const messageId = req.params.messageId as string;
+    const { patchedText, originalText, patchedAt, patchedByUser, sender, timestamp } = req.body ?? {};
+
+    if (!id || !messageId || !patchedText) {
+      return res.status(400).json({ error: "session id, messageId and patchedText are required" });
+    }
+
+    const updated = await sessionService.patchTranscriptMessage(id, messageId, {
+      patchedText,
+      originalText,
+      patchedAt,
+      patchedByUser,
+      sender,
+      timestamp,
+    });
+
+    return res.json({ success: true, data: updated });
+  } catch (error: any) {
+    console.error("Patch Transcript Message Error:", error);
+    return res.status(500).json({ error: error.message || "Internal server error" });
   }
 }
 

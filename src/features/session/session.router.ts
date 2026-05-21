@@ -73,6 +73,7 @@ router.post("/:id/ai-answer", sessionController.getAIAnswer);
  * @access Private
  */
 router.post("/:id/save-message", sessionController.saveMessage);
+router.patch("/:id/transcript/:messageId", sessionController.patchTranscriptMessage);
 
 /**
  * @route GET /session/:id/analytics/existing
