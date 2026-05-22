@@ -18,6 +18,16 @@ import {
   buildAnalyticsUserPrompt,
 } from "../../shared/prompts/analytics";
 import type { AIAnswerLiveContextMetadata } from "./ai-answer.dto";
+import { buildRequestScopedPolicy } from "./answer-policy";
+import {
+  buildEffectiveLiveContextMetadata,
+  deriveTopic,
+  guardCurrentQuestion,
+  isCodeFollowupQuestion,
+  resolveFollowupTarget,
+  selectTargetCodeContext,
+  toAnswerHistory,
+} from "./answer-quality";
 
 const ai = new OpenRouter({
   apiKey: process.env.OPENROUTER_API_KEY || "",
@@ -1068,11 +1078,26 @@ export async function getAIAnswer(
   isRegenerate: boolean = false,
   aiModel?: string,
   snapshotId?: string,
-  _liveContextMetadata?: AIAnswerLiveContextMetadata,
+  liveContextMetadata?: AIAnswerLiveContextMetadata,
 ) {
   const session = await prisma.session.findUnique({
     where: { id },
-    include: { company: true },
+    select: {
+      id: true,
+      company: true,
+      companyId: true,
+      companyName: true,
+      messages: true,
+      jobDescription: true,
+      language: true,
+      simpleLanguage: true,
+      extraContext: true,
+      resumeId: true,
+      documentId: true,
+      projectIds: true,
+      userId: true,
+      saveTranscription: true,
+    },
   });
 
   if (!session) {
@@ -1136,11 +1161,142 @@ export async function getAIAnswer(
       });
     }
     // ── Full Prompt Budget Accounting ──────────────────────────────────────
+    const originalResolvedQuestion = finalTranscript;
+    const guard = guardCurrentQuestion({
+      resolvedQuestion: originalResolvedQuestion,
+      recentTranscriptWindow: liveContextMetadata?.recentTranscriptWindow,
+    });
+    const history = toAnswerHistory((session as any).messages);
+    const followup = resolveFollowupTarget({
+      question: guard.resolvedCurrentQuestion,
+      history,
+      selectedAnswerId: liveContextMetadata?.selectedAnswerId,
+      selectedAnswerQuestion: liveContextMetadata?.selectedAnswerQuestion,
+      selectedAnswerText: liveContextMetadata?.selectedAnswerText,
+      selectedAnswerCodeBlocks: liveContextMetadata?.selectedAnswerCodeBlocks,
+      selectedAnswerTopic: liveContextMetadata?.selectedAnswerTopic,
+    });
+    const metadataForRequest = isRegenerate
+      ? liveContextMetadata
+      : followup.isExplicitFollowupReference
+      ? liveContextMetadata
+      : {
+          ...liveContextMetadata,
+          previousAiAnswer: undefined,
+          previousCodeBlocks: undefined,
+          selectedAnswerId: undefined,
+          selectedAnswerQuestion: undefined,
+          selectedAnswerText: undefined,
+          selectedAnswerCodeBlocks: undefined,
+          selectedAnswerTopic: undefined,
+        };
+    const selectedTargetForRequest =
+      isRegenerate && followup.target
+      ? followup.target
+      : followup.isExplicitFollowupReference
+      ? followup.target
+      : null;
+    const effectiveMetadata = buildEffectiveLiveContextMetadata({
+      metadata: metadataForRequest,
+      question: guard.resolvedCurrentQuestion,
+      selectedTarget: selectedTargetForRequest,
+    });
+    const selectedCodeContext = selectTargetCodeContext(selectedTargetForRequest);
+
     const systemPrompt = buildSystemMessage(contextForCall);
-    const userMessage = buildUserMessage(finalTranscript, isCustomQuery, isRegenerate, contextForCall);
+    const baseUserMessage = buildUserMessage(
+      guard.resolvedCurrentQuestion,
+      isCustomQuery,
+      isRegenerate,
+      contextForCall,
+    );
+    const policy = buildRequestScopedPolicy({
+      question: guard.resolvedCurrentQuestion,
+      metadata: effectiveMetadata,
+      cieComplexity: contextForCall?.complexity,
+    });
+    const codeFollowupConstraint =
+      followup.isExplicitFollowupReference &&
+      isCodeFollowupQuestion(guard.resolvedCurrentQuestion) &&
+      selectedCodeContext.codeBlocks.length > 0
+        ? "\n- Answer ONLY using the selected prior answer/code as the follow-up target. Do not substitute resume/project context unless user explicitly asks for experience."
+        : "";
+    const selectedAnswerExcerptBlock =
+      (followup.isExplicitFollowupReference || isRegenerate) &&
+      !isCodeFollowupQuestion(guard.resolvedCurrentQuestion) &&
+      selectedTargetForRequest?.answer?.trim() &&
+      (followup.targetConfidence ?? 0) >= 0.6
+        ? `\nFOLLOW-UP ANSWER CONTEXT (for this request only):\nSelected prior answer excerpt:\n${selectedTargetForRequest.answer
+            .trim()
+            .slice(0, 800)}`
+        : "";
+    const noCodeFollowupGuidance =
+      (followup.isExplicitFollowupReference || isRegenerate) &&
+      isCodeFollowupQuestion(guard.resolvedCurrentQuestion) &&
+      selectedCodeContext.codeBlocks.length === 0
+        ? "\nFOLLOW-UP CONTEXT: I do not have a previous code/query in this session to explain. State this briefly, then provide generic guidance."
+        : "";
+    const strictFollowupBindingApplied = Boolean(
+      selectedTargetForRequest &&
+      (codeFollowupConstraint || selectedAnswerExcerptBlock),
+    );
+    const regenerateInstructionBlock =
+      isRegenerate && (liveContextMetadata as any)?.regenerateInstruction
+        ? `\nREGENERATE INSTRUCTION:\n${String((liveContextMetadata as any).regenerateInstruction).slice(0, 500)}`
+        : "";
+    const regenerateUsedOriginalQuestion = Boolean(
+      isRegenerate && guard.resolvedCurrentQuestion?.trim(),
+    );
+    const regenerateUsedOriginalTranscript = Boolean(
+      isRegenerate && transcript?.trim(),
+    );
+    const regeneratePreservedSelectedTarget = Boolean(
+      isRegenerate &&
+      (liveContextMetadata?.selectedAnswerId || selectedTargetForRequest),
+    );
+    const regenerateInstructionApplied = Boolean(
+      isRegenerate &&
+      (liveContextMetadata as any)?.regenerateInstruction,
+    );
+    const userMessage = `${policy.policyBlock}${codeFollowupConstraint}\n${policy.codeContextBlock}${selectedAnswerExcerptBlock}${noCodeFollowupGuidance}${regenerateInstructionBlock}\n\n${baseUserMessage}`;
     const systemTokens = estimatePromptTokens(systemPrompt);
     const userTokens = estimatePromptTokens(userMessage);
     console.log(`[CIE] Prompt breakdown | system: ${systemTokens}t | user: ${userTokens}t | total: ${systemTokens + userTokens}t | complexity: ${contextForCall?.complexity || 'unknown'}`);
+    if (process.env.NODE_ENV !== "production") {
+      console.log("[AI Answer Policy][BE]", {
+        resolvedCurrentQuestion: guard.resolvedCurrentQuestion,
+        questionPollutionDetected: guard.questionPollutionDetected,
+        isExplicitFollowupReference: followup.isExplicitFollowupReference,
+        selectedAnswerIdFromFrontend: liveContextMetadata?.selectedAnswerId || null,
+        selectedAnswerIgnoredReason: followup.selectedAnswerIgnoredReason || null,
+        answerMemoryCount: history.length,
+        selectedFollowupTargetId: selectedTargetForRequest?.id || null,
+        followupTargetId: selectedTargetForRequest?.id || null,
+        selectedFollowupTopic: selectedTargetForRequest?.topic || null,
+        followupTargetTopic: selectedTargetForRequest?.topic || null,
+        reasonForNoTarget: followup.reasonForNoTarget || null,
+        selectedCodeBlockLanguage: selectedCodeContext.language,
+        selectedCodeBlockPreview: selectedCodeContext.preview,
+        followupTargetSource: followup.source,
+        followupTargetHasCode: !!selectedTargetForRequest?.codeBlocks?.length,
+        strictFollowupBindingApplied,
+        isRegenerate,
+        regenerateTargetAnswerId:
+          (liveContextMetadata as any)?.regenerateTargetAnswerId || null,
+        regenerateUsedOriginalQuestion,
+        regenerateUsedOriginalTranscript,
+        regeneratePreservedSelectedTarget,
+        regenerateInstructionApplied,
+        questionTopic: deriveTopic(guard.resolvedCurrentQuestion, effectiveMetadata.previousAiAnswer),
+        answerIntent: policy.answerIntent,
+        effectiveAnswerMode: policy.effectiveAnswerMode,
+        isCodeFollowup: policy.isCodeFollowup,
+        codeBlocksInjectedCount: policy.codeBlocksInjectedCount,
+        previousAiAnswerExcerptLength: policy.previousAiAnswerExcerptLength,
+        experienceSuppressed: policy.experienceSuppressed,
+        cieTierSelected: contextForCall?.complexity || "unknown",
+      });
+    }
 
     const result = ai.callModel({
       model: targetModel,

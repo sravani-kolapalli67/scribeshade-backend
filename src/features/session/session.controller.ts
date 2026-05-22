@@ -375,6 +375,10 @@ export async function getAIAnswer(req: Request, res: Response) {
       console.log("[AI Answer Debug][BE] Raw request body:", req.body);
       console.log("[AI Answer Debug][BE] Normalized request object:", normalized);
       console.log("[AI Answer Debug] Request snapshot:", {
+        isRegenerate: isRegen,
+        regenerateTargetAnswerId:
+          req.body?.regenerateTargetAnswerId || null,
+        regenerateInstructionApplied: !!req.body?.regenerateInstruction,
         sourcePlatform: normalized.liveContextMetadata?.sourcePlatform || "unknown",
         payloadKeysReceived: payloadKeys,
         resolvedQuestion,
@@ -384,6 +388,14 @@ export async function getAIAnswer(req: Request, res: Response) {
           normalized.liveContextMetadata?.recentTranscriptWindow?.length || 0,
         previousAiAnswerPresent:
           !!normalized.liveContextMetadata?.previousAiAnswer,
+        selectedAnswerIdFromFrontend:
+          normalized.liveContextMetadata?.selectedAnswerId || null,
+        selectedAnswerQuestionPresent:
+          !!normalized.liveContextMetadata?.selectedAnswerQuestion,
+        selectedAnswerTextPresent:
+          !!normalized.liveContextMetadata?.selectedAnswerText,
+        selectedAnswerCodeBlocksCount:
+          normalized.liveContextMetadata?.selectedAnswerCodeBlocks?.length || 0,
         answerMode: normalized.liveContextMetadata?.answerMode || "auto",
       });
       console.log("[AI Answer Debug][BE] Processing pipeline:", {

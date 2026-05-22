@@ -5,6 +5,9 @@ export const AI_ANSWER_LIMITS = {
   previousAiAnswerMaxChars: 1000,
   previousCodeBlocksMax: 2,
   previousCodeBlockMaxChars: 1500,
+  selectedAnswerQuestionMaxChars: 500,
+  selectedAnswerTextMaxChars: 1000,
+  selectedAnswerTopicMaxChars: 80,
 } as const;
 
 const speakerTypeSchema = z.enum([
@@ -51,8 +54,29 @@ export const aiAnswerRequestSchema = z.object({
     .array(z.string().max(AI_ANSWER_LIMITS.previousCodeBlockMaxChars))
     .max(AI_ANSWER_LIMITS.previousCodeBlocksMax)
     .optional(),
+  selectedAnswerId: z.string().trim().min(1).max(120).optional(),
+  selectedAnswerQuestion: z
+    .string()
+    .max(AI_ANSWER_LIMITS.selectedAnswerQuestionMaxChars)
+    .optional(),
+  selectedAnswerText: z
+    .string()
+    .max(AI_ANSWER_LIMITS.selectedAnswerTextMaxChars)
+    .optional(),
+  selectedAnswerCodeBlocks: z
+    .array(z.string().max(AI_ANSWER_LIMITS.previousCodeBlockMaxChars))
+    .max(AI_ANSWER_LIMITS.previousCodeBlocksMax)
+    .optional(),
+  selectedAnswerTopic: z
+    .string()
+    .max(AI_ANSWER_LIMITS.selectedAnswerTopicMaxChars)
+    .optional(),
   answerMode: answerModeSchema.optional(),
   sourcePlatform: sourcePlatformSchema.optional(),
+  isRegenerate: z.boolean().optional(),
+  regenerate: z.boolean().optional(),
+  regenerateTargetAnswerId: z.string().trim().min(1).max(120).optional(),
+  regenerateInstruction: z.string().trim().min(1).max(500).optional(),
 });
 
 export type AIAnswerRequestDTO = z.infer<typeof aiAnswerRequestSchema>;
@@ -91,6 +115,27 @@ export function normalizeAIAnswerRequestBody(
               : b,
           )
       : body.previousCodeBlocks,
+    selectedAnswerQuestion:
+      typeof body.selectedAnswerQuestion === "string"
+        ? body.selectedAnswerQuestion.slice(0, AI_ANSWER_LIMITS.selectedAnswerQuestionMaxChars)
+        : body.selectedAnswerQuestion,
+    selectedAnswerText:
+      typeof body.selectedAnswerText === "string"
+        ? body.selectedAnswerText.slice(0, AI_ANSWER_LIMITS.selectedAnswerTextMaxChars)
+        : body.selectedAnswerText,
+    selectedAnswerTopic:
+      typeof body.selectedAnswerTopic === "string"
+        ? body.selectedAnswerTopic.slice(0, AI_ANSWER_LIMITS.selectedAnswerTopicMaxChars)
+        : body.selectedAnswerTopic,
+    selectedAnswerCodeBlocks: Array.isArray(body.selectedAnswerCodeBlocks)
+      ? body.selectedAnswerCodeBlocks
+          .slice(0, AI_ANSWER_LIMITS.previousCodeBlocksMax)
+          .map((b: any) =>
+            typeof b === "string"
+              ? b.slice(0, AI_ANSWER_LIMITS.previousCodeBlockMaxChars)
+              : b,
+          )
+      : body.selectedAnswerCodeBlocks,
     recentTranscriptWindow: Array.isArray(body.recentTranscriptWindow)
       ? body.recentTranscriptWindow.slice(-AI_ANSWER_LIMITS.recentTranscriptWindowMax)
       : body.recentTranscriptWindow,
