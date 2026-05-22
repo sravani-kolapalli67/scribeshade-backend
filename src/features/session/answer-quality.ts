@@ -19,6 +19,9 @@ export interface AnswerHistoryEntry {
 
 export interface GuardResult {
   resolvedCurrentQuestion: string;
+  originalResolvedQuestion: string;
+  reconstructedResolvedQuestion: string;
+  weakQuestionReconstructedBackend: boolean;
   questionPollutionDetected: boolean;
 }
 
@@ -37,10 +40,24 @@ const EXPLICIT_EXPERIENCE_RE =
 const CODE_REF_RE =
   /\b(this code|your code|the code you wrote|above code|previous code|first line|that query|the query|query you wrote|query you wrote before|that code|what does this code do|explain it|optimi[sz]e it|debug it|previous answer|above answer)\b/i;
 const FOLLOWUP_RE =
-  /\b(explain this|explain that|expand on that|can you expand|can you explain more|why did you use this|what does this mean|previous answer|above answer|before|you wrote|you said|repeat the answer|what did you say)\b/i;
+  /\b(explain this|explain that|expand on that|can you expand|can you explain more|can you explain that|tell me more about that|tell me more|why did you use this|what does this mean|previous answer|above answer|before|you wrote|you said|you mentioned|in your previous project|previously you said|the approach|that approach|repeat the answer|what did you say)\b/i;
 const VAGUE_DEICTIC_RE =
-  /^(?:explain it|continue|why\??|how so\??|elaborate|expand)\s*$/i;
+  /^(?:that|this|that approach|this approach|explain it|explain that|explain this|can you explain that|can you explain this|continue|tell me more|tell me more about that|why\??|how so\??|elaborate|expand)\s*$/i;
 const HIGH_CONFIDENCE_THRESHOLD = 1.5;
+const STRONG_TOPIC_TERMS = [
+  "mongodb",
+  "mongo",
+  "mongoose",
+  "user event",
+  "user events",
+  "event logs",
+  "tracking",
+  "project",
+  "previous",
+  "mentioned",
+  "approach",
+  "analytics",
+];
 
 function normalizeSpaces(text: string): string {
   return (text || "").replace(/\s+/g, " ").trim();
@@ -52,6 +69,57 @@ function normLoose(text: string): string {
 
 function tokenize(text: string): string[] {
   return normLoose(text).split(" ").filter(Boolean);
+}
+
+function hasStrongTopicTerms(text: string): boolean {
+  const n = normLoose(text);
+  if (!n) return false;
+  return STRONG_TOPIC_TERMS.some((t) => n.includes(t));
+}
+
+function isWeakDeicticQuestion(text: string): boolean {
+  const n = normLoose(text);
+  if (!n) return false;
+  return /^(that|this|that approach|this approach|explain that|explain this|can you explain that|can you explain this|tell me more|tell me more about that|explain it|how so|why|continue)\??$/.test(
+    n,
+  );
+}
+
+function reconstructWeakFollowupFromTranscript(
+  currentQuestion: string,
+  recentTranscriptWindow?: string[],
+): { reconstructed: string; chunksUsed: string[] } {
+  const question = normalizeSpaces(currentQuestion);
+  const chunks = (recentTranscriptWindow || [])
+    .slice(-10)
+    .map((line) => normalizeSpaces(line.replace(/^\[[^\]]+\]:\s*/, "")))
+    .filter(Boolean);
+  const deduped: string[] = [];
+  for (const c of chunks) {
+    const isDup = deduped.some((d) => tokenOverlap(d, c) >= 0.9);
+    if (!isDup) deduped.push(c);
+  }
+  const scored = deduped.map((chunk) => {
+    const n = normLoose(chunk);
+    let score = 0;
+    for (const term of STRONG_TOPIC_TERMS) {
+      if (n.includes(term)) score += 2;
+    }
+    if (chunk.includes("?")) score += 1;
+    return { chunk, score };
+  });
+  const relevant = [...scored]
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 8)
+    .sort((a, b) => deduped.indexOf(a.chunk) - deduped.indexOf(b.chunk))
+    .map((x) => x.chunk);
+  const merged = normalizeSpaces(relevant.join(" "));
+  if (!merged) return { reconstructed: question, chunksUsed: relevant };
+  const suffix = question.endsWith("?") ? question : `${question}?`;
+  const reconstructed = /(\bthat\b|\bthis\b|\bapproach\b)/i.test(question)
+    ? normalizeSpaces(`${merged.replace(/[?]+$/g, "")}. ${suffix}`)
+    : merged;
+  return { reconstructed, chunksUsed: relevant };
 }
 
 function tokenOverlap(a: string, b: string): number {
@@ -109,11 +177,23 @@ export function guardCurrentQuestion(input: {
 }): GuardResult {
   const initial = normalizeSpaces(input.resolvedQuestion);
   if (!initial) {
-    return { resolvedCurrentQuestion: "", questionPollutionDetected: false };
+    return {
+      resolvedCurrentQuestion: "",
+      originalResolvedQuestion: "",
+      reconstructedResolvedQuestion: "",
+      weakQuestionReconstructedBackend: false,
+      questionPollutionDetected: false,
+    };
   }
 
   if (FILLER_ONLY_RE.test(initial)) {
-    return { resolvedCurrentQuestion: initial, questionPollutionDetected: false };
+    return {
+      resolvedCurrentQuestion: initial,
+      originalResolvedQuestion: initial,
+      reconstructedResolvedQuestion: initial,
+      weakQuestionReconstructedBackend: false,
+      questionPollutionDetected: false,
+    };
   }
 
   let cleaned = initial;
@@ -133,8 +213,20 @@ export function guardCurrentQuestion(input: {
     }
   }
 
+  let weakQuestionReconstructedBackend = false;
+  if (isWeakDeicticQuestion(cleaned) && hasStrongTopicTerms(transcriptTail)) {
+    const rebuilt = reconstructWeakFollowupFromTranscript(cleaned, input.recentTranscriptWindow);
+    if (rebuilt.reconstructed && rebuilt.reconstructed !== cleaned) {
+      cleaned = rebuilt.reconstructed;
+      weakQuestionReconstructedBackend = true;
+    }
+  }
+
   return {
     resolvedCurrentQuestion: cleaned,
+    originalResolvedQuestion: initial,
+    reconstructedResolvedQuestion: cleaned,
+    weakQuestionReconstructedBackend,
     questionPollutionDetected: polluted,
   };
 }
@@ -147,12 +239,16 @@ export function extractCodeBlocksFromText(text: string): string[] {
 
 function deriveTopicFromText(text: string): string {
   const t = normLoose(text);
-  if (/\b(sql|postgres|postgresql|query|join|table|index)\b/.test(t)) return "sql";
-  if (/\b(mongodb|mongo|aggregation|pipeline|nosql)\b/.test(t)) return "mongodb";
+  if (/\b(mongoose|mongodb|mongo|aggregation|pipeline|nosql|collection|schema|event logs?|user events?)\b/.test(t)) return "mongodb";
+  if (/\b(sql|postgres|postgresql|select|query|join|table|index)\b/.test(t)) return "sql";
   if (/\b(react|jsx|hooks|component)\b/.test(t)) return "react";
   if (/\b(pyspark|spark|datalake|databricks)\b/.test(t)) return "pyspark";
   if (/\b(node|express|api|backend)\b/.test(t)) return "backend";
   return "general";
+}
+
+export function deriveTopicFromAnyText(text: string): string {
+  return deriveTopicFromText(text);
 }
 
 export function deriveTopic(question: string, previousAiAnswer?: string): string {
@@ -167,6 +263,12 @@ function scoreTarget(question: string, currentTopic: string, entry: AnswerHistor
   score += tokenOverlap(q, `${entry.question} ${entry.answer}`) * 5;
   if (CODE_REF_RE.test(q) && entry.codeBlocks.length > 0) score += 3;
   return score;
+}
+
+function hasExplicitSelectedAnswerReference(question: string): boolean {
+  return /\b(this answer|that answer|selected answer|this card|that card|above answer)\b/i.test(
+    question || "",
+  );
 }
 
 export function toAnswerHistory(messagesRaw: unknown): AnswerHistoryEntry[] {
@@ -211,6 +313,8 @@ export function resolveFollowupTarget(input: {
   const selectedAnswerQuestion = input.selectedAnswerQuestion?.trim();
   const selectedAnswerCodeBlocks = (input.selectedAnswerCodeBlocks || []).filter(Boolean);
   const selectedAnswerTopic = input.selectedAnswerTopic?.trim();
+  const explicitSelectedAnswerReference = hasExplicitSelectedAnswerReference(q);
+  let selectedAnswerIgnoredReason: string | undefined;
 
   if (!isExplicitFollowupReference) {
     return {
@@ -226,13 +330,27 @@ export function resolveFollowupTarget(input: {
 
   if (selectedAnswerId) {
     const exact = history.find((h) => h.id === selectedAnswerId);
+    const currentTopicForSelected = deriveTopicFromText(q);
+    const selectedTopicExact = exact?.topic || selectedAnswerTopic || "";
+    const selectedTextExact = `${exact?.question || selectedAnswerQuestion || ""} ${exact?.answer || selectedAnswerText || ""}`;
+    const selectedOverlapExact = tokenOverlap(q, selectedTextExact);
+    const selectedTopicCompatibleExact =
+      explicitSelectedAnswerReference ||
+      currentTopicForSelected === "general" ||
+      !selectedTopicExact ||
+      selectedTopicExact === currentTopicForSelected ||
+      selectedOverlapExact >= 0.2;
     if (exact) {
-      return {
-        target: exact,
-        source: "selected_answer",
-        isExplicitFollowupReference: true,
-        targetConfidence: 1,
-      };
+      if (!selectedTopicCompatibleExact) {
+        selectedAnswerIgnoredReason = "topic_mismatch";
+      } else {
+        return {
+          target: exact,
+          source: "selected_answer",
+          isExplicitFollowupReference: true,
+          targetConfidence: 1,
+        };
+      }
     }
 
     if (selectedAnswerText || selectedAnswerQuestion || selectedAnswerCodeBlocks.length > 0) {
@@ -247,12 +365,24 @@ export function resolveFollowupTarget(input: {
           deriveTopicFromText(`${selectedAnswerQuestion || ""} ${selectedAnswerText || ""}`),
         orderIndex: Number.MAX_SAFE_INTEGER,
       };
-      return {
-        target: synthetic,
-        source: "selected_answer",
-        isExplicitFollowupReference: true,
-        targetConfidence: 0.95,
-      };
+      const selectedTextSynthetic = `${synthetic.question} ${synthetic.answer}`;
+      const selectedOverlapSynthetic = tokenOverlap(q, selectedTextSynthetic);
+      const selectedTopicCompatibleSynthetic =
+        explicitSelectedAnswerReference ||
+        currentTopicForSelected === "general" ||
+        !synthetic.topic ||
+        synthetic.topic === currentTopicForSelected ||
+        selectedOverlapSynthetic >= 0.2;
+      if (!selectedTopicCompatibleSynthetic) {
+        selectedAnswerIgnoredReason = "topic_mismatch";
+      } else {
+        return {
+          target: synthetic,
+          source: "selected_answer",
+          isExplicitFollowupReference: true,
+          targetConfidence: 0.95,
+        };
+      }
     }
   }
 
@@ -281,6 +411,7 @@ export function resolveFollowupTarget(input: {
         target: bestCode.entry,
         source: "topic_match",
         isExplicitFollowupReference: true,
+        ...(selectedAnswerIgnoredReason ? { selectedAnswerIgnoredReason } : {}),
         targetConfidence: Math.min(1, bestCode.score / 10),
       };
     }
@@ -290,6 +421,7 @@ export function resolveFollowupTarget(input: {
         target: latestCode,
         source: "latest_code",
         isExplicitFollowupReference: true,
+        ...(selectedAnswerIgnoredReason ? { selectedAnswerIgnoredReason } : {}),
         targetConfidence: 0.7,
       };
     }
@@ -297,6 +429,7 @@ export function resolveFollowupTarget(input: {
       target: null,
       source: "none",
       isExplicitFollowupReference: true,
+      ...(selectedAnswerIgnoredReason ? { selectedAnswerIgnoredReason } : {}),
       reasonForNoTarget: "explicit_code_followup_but_no_code_target",
     };
   }
@@ -306,6 +439,7 @@ export function resolveFollowupTarget(input: {
       target: scored[0].entry,
       source: "topic_match",
       isExplicitFollowupReference: true,
+      ...(selectedAnswerIgnoredReason ? { selectedAnswerIgnoredReason } : {}),
       targetConfidence: Math.min(1, scored[0].score / 10),
     };
   }
@@ -316,6 +450,7 @@ export function resolveFollowupTarget(input: {
       target: immediate,
       source: "immediate_previous",
       isExplicitFollowupReference: true,
+      ...(selectedAnswerIgnoredReason ? { selectedAnswerIgnoredReason } : {}),
       targetConfidence: 0.55,
     };
   }
@@ -324,6 +459,7 @@ export function resolveFollowupTarget(input: {
     target: null,
     source: "none",
     isExplicitFollowupReference: true,
+    ...(selectedAnswerIgnoredReason ? { selectedAnswerIgnoredReason } : {}),
     reasonForNoTarget: "explicit_followup_reference_but_low_confidence_target",
   };
 }

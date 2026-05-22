@@ -56,6 +56,22 @@ export type QuestionComplexity =
   | "scenario_based"
   | "system_design";
 
+export function isProjectExperienceQuestion(query: string | undefined): boolean {
+  if (!query || !query.trim()) return false;
+  const normalized = query.toLowerCase().trim();
+  return /\b(projects?|portfolio|what (did|have) you build|tell me about (your|the) project|problem statement|tech stack|architecture|design choices?|impact|metrics|kpis?|challenges?|my role|your role|implemented|worked on)\b/i.test(
+    normalized,
+  );
+}
+
+export function isProjectOverviewQuestion(query: string | undefined): boolean {
+  if (!query || !query.trim()) return false;
+  const normalized = query.toLowerCase().trim();
+  return /\b(explain|describe|tell me about|walk me through|list|share)\b[\s\w]{0,30}\b(projects|project work|work done|things you built)\b/i.test(
+    normalized,
+  );
+}
+
 /**
  * Per-source token budgets for each complexity tier.
  * Sources with budget 0 are skipped entirely (no DB fetch).
@@ -246,8 +262,13 @@ export function extractRelevantProjectContext(
     }
   }
 
-  // Sort by score desc, fallback to original order
-  scoredProjects.sort((a, b) => b.score - a.score);
+  // For broad "tell me about your projects" asks, keep original order so all
+  // selected projects are represented instead of over-favoring one match.
+  const overviewMode = isProjectOverviewQuestion(query);
+  if (!overviewMode) {
+    // Sort by score desc, fallback to original order
+    scoredProjects.sort((a, b) => b.score - a.score);
+  }
 
   // Serialize up to token budget
   const serializedList: string[] = [];
@@ -275,19 +296,23 @@ export function extractRelevantProjectContext(
 
     // Add sections but in a very dense format
     const sections: any[] = Array.isArray(p.sections) ? p.sections : [];
+    const maxBulletsPerSection = overviewMode ? 2 : 3;
+    const maxNarrativeChars = overviewMode ? 130 : 200;
     for (const sec of sections) {
       if (!sec?.type || !sec?.content || sec.type === "tech_tags") continue;
       
       const title = sec.title || sec.key || sec.type;
       
       if (sec.type === "bullets" && Array.isArray(sec.content)) {
-        // Only take the top 3 bullets to conserve space
-        const bullets = sec.content.slice(0, 3).map((b: string) => ` • ${b}`);
+        // Keep compact summaries in overview mode so more projects fit.
+        const bullets = sec.content
+          .slice(0, maxBulletsPerSection)
+          .map((b: string) => ` • ${b}`);
         if (bullets.length > 0) {
           lines.push(`[${title}]:\n${bullets.join("\n")}`);
         }
       } else if (sec.type === "narrative" && typeof sec.content === "string") {
-        lines.push(`[${title}]: ${sec.content.trim().substring(0, 200)}...`);
+        lines.push(`[${title}]: ${sec.content.trim().substring(0, maxNarrativeChars)}...`);
       } else if (sec.type === "star_story") {
         const s = sec.content as any;
         const starParts = [
@@ -486,7 +511,34 @@ export async function buildOptimizedContext(
 
   // ── Step 1: Classify question complexity ──────────────────────────────────
   const complexity = classifyComplexity(query);
-  const budgets = COMPLEXITY_BUDGETS[complexity];
+  const baseBudgets = COMPLEXITY_BUDGETS[complexity];
+  const hasSelectedProjects =
+    Array.isArray(session.projectIds) &&
+    (session.projectIds as string[]).length > 0;
+  const isProjectQuestion = isProjectExperienceQuestion(query);
+  const isProjectOverview = isProjectOverviewQuestion(query);
+  const projectPriorityActive = hasSelectedProjects && isProjectQuestion;
+  const budgets = projectPriorityActive
+    ? {
+        ...baseBudgets,
+        resume: 0,
+        projects: isProjectOverview
+          ? Math.max(
+              baseBudgets.projects + baseBudgets.resume,
+              2400,
+            )
+          : Math.min(
+              baseBudgets.total,
+              baseBudgets.projects + baseBudgets.resume,
+            ),
+        total: isProjectOverview
+          ? Math.max(
+              baseBudgets.total,
+              baseBudgets.projects + baseBudgets.resume + 1400,
+            )
+          : baseBudgets.total,
+      }
+    : baseBudgets;
   const effectiveBudget = targetBudget ?? budgets.total;
 
   const queryPreview = query ? query.slice(0, 80) : "(no query)";
@@ -494,7 +546,7 @@ export async function buildOptimizedContext(
   console.log(`[CIE] Complexity: ${complexity} | Query: "${queryPreview}" (${wordCount} words)`);
 
   // ── Step 2: Conditionally fetch only what the tier needs ──────────────────
-  const includeResume = shouldIncludeResume(complexity);
+  const includeResume = shouldIncludeResume(complexity) && !projectPriorityActive;
   const includeProjects = shouldIncludeProjects(complexity);
   const includeDocuments = shouldIncludeDocuments(complexity);
   const includeHistory = shouldIncludeHistory(complexity);
@@ -624,6 +676,9 @@ export async function buildOptimizedContext(
     history: finalHistory || "No previous interactions in this session.",
     vectorContext: vectorContext || null,
     complexity,
+    hasSelectedProjects,
+    projectPriorityMode: "project_questions_only",
+    isProjectQuestion,
   };
 }
 

@@ -23,6 +23,21 @@ test("guards polluted joined question without over-truncating multipart", () => 
   assert.match(multi.resolvedCurrentQuestion, /ACID/i);
 });
 
+test("reconstructs weak backend deictic followup from transcript window", () => {
+  const out = guardCurrentQuestion({
+    resolvedQuestion: "that approach?",
+    recentTranscriptWindow: [
+      "[Interviewer]: In your previous project",
+      "[Interviewer]: you mentioned you used MongoDB",
+      "[Interviewer]: to track user events.",
+      "[Interviewer]: Can you explain that approach?",
+    ],
+  });
+  assert.equal(out.weakQuestionReconstructedBackend, true);
+  assert.match(out.reconstructedResolvedQuestion, /mongodb/i);
+  assert.match(out.reconstructedResolvedQuestion, /user events?/i);
+});
+
 test("prefers relevant historical SQL code target over latest unrelated answer", () => {
   const history = toAnswerHistory([
     {
@@ -84,7 +99,7 @@ test("sql followup beats unrelated resume-like pyspark context", () => {
   assert.doesNotMatch(codeCtx.preview || "", /pyspark|datalake/i);
 });
 
-test("selected answer id has highest priority", () => {
+test("selected answer id is ignored when topic mismatches reconstructed question", () => {
   const history = toAnswerHistory([
     {
       messageId: "react-1",
@@ -103,14 +118,44 @@ test("selected answer id has highest priority", () => {
   ]);
 
   const target = resolveFollowupTarget({
-    question: "Explain this answer",
+    question: "In your previous project, explain MongoDB user events approach",
     history,
     selectedAnswerId: "react-1",
+    selectedAnswerTopic: "react",
   });
 
+  assert.notEqual(target.target?.id, "react-1");
+  assert.equal(target.selectedAnswerIgnoredReason, "topic_mismatch");
+  assert.equal(target.source, "topic_match");
+  assert.equal(target.isExplicitFollowupReference, true);
+});
+
+test("selected answer id is used when explicitly referenced", () => {
+  const history = toAnswerHistory([
+    {
+      messageId: "react-1",
+      role: "AI_ASSISTANT",
+      question: "What is React",
+      answer: "React is a UI library",
+      timestamp: new Date("2026-05-21T10:00:00Z").toISOString(),
+    },
+    {
+      messageId: "mongo-2",
+      role: "AI_ASSISTANT",
+      question: "MongoDB tracking",
+      answer: "Use MongoDB event collections",
+      timestamp: new Date("2026-05-21T10:01:00Z").toISOString(),
+    },
+  ]);
+
+  const target = resolveFollowupTarget({
+    question: "Explain this selected answer card in detail",
+    history,
+    selectedAnswerId: "react-1",
+    selectedAnswerTopic: "react",
+  });
   assert.equal(target.target?.id, "react-1");
   assert.equal(target.source, "selected_answer");
-  assert.equal(target.isExplicitFollowupReference, true);
 });
 
 test("code followup with no code target returns none", () => {

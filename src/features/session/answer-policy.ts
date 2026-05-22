@@ -18,6 +18,8 @@ const CROSS_INTENT_CONCEPT_RE =
   /\b(what is|what are|explain|define|difference between|how does)\b/i;
 const EXPLICIT_EXPERIENCE_RE =
   /\b(your experience|your project|your company|tell me about your project|from your project|in your company|in your project)\b/i;
+const PROJECT_OVERVIEW_RE =
+  /\b(explain|describe|tell me about|walk me through|list|share)\b[\s\w]{0,30}\b(projects|project work|work done|things you built)\b/i;
 const CODE_REF_RE =
   /\b(this code|above code|previous code|code you wrote|that code|the query|query you wrote|query you wrote before|first line)\b/i;
 const DEBUG_RE = /\b(debug|fix|issue|bug|error|why failing)\b/i;
@@ -127,6 +129,14 @@ export function buildRequestScopedPolicy(input: {
   }
   if (answerIntent === "behavioral_project_experience") {
     lines.push("- include_resume_or_project_backed_examples: true");
+    const isProjectOverview = PROJECT_OVERVIEW_RE.test(input.question || "");
+    if (isProjectOverview) {
+      lines.push("- project_coverage: include_all_selected_projects");
+      lines.push("- project_depth_per_item: problem, role, architecture, stack, decisions, impact_metrics");
+      lines.push("- avoid_generic_summary: true");
+    } else {
+      lines.push("- project_depth_single: include_problem_role_stack_architecture_challenge_impact");
+    }
   }
   if (answerIntent === "code_generation") {
     lines.push("- code_policy: minimal practical code + short explanation");

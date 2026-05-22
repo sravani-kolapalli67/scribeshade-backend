@@ -10,7 +10,11 @@ import { AppError } from "../../shared/middleware/error.middleware";
 import * as creditsService from "../credits/credits.service";
 import { creditDeductionQueue } from "../jobs/queue";
 import { buildSystemMessage, buildUserMessage, buildScreenAnalysisMessage } from "../../shared/lib/prompt";
-import { buildOptimizedContext, estimatePromptTokens } from "./cie.service";
+import {
+  buildOptimizedContext,
+  estimatePromptTokens,
+  isProjectExperienceQuestion,
+} from "./cie.service";
 import { getUnifiedResumeContext } from "../resume/resume.service";
 import crypto from "crypto";
 import {
@@ -22,6 +26,7 @@ import { buildRequestScopedPolicy } from "./answer-policy";
 import {
   buildEffectiveLiveContextMetadata,
   deriveTopic,
+  deriveTopicFromAnyText,
   guardCurrentQuestion,
   isCodeFollowupQuestion,
   resolveFollowupTarget,
@@ -836,6 +841,8 @@ export async function getSessionFullContext(sessionId: string, query?: string) {
     }
   }
 
+  const hasSelectedProjects = projectIds.length > 0;
+  const isProjectQuestion = isProjectExperienceQuestion(query);
   return {
     company: session.company?.name || session.companyName || "Unknown",
     role: session.jobDescription || "Interviewee",
@@ -847,6 +854,9 @@ export async function getSessionFullContext(sessionId: string, query?: string) {
     projects: projectsText || null,
     history: historyAndPastContext,
     vectorContext: vectorContext || null,
+    hasSelectedProjects,
+    projectPriorityMode: "project_questions_only",
+    isProjectQuestion,
   };
 }
 
@@ -1142,6 +1152,11 @@ export async function getAIAnswer(
       projects: projText || "No projects provided.",
       history: "No previous interactions in this session.",
       vectorContext: ragText || null,
+      hasSelectedProjects:
+        Array.isArray(session.projectIds) &&
+        (session.projectIds as string[]).length > 0,
+      projectPriorityMode: "project_questions_only",
+      isProjectQuestion: isProjectExperienceQuestion(finalTranscript),
     };
   } else {
     contextForCall = await buildOptimizedContext(id, transcript);
@@ -1190,6 +1205,31 @@ export async function getAIAnswer(
           selectedAnswerCodeBlocks: undefined,
           selectedAnswerTopic: undefined,
         };
+    const questionTopic = deriveTopicFromAnyText(guard.resolvedCurrentQuestion);
+    const selectedAnswerTopicForLog =
+      liveContextMetadata?.selectedAnswerTopic ||
+      deriveTopicFromAnyText(
+        `${liveContextMetadata?.selectedAnswerQuestion || ""} ${liveContextMetadata?.selectedAnswerText || ""}`,
+      );
+    let previousAiAnswerIgnoredReason: string | null = null;
+    const metadataAfterPreviousAnswerGuard = { ...(metadataForRequest || {}) };
+    if (
+      metadataAfterPreviousAnswerGuard.previousAiAnswer &&
+      followup.isExplicitFollowupReference
+    ) {
+      const previousAiAnswerTopic = deriveTopicFromAnyText(
+        metadataAfterPreviousAnswerGuard.previousAiAnswer,
+      );
+      if (
+        questionTopic !== "general" &&
+        previousAiAnswerTopic !== "general" &&
+        previousAiAnswerTopic !== questionTopic
+      ) {
+        previousAiAnswerIgnoredReason = "topic_mismatch";
+        metadataAfterPreviousAnswerGuard.previousAiAnswer = undefined;
+        metadataAfterPreviousAnswerGuard.previousCodeBlocks = undefined;
+      }
+    }
     const selectedTargetForRequest =
       isRegenerate && followup.target
       ? followup.target
@@ -1197,7 +1237,7 @@ export async function getAIAnswer(
       ? followup.target
       : null;
     const effectiveMetadata = buildEffectiveLiveContextMetadata({
-      metadata: metadataForRequest,
+      metadata: metadataAfterPreviousAnswerGuard,
       question: guard.resolvedCurrentQuestion,
       selectedTarget: selectedTargetForRequest,
     });
@@ -1265,10 +1305,15 @@ export async function getAIAnswer(
     if (process.env.NODE_ENV !== "production") {
       console.log("[AI Answer Policy][BE]", {
         resolvedCurrentQuestion: guard.resolvedCurrentQuestion,
+        originalResolvedQuestion: guard.originalResolvedQuestion,
+        reconstructedResolvedQuestion: guard.reconstructedResolvedQuestion,
+        weakQuestionReconstructedBackend: guard.weakQuestionReconstructedBackend,
         questionPollutionDetected: guard.questionPollutionDetected,
         isExplicitFollowupReference: followup.isExplicitFollowupReference,
         selectedAnswerIdFromFrontend: liveContextMetadata?.selectedAnswerId || null,
+        selectedAnswerTopic: selectedAnswerTopicForLog || null,
         selectedAnswerIgnoredReason: followup.selectedAnswerIgnoredReason || null,
+        previousAiAnswerIgnoredReason,
         answerMemoryCount: history.length,
         selectedFollowupTargetId: selectedTargetForRequest?.id || null,
         followupTargetId: selectedTargetForRequest?.id || null,

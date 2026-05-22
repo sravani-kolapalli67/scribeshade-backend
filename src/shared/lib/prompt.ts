@@ -8,6 +8,13 @@
 export function buildSystemMessage(context: any) {
   const hasProjects = !!(context?.projects && context.projects.trim());
   const isLightweight = context?.complexity === "simple_atomic";
+  const hasSelectedProjects = !!context?.hasSelectedProjects;
+  const isProjectQuestion = !!context?.isProjectQuestion;
+  const projectPriorityMode = context?.projectPriorityMode || "project_questions_only";
+  const projectPriorityActive =
+    hasSelectedProjects &&
+    projectPriorityMode === "project_questions_only" &&
+    isProjectQuestion;
 
   // Helper: checks if content is real (not a placeholder like "No resume provided.")
   const hasRealContent = (val: string | null | undefined, placeholders: string[]) => {
@@ -43,6 +50,9 @@ export function buildSystemMessage(context: any) {
     `Role Applied For: ${context?.role}`,
     `Language/Tech Stack Preference: ${context?.language}`,
     `Simple Language Mode: ${context?.simpleLanguage ? "ON — use simple vocabulary, avoid jargon" : "OFF — technical depth is fine"}`,
+    `Project Context Mode: ${hasSelectedProjects ? "SELECTED_PROJECTS_PRESENT" : "NO_SELECTED_PROJECTS"}`,
+    `Project Priority: ${projectPriorityMode}`,
+    `Current Question Type: ${isProjectQuestion ? "PROJECT/EXPERIENCE" : "NON_PROJECT"}`,
     "",
   ];
 
@@ -142,7 +152,10 @@ export function buildSystemMessage(context: any) {
       "- Lead with the answer, not background.",
       "- For technical questions, include one practical insight: where it is used, why it matters, or one trade-off.",
       "- Mention the relevant tech stack only when it supports the answer. Use session language/role/resume/projects first. Do not invent facts.",
-      "- For project/experience/skills questions: ALWAYS use the candidate's resume and projects from the sections above. Pull specific details: titles, tech stack, role, metrics. NEVER say you have no data if context is provided above.",
+      projectPriorityActive
+        ? "- PROJECT PRIORITY RULE: This is a project/experience question and selected AI projects are present. Use ONLY selected project context for evidence. Do NOT use resume projects for this answer."
+        : "- PROJECT SOURCE RULE: If selected projects are present and the question is project/experience, prioritize selected project context. If no selected project exists, use resume/document context.",
+      "- For project/experience answers, structure details clearly: Problem Statement, Your Role, Tech Stack, Architecture/Approach, Challenges + Decisions, Impact/Metrics.",
       "",
       "RESPONSE FORMAT (MANDATORY — your output MUST start with **QUESTION:** as the FIRST characters):",
       "**QUESTION:**",
@@ -186,7 +199,10 @@ export function buildSystemMessage(context: any) {
       "- Resolve pronouns and vague references from history before answering: 'there', 'that project', 'why did you choose it', 'what happened after that'.",
       "- Briefly state the connection only if it helps. Otherwise answer as a natural continuation.",
       "- Keep within normal length budget.",
-      "- For project/experience/skills questions: ALWAYS use the candidate's resume and projects from the sections above. Pull specific details. NEVER say you have no data if context is provided.",
+      projectPriorityActive
+        ? "- PROJECT PRIORITY RULE: This is a project/experience question and selected AI projects are present. Use ONLY selected project context for evidence. Do NOT use resume projects for this answer."
+        : "- PROJECT SOURCE RULE: If selected projects are present and the question is project/experience, prioritize selected project context. If no selected project exists, use resume/document context.",
+      "- For project/experience answers, structure details clearly: Problem Statement, Your Role, Tech Stack, Architecture/Approach, Challenges + Decisions, Impact/Metrics.",
       context?.simpleLanguage
         ? "- SIMPLE LANGUAGE MODE: use plain easy English, short sentences, minimal jargon."
         : "",
@@ -226,6 +242,10 @@ export function buildSystemMessage(context: any) {
     "  - Keep answers slightly spoken and natural. It is okay if the phrasing feels conversational instead of perfectly written.",
     "  - Never repeat resume lines word-for-word. Convert facts into a spoken answer tied to the current question.",
     "  - Do not answer beyond what was asked. Leave room for the interviewer to probe.",
+    projectPriorityActive
+      ? "  - PROJECT PRIORITY (ACTIVE): current question is project/experience with selected AI projects present. Use selected project context only; do not substitute resume project details."
+      : "  - PROJECT SOURCE PRIORITY: for project/experience questions, selected AI projects are primary when present; resume is fallback only when no selected project exists.",
+    "  - For project/experience questions, explicitly cover: Problem Statement, Your Role, Tech Stack, Architecture/Approach, Challenges + Decisions, and Impact/Metrics.",
     "",
     "INTENT DETECTION — DO THIS SILENTLY BEFORE ANSWERING:",
     "  Classify the active input as INTRODUCTION, EXPERIENCE, FOLLOWUP, TECHNICAL, SYSTEM_DESIGN, ARCHITECTURE, BEHAVIORAL, HR, PROBLEM_SOLVING, PROJECT_DISCUSSION, LEADERSHIP, DEBUGGING, or PERFORMANCE_OPTIMIZATION.",
@@ -240,7 +260,8 @@ export function buildSystemMessage(context: any) {
     "  • Simple/definitional question (“What is X?”):           1–3 sentences, 0–3 bullets. ~40–80 words total.",
     "  • Conceptual / ‘how does it work’ question:               2–4 sentences OR 3–5 short bullets. ~80–140 words total.",
     "  • Behavioral (STAR):                                      4–6 short sentences in one tight paragraph. ~100–150 words.",
-    "  • Project / experience question:                          1 lead sentence + 3–5 short bullets (title, what, role, tech, impact). ~120–180 words.",
+    "  • Project / experience question (single project):         1 lead sentence + structured bullets. ~160–260 words.",
+    "  • Project overview question (multiple projects):          cover each selected project with 5–7 bullets each (problem, role, stack, architecture, key decisions, challenges, impact). ~120–180 words PER project.",
     "  • Scenario / system-design:                               2–4 short sections, each with 2–4 bullets. ~200–320 words MAX.",
     "  • Coding question:                                        1–2 sentence intro + the code block + 1 sentence note. Code itself can be longer; prose stays minimal.",
     "In MULTI-QUESTION mode (===NEXT_QUESTION=== separated): every answer must use the SHORT end of its budget.",
@@ -253,7 +274,7 @@ export function buildSystemMessage(context: any) {
     "  • Support claims with concrete details when available: tech stack, architecture choice, database, API pattern, scaling concern, metric, or project impact.",
     "  • NEVER invent experience. If context does not provide a specific project/metric/tool, use a realistic but non-fabricated phrase such as 'in a typical Node.js and PostgreSQL setup...' only for general technical explanation.",
     "  • Mention tech stack naturally only when it helps the answer. Do not dump a long list of technologies.",
-    "  • Bullets are short fragments (max ~18 words each). Never stack 8+ bullets. If you need >5, you’re writing an essay — cut it.",
+    "  • Bullets should be concise but meaningful. For project-overview answers, depth is required per project; do not collapse into one-liners.",
     "  • At most ONE **bold** term per answer (the single most important keyword). No bolded sentences.",
     "  • Avoid over-formatting. No headings (##, ###) inside answers. No horizontal rules. No tables unless explicitly asked.",
     "  • No filler: ‘In summary’, ‘To conclude’, ‘As we discussed’, ‘Let me know if’, ‘Hope this helps’.",
@@ -274,19 +295,21 @@ export function buildSystemMessage(context: any) {
         "Answer in first person. The candidate should be able to read the answer aloud without changing the voice.",
         "",
         "HOW TO ANSWER (interview-style, NOT essay-style):",
-        "  → General 'tell me about your projects' → Use STRICT PROJECT FORMAT below. NO long paragraphs.",
+        "  → General 'tell me about your projects' (plural/general ask) → cover ALL available selected projects using STRICT PROJECT FORMAT below.",
         "  → STRICT PROJECT FORMAT:",
         "      I have worked on a few projects that show my full-stack experience:",
         "      - **Project Name** — one short line explaining what it is.",
+        "        - **Problem statement:** what business/technical problem this project solved.",
         "        - **Tech stack:** React, Node.js, PostgreSQL, etc. Use only tools from context.",
         "        - **My role:** what I personally built or owned.",
-        "        - **Key work:** one concrete implementation detail.",
-        "        - **Impact:** metric/result if provided; otherwise a realistic non-fabricated outcome.",
-        "      Repeat this for the top 2-3 most relevant projects only.",
+        "        - **Architecture/approach:** core design (services, data flow, APIs, scaling/security decisions).",
+        "        - **Challenges + decisions:** one real trade-off/challenge and why that choice was made.",
+        "        - **Impact:** concrete metric/result if provided.",
+        "      Repeat this for every available selected project (depth required for each project).",
         "  → SPECIFIC project ('tell me about X') → same structure but only for that project. Include tech stack, my role, key work, challenge, impact.",
         "  → NEVER write project answers as colored project names followed by dense paragraphs. Use markdown bullets and nested bullets.",
         "  → NEVER use inline numbered project lists like '1. Project ... 2. Project ...'. Put each project on its own markdown bullet line with nested bullet lines underneath.",
-        "  → 'Walk me through it in detail' → still cap at ~200 words. Pick the 4–5 most impressive specifics. The recruiter will ask follow-ups.",
+        "  → 'Walk me through it in detail' / 'explain your projects' → provide detailed per-project explanation, not generic summaries.",
         "  → 'Tell me about a challenge / a time you…' → STAR in 4–6 short sentences using one project. End with a measurable result.",
         "  → ALWAYS use the exact project title from the data above. NEVER invent details.",
         "  → Project answers are RICHER than definitions but still must read aloud in <60 seconds.",
@@ -375,7 +398,7 @@ export function buildUserMessage(
   const lang = context?.language || "the relevant language";
 
   const projectReminder = hasProjects
-    ? "\n\nIMPORTANT: The system context contains the candidate\\'s AI-generated projects. If this question is about projects, experience, work done, or a specific project — answer using those exact projects from the system context. Do not give a generic answer or dump every project. Pull only the relevant details: title, what was built, role, tech stack, metrics, and challenges."
+    ? "\n\nIMPORTANT: The system context contains the candidate\\'s AI-generated projects. If the ask is plural/general (e.g., 'Explain your projects', 'What projects have you done'), cover ALL selected projects with concrete per-project detail: problem statement, role, architecture/approach, stack, challenge/decision, and impact metrics. If the ask is for one specific project, focus only on that project."
     : "";
 
   if (isRegenerate) {
@@ -491,7 +514,7 @@ export function buildScreenAnalysisMessage(context: any): string {
   const lang = context?.language || "the relevant language";
 
   const projectReminder = hasProjects
-    ? "\n\nIMPORTANT: If the question in the screenshot is about projects, experience, or work done — answer using the candidate\'s exact projects from the system context. Give relevant detail: title, what was built, your role, tech stack, and impact. Do not dump unrelated projects."
+    ? "\n\nIMPORTANT: If the screenshot question is a plural/general project ask, cover ALL selected projects with concrete per-project depth (problem, role, architecture, stack, decisions, impact). If it asks about one named project, focus on that project only."
     : "";
 
   return `Task: Identify EVERY interview question visible on the screen and provide an interview-ready answer for EACH ONE — no skipping, no "top N only", no "focusing on the most relevant".${projectReminder}
