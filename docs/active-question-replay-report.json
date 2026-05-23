@@ -1,0 +1,157 @@
+{
+  "scorecard": {
+    "totalClicks": 6,
+    "passedClicks": 6,
+    "failedClicks": 0,
+    "questionDetectionCorrectness": 100,
+    "falseFollowupRate": 0,
+    "noiseTriggerRate": 33.33
+  },
+  "details": [
+    {
+      "session": "parakeet_admin_noise_then_real_question",
+      "t": 1500,
+      "detection": {
+        "activeQuestion": "Uh, I, hi. Yeah. Do you have Aadhaar or Pan?",
+        "cleanedQuestion": "Uh, I, hi. Yeah. Do you have Aadhaar or Pan?",
+        "isFollowUp": false,
+        "topicChanged": false,
+        "confidenceScore": 0.48000000000000004,
+        "ignoredNoise": true,
+        "source": "transcript_history"
+      },
+      "pass": true,
+      "failures": [],
+      "readability": {
+        "hasQuestionMarker": true,
+        "hasAnswerMarker": true,
+        "hasBoldKeywords": true,
+        "hasBoldMetrics": true,
+        "hasBoldFunctions": true,
+        "hasInlineBulletSpam": false
+      },
+      "rendered": "**QUESTION:**\nUh, I, hi. Yeah. Do you have Aadhaar or Pan?\n\n**ANSWER:**\n- **Databricks** and **PySpark** are my primary stack.\n- I orchestrate with **ADF** and deploy via **Azure DevOps**.\n- We process **1TB+** daily and improved runtime by **40%**.\n- Typical cleanup includes **coalesce()**, **current_date()**, and **withColumnRenamed()**."
+    },
+    {
+      "session": "parakeet_admin_noise_then_real_question",
+      "t": 3800,
+      "detection": {
+        "activeQuestion": "What is your total years of experience and relevant experience in Databricks, PySpark and ADF and what is your role?",
+        "cleanedQuestion": "What is your total years of experience and relevant experience in Databricks, PySpark and ADF and what is your role?",
+        "isFollowUp": false,
+        "topicChanged": false,
+        "confidenceScore": 0.78,
+        "ignoredNoise": false,
+        "source": "transcript_history"
+      },
+      "pass": true,
+      "failures": [],
+      "readability": {
+        "hasQuestionMarker": true,
+        "hasAnswerMarker": true,
+        "hasBoldKeywords": true,
+        "hasBoldMetrics": true,
+        "hasBoldFunctions": true,
+        "hasInlineBulletSpam": false
+      },
+      "rendered": "**QUESTION:**\nWhat is your total years of experience and relevant experience in Databricks, PySpark and ADF and what is your role?\n\n**ANSWER:**\n- **Databricks** and **PySpark** are my primary stack.\n- I orchestrate with **ADF** and deploy via **Azure DevOps**.\n- We process **1TB+** daily and improved runtime by **40%**.\n- Typical cleanup includes **coalesce()**, **current_date()**, and **withColumnRenamed()**."
+    },
+    {
+      "session": "scribeshade_mid_speech_fragment_then_complete",
+      "t": 300,
+      "detection": {
+        "activeQuestion": "What is the tool you are using for",
+        "cleanedQuestion": "What is the tool you are using for",
+        "isFollowUp": false,
+        "topicChanged": false,
+        "confidenceScore": 0.5,
+        "ignoredNoise": false,
+        "source": "transcript_history"
+      },
+      "pass": true,
+      "failures": [],
+      "readability": {
+        "hasQuestionMarker": true,
+        "hasAnswerMarker": true,
+        "hasBoldKeywords": true,
+        "hasBoldMetrics": true,
+        "hasBoldFunctions": true,
+        "hasInlineBulletSpam": false
+      },
+      "rendered": "**QUESTION:**\nWhat is the tool you are using for\n\n**ANSWER:**\n- **Databricks** and **PySpark** are my primary stack.\n- I orchestrate with **ADF** and deploy via **Azure DevOps**.\n- We process **1TB+** daily and improved runtime by **40%**.\n- Typical cleanup includes **coalesce()**, **current_date()**, and **withColumnRenamed()**."
+    },
+    {
+      "session": "scribeshade_mid_speech_fragment_then_complete",
+      "t": 1600,
+      "detection": {
+        "activeQuestion": "What is the tool you are using for deployment?",
+        "cleanedQuestion": "What is the tool you are using for deployment?",
+        "isFollowUp": false,
+        "topicChanged": false,
+        "confidenceScore": 0.78,
+        "ignoredNoise": false,
+        "source": "transcript_history"
+      },
+      "pass": true,
+      "failures": [],
+      "readability": {
+        "hasQuestionMarker": true,
+        "hasAnswerMarker": true,
+        "hasBoldKeywords": true,
+        "hasBoldMetrics": true,
+        "hasBoldFunctions": true,
+        "hasInlineBulletSpam": false
+      },
+      "rendered": "**QUESTION:**\nWhat is the tool you are using for deployment?\n\n**ANSWER:**\n- **Databricks** and **PySpark** are my primary stack.\n- I orchestrate with **ADF** and deploy via **Azure DevOps**.\n- We process **1TB+** daily and improved runtime by **40%**.\n- Typical cleanup includes **coalesce()**, **current_date()**, and **withColumnRenamed()**."
+    },
+    {
+      "session": "followup_should_reference_selected_turn",
+      "t": 700,
+      "detection": {
+        "activeQuestion": "How exactly did you do that?",
+        "cleanedQuestion": "How exactly did you do that?",
+        "isFollowUp": true,
+        "topicChanged": false,
+        "confidenceScore": 0.78,
+        "ignoredNoise": false,
+        "referencedHistoryTurnId": "answer-turn-1",
+        "source": "transcript_history"
+      },
+      "pass": true,
+      "failures": [],
+      "readability": {
+        "hasQuestionMarker": true,
+        "hasAnswerMarker": true,
+        "hasBoldKeywords": true,
+        "hasBoldMetrics": true,
+        "hasBoldFunctions": true,
+        "hasInlineBulletSpam": false
+      },
+      "rendered": "**QUESTION:**\nHow exactly did you do that?\n\n**ANSWER:**\n- **Databricks** and **PySpark** are my primary stack.\n- I orchestrate with **ADF** and deploy via **Azure DevOps**.\n- We process **1TB+** daily and improved runtime by **40%**.\n- Typical cleanup includes **coalesce()**, **current_date()**, and **withColumnRenamed()**."
+    },
+    {
+      "session": "topic_shift_should_reset_continuity",
+      "t": 700,
+      "detection": {
+        "activeQuestion": "What is React and why do we use hooks?",
+        "cleanedQuestion": "What is React and why do we use hooks?",
+        "isFollowUp": false,
+        "topicChanged": true,
+        "confidenceScore": 0.78,
+        "ignoredNoise": false,
+        "source": "transcript_history"
+      },
+      "pass": true,
+      "failures": [],
+      "readability": {
+        "hasQuestionMarker": true,
+        "hasAnswerMarker": true,
+        "hasBoldKeywords": true,
+        "hasBoldMetrics": true,
+        "hasBoldFunctions": true,
+        "hasInlineBulletSpam": false
+      },
+      "rendered": "**QUESTION:**\nWhat is React and why do we use hooks?\n\n**ANSWER:**\n- **Databricks** and **PySpark** are my primary stack.\n- I orchestrate with **ADF** and deploy via **Azure DevOps**.\n- We process **1TB+** daily and improved runtime by **40%**.\n- Typical cleanup includes **coalesce()**, **current_date()**, and **withColumnRenamed()**."
+    }
+  ]
+}

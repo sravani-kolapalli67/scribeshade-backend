@@ -227,6 +227,26 @@ test("immediate_previous only for vague deictic followups", () => {
   assert.equal(target.isExplicitFollowupReference, true);
 });
 
+test("required followup signals are treated as followups", () => {
+  const history = toAnswerHistory([
+    {
+      messageId: "spark-1",
+      role: "AI_ASSISTANT",
+      question: "How did you optimize PySpark jobs?",
+      answer: "I used partition tuning and coalesce().",
+      timestamp: new Date("2026-05-21T10:00:00Z").toISOString(),
+    },
+  ]);
+
+  const target = resolveFollowupTarget({
+    question: "how exactly did you do that?",
+    history,
+  });
+
+  assert.equal(target.isExplicitFollowupReference, true);
+  assert.notEqual(target.source, "none");
+});
+
 test("concept vs experience detection helper", () => {
   assert.equal(shouldSuppressExperienceForQuestion("What is PostgreSQL?"), true);
   assert.equal(

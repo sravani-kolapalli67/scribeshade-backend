@@ -14,7 +14,8 @@
     "db:studio": "prisma studio",
     "db:push": "prisma db push",
     "seed:templates": "tsx src/shared/scripts/seed-templates.ts",
-    "seed:feature-costs": "tsx prisma/seed-feature-costs.ts"
+    "seed:feature-costs": "tsx prisma/seed-feature-costs.ts",
+    "test:active-question-replay": "tsx src/shared/scripts/replay-active-question.ts"
   },
   "dependencies": {
     "@clerk/express": "^1.3.0",

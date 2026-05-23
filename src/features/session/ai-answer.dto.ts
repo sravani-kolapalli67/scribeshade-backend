@@ -34,6 +34,16 @@ const speakerEntrySchema = z.object({
   timestamp: z.number().optional(),
 });
 
+const activeQuestionDetectionSchema = z.object({
+  activeQuestion: z.string().trim().min(1).max(2000),
+  cleanedQuestion: z.string().trim().min(1).max(2000),
+  isFollowUp: z.boolean(),
+  topicChanged: z.boolean(),
+  confidenceScore: z.number().min(0).max(1),
+  ignoredNoise: z.boolean(),
+  referencedHistoryTurnId: z.string().trim().min(1).max(120).optional(),
+});
+
 export const aiAnswerRequestSchema = z.object({
   transcript: z.string().trim().min(1),
   currentQuestion: z.string().trim().optional(),
@@ -77,6 +87,7 @@ export const aiAnswerRequestSchema = z.object({
   regenerate: z.boolean().optional(),
   regenerateTargetAnswerId: z.string().trim().min(1).max(120).optional(),
   regenerateInstruction: z.string().trim().min(1).max(500).optional(),
+  activeQuestionDetection: activeQuestionDetectionSchema.optional(),
 });
 
 export type AIAnswerRequestDTO = z.infer<typeof aiAnswerRequestSchema>;

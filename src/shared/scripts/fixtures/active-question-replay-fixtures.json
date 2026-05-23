@@ -1,0 +1,78 @@
+{
+  "sessions": [
+    {
+      "name": "parakeet_admin_noise_then_real_question",
+      "events": [
+        { "t": 0, "sender": "Interviewer", "text": "Uh, I, hi." },
+        { "t": 500, "sender": "Interviewer", "text": "Yeah." },
+        { "t": 1000, "sender": "Interviewer", "text": "Do you have Aadhaar or Pan?" },
+        { "t": 1500, "click": true, "expectNoQuestion": true },
+        { "t": 3000, "sender": "Interviewer", "text": "What is your total years of experience and relevant experience in Databricks, PySpark and ADF?" },
+        { "t": 3300, "sender": "Interviewer", "text": "And what is your role?" },
+        {
+          "t": 3800,
+          "click": true,
+          "expectedQuestionContains": [
+            "experience",
+            "databricks",
+            "pyspark",
+            "adf",
+            "role"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "scribeshade_mid_speech_fragment_then_complete",
+      "events": [
+        { "t": 0, "sender": "Interviewer", "text": "What is the tool you are using for" },
+        { "t": 300, "click": true, "expectNoQuestion": true },
+        { "t": 1200, "sender": "Interviewer", "text": "deployment?" },
+        {
+          "t": 1600,
+          "click": true,
+          "expectedQuestionContains": ["tool", "deployment"]
+        }
+      ]
+    },
+    {
+      "name": "followup_should_reference_selected_turn",
+      "events": [
+        {
+          "t": 0,
+          "seedSelectedAnswer": {
+            "id": "answer-turn-1",
+            "question": "How did you optimize Databricks jobs?",
+            "text": "I used coalesce() and partition tuning."
+          }
+        },
+        { "t": 200, "sender": "Interviewer", "text": "How exactly did you do that?" },
+        {
+          "t": 700,
+          "click": true,
+          "expectedFollowUp": true,
+          "expectedReferenceId": "answer-turn-1"
+        }
+      ]
+    },
+    {
+      "name": "topic_shift_should_reset_continuity",
+      "events": [
+        {
+          "t": 0,
+          "seedSelectedAnswer": {
+            "id": "answer-turn-2",
+            "question": "How did you optimize Databricks jobs?",
+            "text": "I used PySpark caching and coalesce()."
+          }
+        },
+        { "t": 200, "sender": "Interviewer", "text": "What is React and why do we use hooks?" },
+        {
+          "t": 700,
+          "click": true,
+          "expectedTopicChanged": true
+        }
+      ]
+    }
+  ]
+}

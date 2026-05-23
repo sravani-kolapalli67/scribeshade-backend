@@ -1,6 +1,16 @@
 packages:
   - "."
 
+allowBuilds:
+  '@clerk/shared': true
+  '@openrouter/sdk': true
+  '@prisma/client': true
+  '@prisma/engines': true
+  esbuild: true
+  msgpackr-extract: true
+  prisma: true
+  sharp: true
+
 onlyBuiltDependencies:
   - '@clerk/shared'
   - esbuild

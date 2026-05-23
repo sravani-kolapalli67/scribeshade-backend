@@ -40,7 +40,7 @@ const EXPLICIT_EXPERIENCE_RE =
 const CODE_REF_RE =
   /\b(this code|your code|the code you wrote|above code|previous code|first line|that query|the query|query you wrote|query you wrote before|that code|what does this code do|explain it|optimi[sz]e it|debug it|previous answer|above answer)\b/i;
 const FOLLOWUP_RE =
-  /\b(explain this|explain that|expand on that|can you expand|can you explain more|can you explain that|tell me more about that|tell me more|why did you use this|what does this mean|previous answer|above answer|before|you wrote|you said|you mentioned|in your previous project|previously you said|the approach|that approach|repeat the answer|what did you say)\b/i;
+  /\b(explain this|explain that|expand on that|can you expand|can you explain more|can you explain that|tell me more about that|tell me more|why did you use this|why|how exactly|same thing|continue|what about that|what does this mean|previous answer|above answer|before|you wrote|you said|you mentioned|in your previous project|previously you said|the approach|that approach|repeat the answer|what did you say)\b/i;
 const VAGUE_DEICTIC_RE =
   /^(?:that|this|that approach|this approach|explain it|explain that|explain this|can you explain that|can you explain this|continue|tell me more|tell me more about that|why\??|how so\??|elaborate|expand)\s*$/i;
 const HIGH_CONFIDENCE_THRESHOLD = 1.5;

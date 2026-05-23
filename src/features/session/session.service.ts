@@ -41,6 +41,7 @@ const ai = new OpenRouter({
 });
 
 const model = process.env.OPENROUTER_MODEL;
+const ACTIVE_QUESTION_CONFIDENCE_THRESHOLD = 0.58;
 
 /** Normalize human-readable model names sent by frontend to valid OpenRouter slugs */
 const MODEL_ID_MAP: Record<string, string> = {
@@ -1118,6 +1119,20 @@ export async function getAIAnswer(
   let targetModel = resolveModelId(aiModel) || model;
   let finalTranscript = transcript;
   let finalSnapshotId = snapshotId;
+  const detection =
+    !isRegenerate && liveContextMetadata?.activeQuestionDetection
+      ? liveContextMetadata.activeQuestionDetection
+      : undefined;
+
+  if (detection?.ignoredNoise || (detection && detection.confidenceScore < ACTIVE_QUESTION_CONFIDENCE_THRESHOLD)) {
+    return (async function* () {
+      yield { text: "===NO_NEW_QUESTION===" };
+    })();
+  }
+
+  if (detection?.cleanedQuestion?.trim()) {
+    finalTranscript = detection.cleanedQuestion.trim();
+  }
 
   if (isRegenerate && snapshotId) {
     const snapshot = await prisma.answerGenerationSnapshot.findUnique({
@@ -1159,7 +1174,7 @@ export async function getAIAnswer(
       isProjectQuestion: isProjectExperienceQuestion(finalTranscript),
     };
   } else {
-    contextForCall = await buildOptimizedContext(id, transcript);
+    contextForCall = await buildOptimizedContext(id, finalTranscript);
     if (!contextForCall) {
       throw new Error("Failed to build context");
     }
@@ -1191,9 +1206,14 @@ export async function getAIAnswer(
       selectedAnswerCodeBlocks: liveContextMetadata?.selectedAnswerCodeBlocks,
       selectedAnswerTopic: liveContextMetadata?.selectedAnswerTopic,
     });
+    const shouldUseFollowupContext = !!detection?.isFollowUp;
+    const referencedTarget = detection?.referencedHistoryTurnId
+      ? history.find((h) => h.id === detection.referencedHistoryTurnId) || null
+      : null;
+    const topicChanged = !!detection?.topicChanged;
     const metadataForRequest = isRegenerate
       ? liveContextMetadata
-      : followup.isExplicitFollowupReference
+      : shouldUseFollowupContext && !topicChanged
       ? liveContextMetadata
       : {
           ...liveContextMetadata,
@@ -1230,10 +1250,15 @@ export async function getAIAnswer(
         metadataAfterPreviousAnswerGuard.previousCodeBlocks = undefined;
       }
     }
+    const hasExplicitReference = !!detection?.referencedHistoryTurnId;
     const selectedTargetForRequest =
       isRegenerate && followup.target
       ? followup.target
-      : followup.isExplicitFollowupReference
+      : topicChanged
+      ? null
+      : shouldUseFollowupContext && hasExplicitReference && referencedTarget
+      ? referencedTarget
+      : shouldUseFollowupContext && !hasExplicitReference
       ? followup.target
       : null;
     const effectiveMetadata = buildEffectiveLiveContextMetadata({

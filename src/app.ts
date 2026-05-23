@@ -8,12 +8,40 @@ import { router } from "./routes";
 import { errorMiddleware } from "./shared/middleware/error.middleware";
 import { resolveUserId } from "./shared/middleware/resolve-user-id.middleware";
 
+function normalizeOrigin(origin: string): string {
+  return origin.trim().replace(/\/+$/, "").toLowerCase();
+}
+
+const tauriOriginPrefixes = ["tauri://localhost", "https://tauri.localhost"];
+
 export const createApp: () => Express = () => {
   const app = express();
+  const allowedOrigins = env.CORS_ORIGINS.map(normalizeOrigin);
 
   // Standard middleware
   app.use(morgan("dev"));
-  app.use(cors({ origin: env.CORS_ORIGINS, credentials: true }));
+  app.use(
+    cors({
+      credentials: true,
+      origin(origin, callback) {
+        // Allow non-browser clients (curl/server-to-server) without Origin header.
+        if (!origin) {
+          callback(null, true);
+          return;
+        }
+
+        const normalized = normalizeOrigin(origin);
+        const isTauriOrigin = tauriOriginPrefixes.some((prefix) => normalized.startsWith(prefix));
+
+        if (allowedOrigins.includes(normalized) || isTauriOrigin) {
+          callback(null, true);
+          return;
+        }
+
+        callback(new Error(`CORS origin denied: ${origin}`));
+      },
+    }),
+  );
   app.use(express.json());
   app.use(express.urlencoded({ extended: true }));
   app.use("/uploads", express.static("uploads"));
