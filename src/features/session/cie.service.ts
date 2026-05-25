@@ -500,24 +500,32 @@ export function buildSlidingTranscriptMemory(
 export async function buildOptimizedContext(
   sessionId: string,
   query?: string,
-  targetBudget?: number
+  targetBudget?: number,
+  preloadedSession?: any,
+  options?: {
+    complexity?: QuestionComplexity;
+    disableProjectPriority?: boolean;
+  },
 ) {
-  const session = await prisma.session.findUnique({
-    where: { id: sessionId },
-    include: { company: true },
-  });
+  const session =
+    preloadedSession ||
+    (await prisma.session.findUnique({
+      where: { id: sessionId },
+      include: { company: true },
+    }));
 
   if (!session) return null;
 
   // ── Step 1: Classify question complexity ──────────────────────────────────
-  const complexity = classifyComplexity(query);
+  const complexity = options?.complexity || classifyComplexity(query);
   const baseBudgets = COMPLEXITY_BUDGETS[complexity];
   const hasSelectedProjects =
     Array.isArray(session.projectIds) &&
     (session.projectIds as string[]).length > 0;
   const isProjectQuestion = isProjectExperienceQuestion(query);
   const isProjectOverview = isProjectOverviewQuestion(query);
-  const projectPriorityActive = hasSelectedProjects && isProjectQuestion;
+  const projectPriorityActive =
+    hasSelectedProjects && isProjectQuestion && !options?.disableProjectPriority;
   const budgets = projectPriorityActive
     ? {
         ...baseBudgets,

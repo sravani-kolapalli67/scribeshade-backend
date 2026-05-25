@@ -9,6 +9,14 @@ import { holdExpiryWorker } from "./features/jobs/hold-expiry.job";
 import { warmBrowser } from "./features/resume/resume.builder.service";
 import { validateAiConfig } from "./shared/utils/ai-validator";
 
+process.on("unhandledRejection", (reason) => {
+  console.error("[Process] Unhandled Promise Rejection:", reason);
+});
+
+process.on("uncaughtException", (error) => {
+  console.error("[Process] Uncaught Exception:", error);
+});
+
 
 const startServer = async () => {
   const app = createApp();

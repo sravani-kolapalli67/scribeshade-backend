@@ -1,9 +1,11 @@
 import { Request, Response } from "express";
+import { randomUUID } from "crypto";
 import * as sessionService from "./session.service";
 import { prisma } from "../../shared/lib/prisma";
 import { SessionStatus } from "@prisma/client";
 import { AppError } from "../../shared/middleware/error.middleware";
 import { normalizeAIAnswerRequestBody } from "./ai-answer.dto";
+import { acquireInFlight, releaseInFlight } from "../../shared/lib/inflight-requests";
 
 /**
  * Handles the creation of a new session.
@@ -359,12 +361,30 @@ export async function transcribe(req: Request, res: Response) {
  * Generates an AI answer based on a transcript and streams the raw AI response.
  */
 export async function getAIAnswer(req: Request, res: Response) {
+  let inFlightKey: string | null = null;
+  let requestId = "";
   try {
     const id = req.params.id as string;
     const { isCustomQuery, isRegenerate, regenerate, snapshotId, aiModel } = req.body;
     const isRegen = !!isRegenerate || !!regenerate;
     const normalized = normalizeAIAnswerRequestBody(req.body);
     const resolvedQuestion = normalized.resolvedQuestion;
+    requestId =
+      String(req.body?.requestId || req.header("x-request-id") || "").trim() ||
+      randomUUID();
+    const requestedSessionId =
+      String(req.body?.sessionId || req.header("x-session-id") || "").trim() || id;
+    inFlightKey = `ai-answer:${requestedSessionId}`;
+
+    const lock = acquireInFlight(inFlightKey, requestId);
+    if (!lock.ok) {
+      return res.status(409).json({
+        code: "DUPLICATE_IN_FLIGHT",
+        sessionId: requestedSessionId,
+        requestId,
+        reason: "AI answer request already in progress for this session",
+      });
+    }
 
     if (!resolvedQuestion && !snapshotId) {
       return res.status(400).json({ error: "No transcript or snapshotId provided" });
@@ -420,6 +440,15 @@ export async function getAIAnswer(req: Request, res: Response) {
     res.setHeader("Transfer-Encoding", "chunked");
     res.setHeader("X-Accel-Buffering", "no");
 
+    res.setTimeout(120_000);
+    req.on("close", () => {
+      console.log("[AI Answer][Abort] client connection closed", {
+        sessionId: requestedSessionId,
+        requestId,
+      });
+    });
+    console.log("[AI Answer][Request] start", { sessionId: requestedSessionId, requestId });
+
     for await (const chunk of result as any) {
       if (chunk.text) {
         res.write(chunk.text);
@@ -430,6 +459,7 @@ export async function getAIAnswer(req: Request, res: Response) {
       }
     }
 
+    console.log("[AI Answer][Stream] end", { sessionId: requestedSessionId, requestId });
     res.end();
   } catch (error: any) {
     console.error("AI Answer Error:", error);
@@ -437,6 +467,10 @@ export async function getAIAnswer(req: Request, res: Response) {
       res.status(500).json({ error: error.message || "Internal server error" });
     } else {
       res.end();
+    }
+  } finally {
+    if (inFlightKey && requestId) {
+      releaseInFlight(inFlightKey, requestId);
     }
   }
 }

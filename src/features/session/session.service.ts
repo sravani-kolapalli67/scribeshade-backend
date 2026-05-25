@@ -9,10 +9,10 @@ import path from "path";
 import { AppError } from "../../shared/middleware/error.middleware";
 import * as creditsService from "../credits/credits.service";
 import { creditDeductionQueue } from "../jobs/queue";
-import { buildSystemMessage, buildUserMessage, buildScreenAnalysisMessage } from "../../shared/lib/prompt";
+import { buildSystemMessage, buildUserMessage, buildScreenAnalysisMessage, buildScreenSystemMessage } from "../../shared/lib/prompt";
 import {
   buildOptimizedContext,
-  estimatePromptTokens,
+  isProjectOverviewQuestion,
   isProjectExperienceQuestion,
 } from "./cie.service";
 import { getUnifiedResumeContext } from "../resume/resume.service";
@@ -64,6 +64,62 @@ function resolveModelId(id: string | undefined): string | undefined {
   if (!id) return id;
   const normalized = id.toLowerCase().trim();
   return MODEL_ID_MAP[normalized] ?? id;
+}
+
+const latencyOptimizedProvider = {
+  sort: "latency",
+  allowFallbacks: true,
+  preferredMaxLatency: 3,
+  preferredMinThroughput: 30,
+};
+
+function estimatePromptTokensForLog(text: string): number {
+  if (!text) return 0;
+  return Math.ceil(text.length / 4);
+}
+
+function estimateIndependentQuestionCount(text: string): number {
+  if (!text?.trim()) return 1;
+  const questionMarks = (text.match(/\?/g) || []).length;
+  const numbered = (text.match(/(?:^|\n)\s*(?:\d+[\s.)-]+|q\d+[:.)-])/gi) || []).length;
+  const spokenSequence = (text.match(/\b(?:one|two|three|four|five|six|seven|eight|nine|ten)\s*:/gi) || []).length;
+  return Math.max(1, questionMarks, numbered, spokenSequence);
+}
+
+function resolveAnswerMaxOutputTokens(params: {
+  complexity?: string;
+  question: string;
+  isRegenerate?: boolean;
+  hasProjects?: boolean;
+}) {
+  const questionCount = estimateIndependentQuestionCount(params.question);
+  if (questionCount >= 3) return Math.min(8000, questionCount * 900);
+  if (questionCount === 2) return 2200;
+  if (params.hasProjects && isProjectOverviewQuestion(params.question)) return 3600;
+  if (params.isRegenerate) return 2400;
+
+  switch (params.complexity) {
+    case "simple_atomic":
+      return 700;
+    case "simple_contextual":
+      return 1100;
+    case "followup":
+      return 1100;
+    case "scenario_based":
+      return 1800;
+    case "system_design":
+      return 2600;
+    default:
+      return 1800;
+  }
+}
+
+function resolveScreenMaxOutputTokens() {
+  const fromEnv = Number(process.env.AI_SCREEN_MAX_OUTPUT_TOKENS || "");
+  if (Number.isFinite(fromEnv) && fromEnv >= 1000) {
+    return Math.min(Math.floor(fromEnv), 8000);
+  }
+  return 5500;
 }
 
 /**
@@ -905,24 +961,11 @@ function processAIStream(
 
   async function* streamGenerator() {
     let fullResponse = "";
-    let lastYieldedLength = 0;
 
-    for await (const item of result.getItemsStream()) {
-      if (item.type === "message") {
-        const textContent = item.content?.find(
-          (c: any) => c.type === "output_text",
-        );
-        if (textContent && "text" in textContent) {
-          const currentText = textContent.text;
-          const delta = currentText.slice(
-            Math.max(lastYieldedLength, fullResponse.length),
-          );
-          if (delta) {
-            yield { text: delta };
-            lastYieldedLength = currentText.length;
-          }
-          fullResponse = currentText;
-        }
+    for await (const delta of result.getTextStream()) {
+      if (delta) {
+        fullResponse += delta;
+        yield { text: delta };
       }
     }
 
@@ -933,7 +976,7 @@ function processAIStream(
     // Post-processing: extract Q&A and persist (fire-and-forget)
     (async () => {
       try {
-        const finalResponse = await result.getText();
+        const finalResponse = fullResponse || await result.getText();
         const extractedPairs = extractPairs(finalResponse);
 
         if (extractedPairs.length > 0 && session) {
@@ -1013,12 +1056,18 @@ export async function analyzeScreen(
       .toBuffer()
       .catch((err) => { console.error("Sharp compression error:", err); throw err; });
 
-  // Run image compression, session fetch, and full context build in parallel.
-  // Previously context was fetched sequentially after compression, adding 200-400 ms.
+  const sessionPromise = prisma.session.findUnique({ where: { id }, include: { company: true } });
+  const contextPromise = sessionPromise.then((loadedSession) =>
+    buildOptimizedContext(id, "screen visible interview question", 1800, loadedSession, {
+      complexity: "simple_contextual",
+      disableProjectPriority: true,
+    }),
+  );
+
   const [compressed, session, context] = await Promise.all([
     compressPromise,
-    prisma.session.findUnique({ where: { id }, include: { company: true } }),
-    buildOptimizedContext(id),
+    sessionPromise,
+    contextPromise,
   ]);
 
   if (!session) {
@@ -1028,18 +1077,18 @@ export async function analyzeScreen(
   try {
     const targetModel = resolveModelId(aiModel) || model;
     // ── Full Prompt Budget Accounting (screen analysis) ──────────────────
-    const screenSystemPrompt = buildSystemMessage(context);
+    const screenSystemPrompt = buildScreenSystemMessage(context);
     const screenUserText = buildScreenAnalysisMessage(context);
-    const screenSystemTokens = estimatePromptTokens(screenSystemPrompt);
-    const screenUserTokens = estimatePromptTokens(screenUserText);
+    const screenSystemTokens = estimatePromptTokensForLog(screenSystemPrompt);
+    const screenUserTokens = estimatePromptTokensForLog(screenUserText);
     console.log(`[CIE] Screen analysis prompt | system: ${screenSystemTokens}t | user: ${screenUserTokens}t | total: ${screenSystemTokens + screenUserTokens}t | complexity: ${context?.complexity || 'unknown'}`);
 
     const result = ai.callModel({
       model: targetModel,
-      // Raised so multi-question screenshots (e.g. 10 numbered questions) are
-      // never truncated mid-answer. Default OpenRouter cap is too low for the
-      // QUESTION/ANSWER + ===NEXT_QUESTION=== block expansion.
-      maxOutputTokens: 8000,
+      maxOutputTokens: resolveScreenMaxOutputTokens(),
+      provider: latencyOptimizedProvider as any,
+      store: false,
+      sessionId: id,
       input: [
         {
           role: "system",
@@ -1174,7 +1223,7 @@ export async function getAIAnswer(
       isProjectQuestion: isProjectExperienceQuestion(finalTranscript),
     };
   } else {
-    contextForCall = await buildOptimizedContext(id, finalTranscript);
+    contextForCall = await buildOptimizedContext(id, finalTranscript, undefined, session);
     if (!contextForCall) {
       throw new Error("Failed to build context");
     }
@@ -1324,8 +1373,8 @@ export async function getAIAnswer(
       (liveContextMetadata as any)?.regenerateInstruction,
     );
     const userMessage = `${policy.policyBlock}${codeFollowupConstraint}\n${policy.codeContextBlock}${selectedAnswerExcerptBlock}${noCodeFollowupGuidance}${regenerateInstructionBlock}\n\n${baseUserMessage}`;
-    const systemTokens = estimatePromptTokens(systemPrompt);
-    const userTokens = estimatePromptTokens(userMessage);
+    const systemTokens = estimatePromptTokensForLog(systemPrompt);
+    const userTokens = estimatePromptTokensForLog(userMessage);
     console.log(`[CIE] Prompt breakdown | system: ${systemTokens}t | user: ${userTokens}t | total: ${systemTokens + userTokens}t | complexity: ${contextForCall?.complexity || 'unknown'}`);
     if (process.env.NODE_ENV !== "production") {
       console.log("[AI Answer Policy][BE]", {
@@ -1370,7 +1419,15 @@ export async function getAIAnswer(
 
     const result = ai.callModel({
       model: targetModel,
-      maxOutputTokens: 8000,
+      maxOutputTokens: resolveAnswerMaxOutputTokens({
+        complexity: contextForCall?.complexity,
+        question: guard.resolvedCurrentQuestion,
+        isRegenerate,
+        hasProjects: !!contextForCall?.hasSelectedProjects,
+      }),
+      provider: latencyOptimizedProvider as any,
+      store: false,
+      sessionId: id,
       input: [
         {
           role: "system",

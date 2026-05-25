@@ -46,6 +46,8 @@ const activeQuestionDetectionSchema = z.object({
 
 export const aiAnswerRequestSchema = z.object({
   transcript: z.string().trim().min(1),
+  requestId: z.string().trim().min(1).max(120).optional(),
+  sessionId: z.string().trim().min(1).max(120).optional(),
   currentQuestion: z.string().trim().optional(),
   patchedTranscript: z.string().trim().optional(),
   recentTranscriptWindow: z
