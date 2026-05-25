@@ -3,6 +3,7 @@ import { getUnifiedResumeContext } from "../resume/resume.service";
 import { getEncoding } from "js-tiktoken";
 import * as documentService from "../document/document.service";
 import path from "path";
+import { normalizeTranscriptForQuestionDetection } from "./answer-quality";
 
 // Initialize Tiktoken encoding
 const encoding = getEncoding("cl100k_base");
@@ -33,13 +34,17 @@ export function estimatePromptTokens(text: string): number {
  */
 export function detectFollowupIntent(query: string): boolean {
   if (!query) return false;
-  const normalized = query.toLowerCase();
+  const normalized = normalizeTranscriptForQuestionDetection(query).toLowerCase();
   const signals = [
     "explain more", "why", "how exactly", "elaborate", "give an example",
     "in that context", "you mentioned", "previous answer", "expand on",
-    "tell me more", "clarify", "go deeper", "what about", "and what", "how so"
+    "tell me more", "clarify", "go deeper", "what about", "and what", "how so",
+    "explain the code", "explain this code", "explain that code", "explain the code again",
+    "why this is used", "optimize this", "optimise this", "debug this", "fix this",
+    "continue", "continue from", "database part", "architecture part", "backend part",
+    "frontend part", "api part", "the code", "the query", "that query", "that code"
   ];
-  const pronouns = [/\bit\b/, /\bthat\b/, /\bthis\b/, /\bthem\b/, /\bthey\b/];
+  const pronouns = [/\bit\b/, /\bthat\b/, /\bthis\b/, /\bthem\b/, /\bthey\b/, /\bthe previous\b/];
   
   const hasSignal = signals.some(sig => normalized.includes(sig));
   const hasPronoun = pronouns.some(regex => regex.test(normalized));
@@ -58,15 +63,15 @@ export type QuestionComplexity =
 
 export function isProjectExperienceQuestion(query: string | undefined): boolean {
   if (!query || !query.trim()) return false;
-  const normalized = query.toLowerCase().trim();
-  return /\b(projects?|portfolio|what (did|have) you build|tell me about (your|the) project|problem statement|tech stack|architecture|design choices?|impact|metrics|kpis?|challenges?|my role|your role|implemented|worked on)\b/i.test(
+  const normalized = normalizeTranscriptForQuestionDetection(query).toLowerCase().trim();
+  return /\b(projects?|portfolio|what (did|have) you build|tell me about (your|the) project|problem statement|tech stack|architecture|design choices?|impact|metrics|kpis?|challenges?|my role|your role|implemented|worked on|years? of experience|how many years|professional experience|work experience|responsibilit(?:y|ies)|numbers?|measurable)\b/i.test(
     normalized,
   );
 }
 
 export function isProjectOverviewQuestion(query: string | undefined): boolean {
   if (!query || !query.trim()) return false;
-  const normalized = query.toLowerCase().trim();
+  const normalized = normalizeTranscriptForQuestionDetection(query).toLowerCase().trim();
   return /\b(explain|describe|tell me about|walk me through|list|share)\b[\s\w]{0,30}\b(projects|project work|work done|things you built)\b/i.test(
     normalized,
   );
@@ -94,6 +99,9 @@ const PERSONAL_CONTEXT_KEYWORDS = [
   "my skills", "my role", "tell me about yourself", "introduce yourself",
   "your project", "your experience", "based on my", "from my",
   "tell me about a time", "describe a situation",
+  "years of experience", "year of experience", "how many years",
+  "professional experience", "work experience", "responsibilities",
+  "tech stack", "impact", "metrics", "numbers",
   // Bare keywords that always need candidate context
   "project", "projects", "resume", "experience", "skills",
   "introduce", "background", "strength", "weakness",
@@ -105,7 +113,9 @@ const SCENARIO_TRIGGERS = [
   "design a", "let's say", "consider a", "what would you do if",
   "how would you handle", "walk me through", "what if",
   "a user reports", "the system is", "your team has deployed",
-  "race condition", "deadlock", "outage",
+  "race condition", "deadlock", "outage", "continue from database part",
+  "continue from architecture part", "database part", "architecture part",
+  "production issue", "incident",
 ];
 
 const SYSTEM_DESIGN_KEYWORDS = [
@@ -133,7 +143,7 @@ const SIMPLE_ATOMIC_PATTERNS = [
 export function classifyComplexity(query: string | undefined): QuestionComplexity {
   if (!query || !query.trim()) return "system_design"; // No query = full context (screenshot, etc.)
 
-  const normalized = query.toLowerCase().trim();
+  const normalized = normalizeTranscriptForQuestionDetection(query).toLowerCase().trim();
   const wordCount = normalized.split(/\s+/).filter(Boolean).length;
 
   // 1. Follow-up detection (highest priority — short questions that reference prior context)

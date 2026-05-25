@@ -6,6 +6,9 @@ import {
   selectTargetCodeContext,
   toAnswerHistory,
   shouldSuppressExperienceForQuestion,
+  classifyConversationIntent,
+  isFollowupConversationIntent,
+  normalizeTranscriptForQuestionDetection,
 } from "./answer-quality";
 
 test("guards polluted joined question without over-truncating multipart", () => {
@@ -14,7 +17,7 @@ test("guards polluted joined question without over-truncating multipart", () => 
     recentTranscriptWindow: ["[Interviewer]: What is a Postgres SQL?"],
   });
   assert.equal(out.questionPollutionDetected, true);
-  assert.match(out.resolvedCurrentQuestion, /what is a postgres sql\?/i);
+  assert.match(out.resolvedCurrentQuestion, /what is a postgresql sql\?/i);
 
   const multi = guardCurrentQuestion({
     resolvedQuestion: "Explain ACID properties and isolation levels in PostgreSQL",
@@ -247,10 +250,68 @@ test("required followup signals are treated as followups", () => {
   assert.notEqual(target.source, "none");
 });
 
+test("technical code followup phrases bind to latest prior code", () => {
+  const history = toAnswerHistory([
+    {
+      messageId: "sql-gap",
+      role: "AI_ASSISTANT",
+      question: "Write a SQL query to find inactive customer gaps",
+      answer: "```sql\nWITH gaps AS (SELECT customer_id, txn_date, LAG(txn_date) OVER (PARTITION BY customer_id ORDER BY txn_date) AS prev_txn_date FROM txns) SELECT * FROM gaps;\n```",
+      timestamp: new Date("2026-05-21T10:00:00Z").toISOString(),
+    },
+  ]);
+
+  const target = resolveFollowupTarget({
+    question: "Can you explain the code again?",
+    history,
+  });
+
+  assert.equal(target.isExplicitFollowupReference, true);
+  assert.equal(target.target?.id, "sql-gap");
+  assert.equal(target.source, "topic_match");
+  assert.equal(classifyConversationIntent("Can you explain the code again?"), "EXPLAIN_CODE");
+});
+
+test("scenario continuation phrases are treated as followups", () => {
+  const history = toAnswerHistory([
+    {
+      messageId: "mern-scenario",
+      role: "AI_ASSISTANT",
+      question: "How would you design a MERN app for high traffic?",
+      answer: "I would split API, cache, and database responsibilities.",
+      timestamp: new Date("2026-05-21T10:00:00Z").toISOString(),
+    },
+  ]);
+
+  const target = resolveFollowupTarget({
+    question: "continue from database part",
+    history,
+  });
+
+  assert.equal(target.isExplicitFollowupReference, true);
+  assert.equal(target.target?.id, "mern-scenario");
+  assert.equal(target.source, "immediate_previous");
+  assert.equal(isFollowupConversationIntent(classifyConversationIntent("continue from database part")), true);
+});
+
+test("transcript normalization is conservative around protected code and paths", () => {
+  const normalized = normalizeTranscriptForQuestionDetection(
+    "Explain postgre sequel but keep `postgre sequel` and /api/postgre-sequel/v1 unchanged",
+  );
+
+  assert.match(normalized, /PostgreSQL/);
+  assert.match(normalized, /`postgre sequel`/);
+  assert.match(normalized, /\/api\/postgre-sequel\/v1/);
+});
+
 test("concept vs experience detection helper", () => {
   assert.equal(shouldSuppressExperienceForQuestion("What is PostgreSQL?"), true);
   assert.equal(
     shouldSuppressExperienceForQuestion("How have you used PostgreSQL in your project?"),
+    false,
+  );
+  assert.equal(
+    shouldSuppressExperienceForQuestion("How many years of experience do you have?"),
     false,
   );
 });

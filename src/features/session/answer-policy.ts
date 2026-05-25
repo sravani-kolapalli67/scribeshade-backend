@@ -12,16 +12,16 @@ export type AnswerIntent =
   | "general_followup";
 
 const PREV_ANSWER_EXCERPT_MAX = 700;
-const POLICY_BLOCK_MAX_CHARS = 1200;
+const POLICY_BLOCK_MAX_CHARS = 1800;
 const CODE_BLOCK_CHARS_MAX = 1200;
 const CROSS_INTENT_CONCEPT_RE =
   /\b(what is|what are|explain|define|difference between|how does)\b/i;
 const EXPLICIT_EXPERIENCE_RE =
-  /\b(your experience|your project|your company|tell me about your project|from your project|in your company|in your project)\b/i;
+  /\b(your experience|your project|your company|tell me about your project|from your project|in your company|in your project|years? of experience|how many years|professional experience|work experience|project details?|your role|responsibilit(?:y|ies)|tech stack|impact|metrics?|numbers?)\b/i;
 const PROJECT_OVERVIEW_RE =
   /\b(explain|describe|tell me about|walk me through|list|share)\b[\s\w]{0,30}\b(projects|project work|work done|things you built)\b/i;
 const CODE_REF_RE =
-  /\b(this code|above code|previous code|code you wrote|that code|the query|query you wrote|query you wrote before|first line)\b/i;
+  /\b(this code|the code|above code|previous code|code you wrote|that code|the query|that query|query you wrote|query you wrote before|first line|explain (?:it|the code again)|explain (?:this|that|the|your|previous|above)\s+(?:code|query|snippet|function|logic)|why (?:is|was) this used|why did you use this)\b/i;
 const DEBUG_RE = /\b(debug|fix|issue|bug|error|why failing)\b/i;
 const OPT_RE = /\b(optimi[sz]e|improve performance|make it faster|refactor)\b/i;
 const CODE_GEN_RE =
@@ -29,9 +29,9 @@ const CODE_GEN_RE =
 const SYSTEM_DESIGN_RE =
   /\b(system design|design a|architecture|scalab|throughput|latency|distributed|microservice)\b/i;
 const SCENARIO_RE =
-  /\b(scenario|suppose|imagine|case where|incident|outage|what would you do)\b/i;
+  /\b(scenario|suppose|imagine|case where|incident|outage|what would you do|continue from (?:database|backend|frontend|api|architecture|deployment|security|scaling) part|database part|architecture part|production)\b/i;
 const FOLLOWUP_RE =
-  /\b(why did you use this|explain this|explain more|go deeper|clarify|tell me more)\b/i;
+  /\b(why did you use this|why this is used|explain this|explain that|explain the code again|explain more|go deeper|clarify|tell me more|continue|continue from|what about that|you mentioned|you said|previous answer|above answer)\b/i;
 
 function clip(text: string, max: number): string {
   return (text || "").trim().slice(0, max);
@@ -122,6 +122,10 @@ export function buildRequestScopedPolicy(input: {
     `- intent: ${answerIntent}`,
     `- mode: ${effectiveAnswerMode}`,
     "- style: direct, interview-ready, procedural, concise",
+    "- output_format: markdown_only_under_answer_marker",
+    "- no_dense_paragraphs: true",
+    "- bullet_rule: use '- ' bullets with short **Bold labels:** whenever the answer has more than 2 short sentences",
+    "- markdown_highlight_rule: use **bold** for short labels/keywords and inline code for tools/APIs/commands; never use raw HTML/color tags",
   ];
 
   if (experienceSuppressed) {
@@ -153,6 +157,22 @@ export function buildRequestScopedPolicy(input: {
     answerIntent === "code_optimization_followup"
   ) {
     lines.push("- followup_code_policy: prioritize referenced previous code context");
+    lines.push("- answer_shape: bullets for **Direct answer:**, **Referenced code:**, **Why it works:**, **Edge case/performance:**");
+  }
+  if (answerIntent === "behavioral_project_experience") {
+    lines.push("- answer_shape: bullets for **Direct answer:**, **Experience/project:**, **Stack/responsibilities:**, **Impact:**, **Closing line:**");
+  }
+  if (answerIntent === "scenario_based" || answerIntent === "system_design") {
+    lines.push("- answer_shape: bullets/sections for **Diagnosis:**, **Action plan:**, **Production fix:**, **Trade-off:**, **Recommendation:**");
+  }
+  if (answerIntent === "code_generation") {
+    lines.push("- answer_shape: bullets for **Approach:**, fenced code block, **Reasoning:**, **Complexity/edge cases:**");
+  }
+  if (answerIntent === "concept_explanation") {
+    lines.push("- answer_shape: bullets for **Core idea:**, **Where it is used:**, **Trade-off/example:** when more than 2 sentences are needed");
+  }
+  if (answerIntent === "general_followup") {
+    lines.push("- answer_shape: bullets for **Direct answer:**, **Context:**, **Next point:** when more than 2 sentences are needed");
   }
 
   let codeContextBlock = "";

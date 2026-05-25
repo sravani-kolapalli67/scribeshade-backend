@@ -25,10 +25,13 @@ import type { AIAnswerLiveContextMetadata } from "./ai-answer.dto";
 import { buildRequestScopedPolicy } from "./answer-policy";
 import {
   buildEffectiveLiveContextMetadata,
+  classifyConversationIntent,
   deriveTopic,
   deriveTopicFromAnyText,
   guardCurrentQuestion,
   isCodeFollowupQuestion,
+  isFollowupConversationIntent,
+  normalizeTranscriptForQuestionDetection,
   resolveFollowupTarget,
   selectTargetCodeContext,
   toAnswerHistory,
@@ -1182,6 +1185,7 @@ export async function getAIAnswer(
   if (detection?.cleanedQuestion?.trim()) {
     finalTranscript = detection.cleanedQuestion.trim();
   }
+  finalTranscript = normalizeTranscriptForQuestionDetection(finalTranscript);
 
   if (isRegenerate && snapshotId) {
     const snapshot = await prisma.answerGenerationSnapshot.findUnique({
@@ -1246,6 +1250,7 @@ export async function getAIAnswer(
       recentTranscriptWindow: liveContextMetadata?.recentTranscriptWindow,
     });
     const history = toAnswerHistory((session as any).messages);
+    const conversationIntent = classifyConversationIntent(guard.resolvedCurrentQuestion);
     const followup = resolveFollowupTarget({
       question: guard.resolvedCurrentQuestion,
       history,
@@ -1255,7 +1260,9 @@ export async function getAIAnswer(
       selectedAnswerCodeBlocks: liveContextMetadata?.selectedAnswerCodeBlocks,
       selectedAnswerTopic: liveContextMetadata?.selectedAnswerTopic,
     });
-    const shouldUseFollowupContext = !!detection?.isFollowUp;
+    const backendDetectedFollowup = followup.isExplicitFollowupReference ||
+      isFollowupConversationIntent(conversationIntent);
+    const shouldUseFollowupContext = !!detection?.isFollowUp || backendDetectedFollowup;
     const referencedTarget = detection?.referencedHistoryTurnId
       ? history.find((h) => h.id === detection.referencedHistoryTurnId) || null
       : null;
@@ -1383,6 +1390,9 @@ export async function getAIAnswer(
         reconstructedResolvedQuestion: guard.reconstructedResolvedQuestion,
         weakQuestionReconstructedBackend: guard.weakQuestionReconstructedBackend,
         questionPollutionDetected: guard.questionPollutionDetected,
+        conversationIntent,
+        backendDetectedFollowup,
+        frontendDetectedFollowup: !!detection?.isFollowUp,
         isExplicitFollowupReference: followup.isExplicitFollowupReference,
         selectedAnswerIdFromFrontend: liveContextMetadata?.selectedAnswerId || null,
         selectedAnswerTopic: selectedAnswerTopicForLog || null,

@@ -5,6 +5,20 @@ function hasUsableProjectContext(val: string | null | undefined): boolean {
   return !!text && !text.startsWith("No projects provided.");
 }
 
+const MARKDOWN_ANSWER_CONTRACT_LINES = [
+  "MANDATORY MARKDOWN ANSWER FORMAT:",
+  "- Keep parser labels exact: output starts with **QUESTION:**, then **ANSWER:**. Keep ===NEXT_QUESTION=== between independent questions.",
+  "- The answer body under **ANSWER:** must be Markdown, not dense paragraphs.",
+  "- Use separate '- ' bullets whenever the answer has more than 2 short sentences, multiple ideas, steps, responsibilities, metrics, trade-offs, or tools.",
+  "- Use short bold labels inside bullets, e.g. **Direct answer:**, **Experience:**, **Stack:**, **Impact:**, **Trade-off:**.",
+  "- Use inline code for tools, APIs, commands, file paths, database objects, and technical keywords.",
+  "- Use fenced code blocks only when the question asks for code, syntax, query, implementation, debugging, or optimization.",
+  "- Do not emit raw HTML, color tags, CSS, tables, or dense paragraph blocks.",
+  "- Do not end with a clarification question or 'let me know'. Answer directly and stop.",
+];
+
+const MARKDOWN_ANSWER_CONTRACT = MARKDOWN_ANSWER_CONTRACT_LINES.join("\n");
+
 /**
  * Builds the dynamic system prompt combining static rules with session context.
  * Uses the `complexity` field from the CIE context object to conditionally
@@ -159,6 +173,8 @@ export function buildSystemMessage(context: any) {
       "- For role-specific questions, include one practical insight: where it is used, why it matters, or one trade-off.",
       "- Mention role-relevant tools/processes/systems only when they support the answer. Use session language/role/resume/projects first. Do not invent facts.",
       "- UNIVERSAL DOMAIN RULE: do not assume software/engineering background unless role/resume/transcript clearly indicates it.",
+      "",
+      ...MARKDOWN_ANSWER_CONTRACT_LINES,
       projectPriorityActive
         ? "- PROJECT PRIORITY RULE: This is a project/experience question and selected AI projects are present. Use ONLY selected project context for evidence. Do NOT use resume projects for this answer."
         : "- PROJECT SOURCE RULE: If selected projects are present and the question is project/experience, prioritize selected project context. If no selected project exists, use resume/document context.",
@@ -192,6 +208,8 @@ export function buildSystemMessage(context: any) {
       "- Bullets: max 5, short fragments on separate lines with '- ' prefix.",
       "- Add supporting role-relevant detail when useful: tools/processes/systems, challenge/decision, operating constraints, or practical concern. Keep it grounded in the provided context.",
       "- UNIVERSAL DOMAIN RULE: do not assume software/engineering background unless role/resume/transcript clearly indicates it.",
+      "",
+      ...MARKDOWN_ANSWER_CONTRACT_LINES,
       "",
       "RESPONSE FORMAT (MANDATORY — your output MUST start with **QUESTION:** as the FIRST characters):",
       "**QUESTION:**",
@@ -331,36 +349,37 @@ export function buildSystemMessage(context: any) {
       : "No projects provided. Use resume context briefly. Same conciseness rules apply.",
     "",
     "RULE 2 — SELF-INTRODUCTION ('tell me about yourself'):",
-    "  → ONE tight paragraph, 3 sentences MAX, ~60–90 words.",
-    "  → Use a storytelling style: career direction + strongest relevant work + why this role fits.",
+    "  → Use 2–3 short markdown bullets with bold labels. No dense paragraph.",
+    "  → Cover career direction + strongest relevant work + why this role fits.",
     "  → Never sound like a resume headline. Avoid 'As a Full Stack Developer...'.",
-    "  → NEVER use bullets. NEVER list every technology. Pick 2–3 keywords most relevant to the role.",
+    "  → NEVER list every technology. Pick 2–3 keywords most relevant to the role.",
     "",
-    "RULE 2B — ADAPTIVE PRESENTATION (REASONING-DRIVEN):",
-    "  Choose the best representation for the user based on question intent and answer complexity.",
-    "  - If concise explanation is enough, use short prose.",
-    "  - If the answer has multiple dimensions (experience, stack, responsibilities, metrics, trade-offs), prefer structured bullets/sections.",
-    "  - If comparison is asked, use direct comparison-friendly format.",
-    "  - If stepwise flow is needed, use ordered steps.",
-    "  Never force one fixed template for every question. Optimize for clarity, speed-to-read, and interview usability.",
+    "RULE 2B — UNIVERSAL MARKDOWN PRESENTATION:",
+    MARKDOWN_ANSWER_CONTRACT,
+    "  Use a one-sentence answer only for truly atomic definitions. Otherwise use labelled bullets.",
+    "  Keep the universal interview answer shape inside **ANSWER:**: direct answer first, context-backed details next, practical reasoning/trade-off when relevant, and a confident closing line only when it adds value.",
+    "  Optimize for fast scanability in the UI and speakability in a live interview.",
     "  Preserve numeric precision from context exactly (e.g., 5.9 must remain 5.9).",
     "",
     "RULE 3 — TECHNICAL / CONCEPTUAL QUESTIONS:",
     "  → Sentence 1: direct definition / answer.",
     "  → Sentence 2: the WHY, WHEN, or practical use case (one interview-useful insight).",
+    "  → For code follow-ups ('explain the code', 'why this is used', 'optimize this', 'debug this'), use the referenced previous code/answer context first. Do not say context is missing when FOLLOW-UP CODE CONTEXT is provided.",
+    "  → Coding answer shape: short explanation → code if needed → reasoning → edge cases/performance only if relevant.",
     "  → If the role/language suggests a stack, tie the concept to it naturally: React state, Node.js APIs, PostgreSQL indexes, MongoDB aggregation, Docker deployment, etc. Do this only when relevant.",
     "  → For comparison questions, answer with a clear decision rule: when I would use A vs when I would use B.",
-    "  → If a list genuinely helps: 3–4 short bullets. Otherwise stay in prose.",
+    "  → If more than 2 short sentences are needed, use 3–4 short labelled bullets instead of prose paragraphs.",
     "  → Code only if the question explicitly asks for code, an example, or implementation. Otherwise NO code block.",
     "  → When code is needed: keep it tight (under ~25 lines), correct language tag, minimal comments.",
     "",
     "RULE 4 — BEHAVIORAL QUESTIONS:",
     hasProjects
-      ? "  → STAR in 4–6 short sentences using a project from above. Situation + Task in 1–2 sentences, Action in 2 sentences, Result in 1 sentence with a number. ~100–150 words. NO bullets."
-      : "  → STAR in 4–6 short sentences from resume context. End with a measurable result. NO bullets.",
+      ? "  → STAR with short labelled markdown bullets using a project from above. Include Situation/Task, Action, Result with a number when present."
+      : "  → STAR with short labelled markdown bullets from resume context. End with a measurable result when present.",
     "",
     "RULE 5 — SCENARIO / SYSTEM-DESIGN QUESTIONS:",
     "  → ONE answer block, NOT split into multiple question cards.",
+    "  → Scenario answer shape: immediate diagnosis → step-by-step action → production-grade solution → tradeoffs → final recommendation.",
     "  → Speak as the candidate: 'I would start by...', 'I would check...', 'Then I would...' so it sounds like a real troubleshooting/design answer.",
     "  → Use 2–4 short labelled sections (e.g. 'Diagnose', 'Fix', 'Scale') each with 2–4 short bullets. Bullets are fragments, not paragraphs.",
     "  → Include practical production details when relevant: logs/metrics, DB indexes, caching, queues, retries, rate limits, auth, observability, rollback.",
@@ -398,7 +417,7 @@ export function buildSystemMessage(context: any) {
     "  → RESPONSE FORMAT IS STRICT: each block is exactly:",
     "        **QUESTION:** <one-line clean question text without leading or trailing '**'>",
     "        **ANSWER:** <answer body>",
-    "      Never put '**' anywhere except the four exact markers above. Never write '**QUESTION:** **<text>**'. Never duplicate '**'.",
+    "      Keep **QUESTION:** and **ANSWER:** labels exact. Do not bold the question text itself. Inside the answer body, markdown bold is allowed for short labels/keywords only.",
     "  → BULLET POINTS: when listing items, you MUST use proper markdown list syntax — each bullet on its OWN line, prefixed with '- ' (hyphen + space). NEVER concatenate bullets inline using '•' or '*' separators in a single paragraph. The UI parses real markdown lists; an inline '• a • b • c' paragraph is a UI bug.",
     "      CORRECT:",
     "        - First point with one sentence.\n        - Second point with one sentence.\n        - Third point with one sentence.",
@@ -450,6 +469,7 @@ export function buildScreenSystemMessage(context: any) {
     "- If visible sub-questions share one scenario or system-design setup, answer them as one unified question block.",
     "- Use candidate voice for experience, project, behavioral, approach, and decision questions.",
     "- Use proper markdown bullets on separate lines when listing points.",
+    ...MARKDOWN_ANSWER_CONTRACT_LINES,
     "- Do not invent resume/project facts. Use provided context only when it helps answer the visible question.",
     hasProjects
       ? "- For project/experience questions, selected projects are the primary experience source."
@@ -484,6 +504,7 @@ CRITICAL RULES FOR REGENERATION:
 - You MUST answer the question below.
 - Ignore the "RECENT CONVERSATION HISTORY" instruction that tells you not to re-answer. This is an explicit user request to regenerate an answer, so you MUST answer it even if it appears in the history.
 - Provide a full, interview-ready answer following the STRICT formatting rules (**QUESTION:** / **ANSWER:**).
+${MARKDOWN_ANSWER_CONTRACT}
 
 If the question involves logic or coding, ALWAYS provide a working code implementation in ${lang}.
 Answer in candidate/interviewee voice where appropriate. Make it sound like a real candidate continuing a live conversation. Include relevant tools/process/systems or operating detail when it makes the answer stronger, but never invent resume/project facts.
@@ -494,6 +515,8 @@ ${transcript}`;
 
   if (isCustomQuery) {
     return `Task: Answer the candidate\\'s specific question below as if they are saying it to the interviewer.${projectReminder}
+
+${MARKDOWN_ANSWER_CONTRACT}
 
 If the question involves logic or coding, ALWAYS provide a working code implementation in ${lang}.
 Answer in candidate/interviewee voice where appropriate. Keep it natural and spoken, not polished like an AI summary. Include relevant tools/process/systems or operating detail when it makes the answer stronger, but never invent resume/project facts.
@@ -509,6 +532,7 @@ ${transcript}`;
   if (complexity === "simple_atomic") {
     return `Answer this interview question using the candidate's context provided above.${projectReminder}
 Use candidate/interviewee voice when appropriate. Answer directly first. Add one practical detail so the answer sounds real, not textbook.
+${MARKDOWN_ANSWER_CONTRACT}
 
 Question:
 ${transcript}`;
@@ -518,6 +542,7 @@ ${transcript}`;
   if (complexity === "simple_contextual") {
     return `Answer this interview question using the candidate's context provided above.${projectReminder}
 Use candidate/interviewee voice when appropriate. Mention relevant role context only when it supports the answer. Avoid resume dumping.
+${MARKDOWN_ANSWER_CONTRACT}
 
 Question:
 ${transcript}`;
@@ -531,6 +556,7 @@ If the question involves logic or coding, provide a working code implementation 
 
 FOLLOW-UP: If this references a prior answer, continue the active topic naturally. Resolve vague words like "there", "that", "it", or "after that" from history. Do not reintroduce the candidate.
 Use candidate/interviewee voice when appropriate. Support the answer with relevant tools/process/systems, challenge/decision, or operating detail, but keep it conversational.
+${MARKDOWN_ANSWER_CONTRACT}
 
 Question:
 ${transcript}`;
@@ -561,6 +587,7 @@ Rules for this answer:
 - Support answers with relevant tools/processes/systems, approach/operating model, challenge/decision, and business/customer/compliance impact when useful. Do not invent resume/project facts.
 - Detect intent silently before answering: introduction, experience/background, role-specific knowledge, project/work example, process explanation, scenario/situational, behavioral, leadership/teamwork, customer/client handling, problem-solving, performance/improvement, compliance/risk, sales/business, operations, technical/coding only when clearly technical, follow-up, or screen-share/action instruction.
 - Avoid AI-style polish, resume dumping, generic motivation, and unnecessary buzzwords.
+${MARKDOWN_ANSWER_CONTRACT}
 - If the INPUT BLOCK contains MULTIPLE distinct questions (numbered list, multiple sentences ending in '?', or a spoken sequence like "One: X. Two: Y."), answer EACH ONE in its own **QUESTION:** / **ANSWER:** block, separated by exactly: ===NEXT_QUESTION===
 - For scenario / system-design questions: produce ONE rich answer covering diagnosis + redesign in structured sections — do not split it into multiple question blocks.
 - For projects/experience questions → answer in first person and use markdown bullets with nested bullets. Format each project as: "- **Project Name** — short summary", then nested bullets for "**Tools/Process/Methods:**", "**My role:**", "**Key work:**", and "**Impact:**". Do NOT use dense paragraphs.
@@ -614,6 +641,7 @@ Rules for this answer:
 - Detect intent silently before answering and adapt: introduction, experience/background, role-specific knowledge, project/work example, process explanation, scenario/situational, behavioral, leadership/teamwork, customer/client handling, problem-solving, performance/improvement, compliance/risk, sales/business, operations, technical/coding only when clearly technical, follow-up, or screen-share/action instruction.
 - Prioritize conversation continuity. If visible text appears to be a follow-up, resolve the active topic from context and do not restart the introduction.
 - Avoid robotic phrasing, resume dumping, excessive bold text, marketing-style language, and AI-style conclusions.
+${MARKDOWN_ANSWER_CONTRACT}
 - COUNT the visible questions first. If you see N independent numbered/bulleted questions, your output MUST contain N **QUESTION:** / **ANSWER:** blocks separated by (N-1) ===NEXT_QUESTION=== markers. No exceptions. A single multi-part scenario-based or system-design question (sharing a single narrative, incident setup, or codebase context) counts as a SINGLE question, even if it has multiple question marks, numbers, or sub-bullets.
 - Answer order MUST match the on-screen order (top to bottom, left to right).
 - Per-question depth in multi-question mode: 1-line definition + 3-5 tight bullet points + small code snippet ONLY if the question is explicitly about coding/implementation. Keep each answer focused so all questions fit.

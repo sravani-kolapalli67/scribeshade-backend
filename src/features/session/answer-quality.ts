@@ -34,20 +34,49 @@ export interface FollowupTargetResult {
   targetConfidence?: number;
 }
 
+export type ConversationIntent =
+  | "NEW_QUESTION"
+  | "FOLLOW_UP"
+  | "CONTINUE_PREVIOUS"
+  | "EXPLAIN_CODE"
+  | "DEBUG_CODE"
+  | "OPTIMIZE_CODE"
+  | "EXPERIENCE_QUESTION"
+  | "SCENARIO_QUESTION"
+  | "INTERVIEW_INSTRUCTION"
+  | "UNKNOWN";
+
 const FILLER_ONLY_RE = /^(hi|hello|hey|can you hear me|am i audible|okay|ok|hmm|huh|right|fine)$/i;
 const EXPLICIT_EXPERIENCE_RE =
-  /\b(your experience|your project|your company|tell me about your project|from your project|in your company|in your project|where have you used|how have you used)\b/i;
+  /\b(your experience|your project|your company|tell me about your project|from your project|in your company|in your project|where have you used|how have you used|years? of experience|how many years|professional experience|work experience|project details?|your role|responsibilit(?:y|ies)|measurable impact|impact metrics?|numbers?|tech stack)\b/i;
 const CODE_REF_RE =
-  /\b(this code|your code|the code you wrote|above code|previous code|first line|that query|the query|query you wrote|query you wrote before|that code|what does this code do|explain it|optimi[sz]e it|debug it|previous answer|above answer)\b/i;
+  /\b(this code|the code|your code|the code you wrote|above code|previous code|first line|that query|the query|query you wrote|query you wrote before|that code|what does this code do|explain (?:it|the code again)|explain (?:this|that|the|your|previous|above)\s+(?:code|query|snippet|function|logic)|why (?:is|was) this used|why did you use this|optimi[sz]e (?:this|it|the code|the query)?|debug (?:this|it|the code|the query)?|fix (?:this|it|the code|the query)?|previous answer|above answer)\b/i;
 const FOLLOWUP_RE =
-  /\b(explain this|explain that|expand on that|can you expand|can you explain more|can you explain that|tell me more about that|tell me more|why did you use this|why|how exactly|same thing|continue|what about that|what does this mean|previous answer|above answer|before|you wrote|you said|you mentioned|in your previous project|previously you said|the approach|that approach|repeat the answer|what did you say)\b/i;
+  /\b(explain this|explain that|explain the code again|expand on that|can you expand|can you explain more|can you explain that|tell me more about that|tell me more|why did you use this|why this is used|why|how exactly|same thing|continue(?: from)?|continue from .{1,80}|what about that|what does this mean|previous answer|above answer|before|you wrote|you said|you mentioned|in your previous project|previously you said|the approach|that approach|repeat the answer|what did you say|database part|architecture part|from the (?:database|backend|frontend|api|architecture|deployment|security|scaling) part)\b/i;
 const VAGUE_DEICTIC_RE =
-  /^(?:that|this|that approach|this approach|explain it|explain that|explain this|can you explain that|can you explain this|continue|tell me more|tell me more about that|why\??|how so\??|how exactly did you do that\??|elaborate|expand)\s*$/i;
+  /^(?:that|this|it|that approach|this approach|explain it|explain that|explain this|explain the code|can you explain that|can you explain this|continue|continue from .{1,80}|tell me more|tell me more about that|why\??|why this is used\??|how so\??|how exactly did you do that\??|elaborate|expand|optimi[sz]e this|debug this)\s*$/i;
+const DEBUG_FOLLOWUP_RE = /\b(debug|fix|bug|error|issue|failing|not working)\b/i;
+const OPTIMIZE_FOLLOWUP_RE = /\b(optimi[sz]e|improve performance|make (?:this|it) faster|refactor)\b/i;
+const SCENARIO_FOLLOWUP_RE =
+  /\b(scenario|suppose|imagine|case where|incident|outage|production|architecture|system design|continue from (?:database|backend|frontend|api|architecture|deployment|security|scaling) part|database part|tradeoff|trade-off|next step)\b/i;
+const INTERVIEW_INSTRUCTION_RE =
+  /\b(answer this|give me an answer|how should i answer|what should i say|interviewer is asking|define this|explain this for interview)\b/i;
 const HIGH_CONFIDENCE_THRESHOLD = 1.5;
 const STRONG_TOPIC_TERMS = [
   "mongodb",
   "mongo",
   "mongoose",
+  "sql",
+  "postgres",
+  "postgresql",
+  "query",
+  "code",
+  "function",
+  "api",
+  "backend",
+  "frontend",
+  "database",
+  "architecture",
   "user event",
   "user events",
   "event logs",
@@ -59,8 +88,47 @@ const STRONG_TOPIC_TERMS = [
   "analytics",
 ];
 
+const TRANSCRIPT_CORRECTIONS: Array<[RegExp, string]> = [
+  [/\bpostgre\s+sequel\b|\bpostgress\b|\bpostgres\b|\bpostgre\s*sql\b/gi, "PostgreSQL"],
+  [/\bmy\s+sequel\b/gi, "MySQL"],
+  [/\bmongo\s+db\b/gi, "MongoDB"],
+  [/\bnode\s+js\b/gi, "Node.js"],
+  [/\bexpress\s+js\b/gi, "Express.js"],
+  [/\breact\s+js\b/gi, "React.js"],
+  [/\btype\s*script\b/gi, "TypeScript"],
+  [/\bjava\s*script\b/gi, "JavaScript"],
+  [/\brest\s+api\b/gi, "REST API"],
+  [/\bci\s+cd\b/gi, "CI/CD"],
+  [/\bkuber\s*net(?:es|is)\b/gi, "Kubernetes"],
+];
+
 function normalizeSpaces(text: string): string {
   return (text || "").replace(/\s+/g, " ").trim();
+}
+
+export function normalizeTranscriptForQuestionDetection(text: string): string {
+  if (!text) return "";
+  const protectedSegmentRe = /(```[\s\S]*?```|`[^`]*`|"[^"]*"|'[^']*'|\/[^\s`"']+)/g;
+  const isProtectedSegment = (segment: string) =>
+    /^```[\s\S]*```$/.test(segment) ||
+    /^`[^`]*`$/.test(segment) ||
+    /^"[^"]*"$/.test(segment) ||
+    /^'[^']*'$/.test(segment) ||
+    /^\/[^\s`"']+$/.test(segment);
+  return text
+    .split(protectedSegmentRe)
+    .map((segment) => {
+      if (!segment || isProtectedSegment(segment)) {
+        return segment;
+      }
+      return TRANSCRIPT_CORRECTIONS.reduce(
+        (next, [pattern, replacement]) => next.replace(pattern, replacement),
+        segment,
+      );
+    })
+    .join("")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function normLoose(text: string): string {
@@ -80,8 +148,40 @@ function hasStrongTopicTerms(text: string): boolean {
 function isWeakDeicticQuestion(text: string): boolean {
   const n = normLoose(text);
   if (!n) return false;
-  return /^(that|this|that approach|this approach|explain that|explain this|can you explain that|can you explain this|tell me more|tell me more about that|explain it|how so|why|continue)\??$/.test(
+  return /^(that|this|it|that approach|this approach|explain that|explain this|explain the code|can you explain that|can you explain this|tell me more|tell me more about that|explain it|how so|why|why this is used|continue|continue from .{1,80}|optimize this|debug this)\??$/.test(
     n,
+  );
+}
+
+export function classifyConversationIntent(question: string): ConversationIntent {
+  const q = normalizeTranscriptForQuestionDetection(question);
+  const n = normLoose(q);
+  if (!n) return "UNKNOWN";
+  if (FILLER_ONLY_RE.test(q)) return "UNKNOWN";
+  if (CODE_REF_RE.test(q)) {
+    if (DEBUG_FOLLOWUP_RE.test(q)) return "DEBUG_CODE";
+    if (OPTIMIZE_FOLLOWUP_RE.test(q)) return "OPTIMIZE_CODE";
+    return "EXPLAIN_CODE";
+  }
+  if (/^continue\b/i.test(q) || VAGUE_DEICTIC_RE.test(q)) return "CONTINUE_PREVIOUS";
+  if (EXPLICIT_EXPERIENCE_RE.test(q)) return "EXPERIENCE_QUESTION";
+  if (SCENARIO_FOLLOWUP_RE.test(q)) return "SCENARIO_QUESTION";
+  if (FOLLOWUP_RE.test(q)) return "FOLLOW_UP";
+  if (INTERVIEW_INSTRUCTION_RE.test(q)) return "INTERVIEW_INSTRUCTION";
+  if (/^(what|why|how|when|where|which|who|can|could|would|should|is|are|do|does|did|explain|define|write|implement|design)\b/i.test(q)) {
+    return "NEW_QUESTION";
+  }
+  return "UNKNOWN";
+}
+
+export function isFollowupConversationIntent(intent: ConversationIntent): boolean {
+  return (
+    intent === "FOLLOW_UP" ||
+    intent === "CONTINUE_PREVIOUS" ||
+    intent === "EXPLAIN_CODE" ||
+    intent === "DEBUG_CODE" ||
+    intent === "OPTIMIZE_CODE" ||
+    intent === "SCENARIO_QUESTION"
   );
 }
 
@@ -175,7 +275,7 @@ export function guardCurrentQuestion(input: {
   resolvedQuestion: string;
   recentTranscriptWindow?: string[];
 }): GuardResult {
-  const initial = normalizeSpaces(input.resolvedQuestion);
+  const initial = normalizeSpaces(normalizeTranscriptForQuestionDetection(input.resolvedQuestion));
   if (!initial) {
     return {
       resolvedCurrentQuestion: "",
@@ -303,7 +403,7 @@ export function resolveFollowupTarget(input: {
   selectedAnswerCodeBlocks?: string[];
   selectedAnswerTopic?: string;
 }): FollowupTargetResult {
-  const q = normalizeSpaces(input.question);
+  const q = normalizeSpaces(normalizeTranscriptForQuestionDetection(input.question));
   const isExplicitFollowupReference =
     CODE_REF_RE.test(q) || FOLLOWUP_RE.test(q) || VAGUE_DEICTIC_RE.test(q);
   const isVagueDeictic = VAGUE_DEICTIC_RE.test(q);
