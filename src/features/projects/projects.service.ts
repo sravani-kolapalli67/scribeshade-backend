@@ -87,6 +87,14 @@ async function deductCredits(
 // Override with PROJECTS_AI_MODEL env var if needed.
 const PROJECTS_MODEL =
   process.env.PROJECTS_AI_MODEL || "openai/gpt-4.1";
+const PROJECTS_PER_REQUEST = Math.max(
+  1,
+  Number.parseInt(process.env.PROJECTS_PER_REQUEST ?? "1", 10) || 1,
+);
+
+export function getProjectsPerRequest(): number {
+  return PROJECTS_PER_REQUEST;
+}
 
 if (!process.env.OPENROUTER_API_KEY) {
   throw new Error("OPENROUTER_API_KEY environment variable is not defined");
@@ -281,12 +289,12 @@ Each project = one JSON object:
   const SHARED_CRITICAL_RULES = `
 ## CRITICAL RULES (APPLY TO ALL MODES)
 
- 1. Output EXACTLY 3 JSON objects, each covering all applicable sections above.
+ 1. Output EXACTLY ${PROJECTS_PER_REQUEST} JSON object${PROJECTS_PER_REQUEST === 1 ? "" : "s"}, each covering all applicable sections above.
  2. NO markdown wrappers (no \`\`\`json), NO explanations, NO extra text outside JSON.
  3. After each project's closing brace, append exactly: |||PROJECT_END|||
  4. Sections array must follow the numbered order above.
  5. Quantify everything: real numbers (%, $, ms, records/day, GB, users, team size).
- 6. All 3 projects must be meaningfully different scenarios within the same role.
+ 6. ${PROJECTS_PER_REQUEST === 1 ? "Make this project realistic, detailed, and fully interview-ready." : `All ${PROJECTS_PER_REQUEST} projects must be meaningfully different scenarios within the same role.`}
  7. No placeholder text. Every field must contain real, role-appropriate, interview-ready content.
  8. code_snippets must contain actual realistic code (not pseudocode), 15–40 lines each.
  9. architecture_diagram must be a proper ASCII art diagram with boxes, arrows (→, ↓, ↑, ←, ↔).
@@ -302,9 +310,9 @@ Each project = one JSON object:
   // ─────────────────────────────────────────────────────────────────────────
   //
   //   Phase 1 — Planner Agent (1 fast call, ~1–2 s)
-  //     └─ Produces 3 diverse ProjectPlan blueprints
+  //     └─ Produces N diverse ProjectPlan blueprints
   //
-  //   Phase 2 — Parallel Project Workers (3 simultaneous calls)
+  //   Phase 2 — Parallel Project Workers (N simultaneous calls)
   //     ├─ Worker 0: collectProjectText(plan[0])  ─┐
   //     ├─ Worker 1: collectProjectText(plan[1])  ─┤─ all fire at once
   //     └─ Worker 2: collectProjectText(plan[2])  ─┘
@@ -314,24 +322,34 @@ Each project = one JSON object:
   //        (fastest-first — client sees project N the moment it's ready)
   //
   // Token optimisation: all 26 section definitions live in the SYSTEM prompt
-  // (shared/cached across the 3 parallel calls).  User messages carry only
+  // (shared/cached across the parallel calls). User messages carry only
   // project-specific data → ~40–60% token reduction per call.
   // ─────────────────────────────────────────────────────────────────────────
 
   const DELIMITER = "|||PROJECT_END|||";
 
-  // ── Compressed system prompt shared by all 3 generation calls ─────────────
+  // ── Compressed system prompt shared by all generation calls ────────────────
   // Moving static definitions here enables potential prompt caching on Claude
   // and keeps user messages lean.
-  const SINGLE_PROJECT_RULES = SHARED_CRITICAL_RULES
-    .replace(
-      "Output EXACTLY 3 JSON objects, each covering all applicable sections above.",
-      "Output EXACTLY 1 JSON object covering all applicable sections.",
-    )
-    .replace(
-      "All 3 projects must be meaningfully different scenarios within the same role.",
-      "Make this project realistic, detailed, and fully interview-ready.",
-    );
+  const SINGLE_PROJECT_RULES = `
+## CRITICAL RULES (APPLY TO THIS PROJECT)
+
+1. Output EXACTLY 1 JSON object covering all applicable sections.
+2. NO markdown wrappers (no \`\`\`json), NO explanations, NO extra text outside JSON.
+3. After the project's closing brace, append exactly: |||PROJECT_END|||
+4. Sections array must follow the numbered order above.
+5. Quantify everything: real numbers (%, $, ms, records/day, GB, users, team size).
+6. Make this project realistic, detailed, and fully interview-ready.
+7. No placeholder text. Every field must contain real, role-appropriate, interview-ready content.
+8. code_snippets must contain actual realistic code (not pseudocode), 15–40 lines each.
+9. architecture_diagram must be a proper ASCII art diagram with boxes, arrows (→, ↓, ↑, ←, ↔).
+10. Projects must directly address real requirements from the job description where one is provided.
+11. Tailor complexity and scope to the specified experience level.
+12. thirty_second_summary hook must be a single memorable opening sentence (max 20 words). mainPoints must be exactly 3 strings. closingLine is a confident one-liner.
+13. architecture_tree must include ALL applicable layers (Frontend, Backend, Database, Infrastructure); each layer must have 2–4 nodes.
+14. database_schema rows must reflect the actual data model; include primary keys, foreign keys, and data types.
+15. cicd_pipeline steps must be concrete (e.g., "Run Jest unit tests", "Build Docker image", "Push to ECR").
+`.trim();
 
   const GENERATION_SYSTEM_PROMPT = [
     "You are an expert technical architect and career strategist generating portfolio project case studies.",
@@ -356,15 +374,15 @@ Each project = one JSON object:
   }
 
   // ── Phase 1: Planner agent ────────────────────────────────────────────────
-  // One cheap call (≤500 output tokens) that returns 3 diverse blueprints.
-  // Having titles/domains upfront lets all 3 workers start in parallel without
+  // One cheap call (≤500 output tokens) that returns N diverse blueprints.
+  // Having titles/domains upfront lets all workers start in parallel without
   // needing the sequential diversity-tracking used in the old architecture.
   async function planProjects(): Promise<ProjectPlan[]> {
     const planStart = Date.now();
     console.log(`\n[projects] ── Phase 1: Planner Agent ─────────────────────────────`);
     console.log(`[projects]   position="${position}" mode=${generationMode} model=${PROJECTS_MODEL}`);
     const planPrompt = [
-      "Generate a planning blueprint for 3 diverse portfolio project case studies.",
+      `Generate a planning blueprint for ${PROJECTS_PER_REQUEST} diverse portfolio project case studies.`,
       "",
       `ROLE: ${position}`,
       `INDUSTRY: ${industry || "infer from role"}`,
@@ -373,7 +391,7 @@ Each project = one JSON object:
       resumeContext ? `\nSKILLS / CONTEXT:\n${resumeContext.slice(0, 600)}` : "",
       jobDescription ? `\nJOB DESCRIPTION:\n${jobDescription.slice(0, 400)}` : "",
       "",
-      "Output ONLY a JSON array of exactly 3 objects. No markdown, no commentary.",
+      `Output ONLY a JSON array of exactly ${PROJECTS_PER_REQUEST} objects. No markdown, no commentary.`,
       `Schema: [{ "title": string, "domain": string, "techFocus": "top 3 techs comma-separated", "scenario": "one-sentence company/problem" }]`,
       "",
       "Rules:",
@@ -402,12 +420,12 @@ Each project = one JSON object:
       }
       raw = raw.replace(/^```json?\n?/i, "").replace(/\n?```$/i, "").trim();
       const plans = JSON.parse(raw) as ProjectPlan[];
-      if (Array.isArray(plans) && plans.length >= 3) {
+      if (Array.isArray(plans) && plans.length >= PROJECTS_PER_REQUEST) {
         console.log(`[projects]   Planner OK (${Date.now() - planStart}ms)`);
-        plans.slice(0, 3).forEach((p, i) =>
+        plans.slice(0, PROJECTS_PER_REQUEST).forEach((p, i) =>
           console.log(`[projects]   blueprint[${i}] "${p.title}" — ${p.domain} — ${p.techFocus}`)
         );
-        return plans.slice(0, 3);
+        return plans.slice(0, PROJECTS_PER_REQUEST);
       }
     } catch (planErr) {
       console.warn(`[projects]   Planner failed (${Date.now() - planStart}ms) — using fallback blueprints`, (planErr as Error).message);
@@ -415,11 +433,23 @@ Each project = one JSON object:
 
     // Fallback blueprints when planning call fails or returns malformed JSON
     console.log(`[projects]   Using fallback blueprints`);
-    return [
+    const fallbackPlans: ProjectPlan[] = [
       { title: "Distributed Data Pipeline", domain: "Data Engineering", techFocus: "Python, Kafka, PostgreSQL", scenario: "Scaling real-time data ingestion for a fintech analytics platform" },
       { title: "Cloud Infrastructure Platform", domain: "DevOps / Platform Engineering", techFocus: "Kubernetes, Terraform, GitHub Actions", scenario: "Automating multi-region deployments for a growing SaaS product" },
       { title: "High-Throughput API Gateway", domain: "Backend Engineering", techFocus: "Node.js, Redis, PostgreSQL", scenario: "Building a resilient API layer for a B2B marketplace at 10k RPS" },
     ];
+    if (PROJECTS_PER_REQUEST <= fallbackPlans.length) {
+      return fallbackPlans.slice(0, PROJECTS_PER_REQUEST);
+    }
+    const expanded: ProjectPlan[] = [...fallbackPlans];
+    for (let i = fallbackPlans.length; i < PROJECTS_PER_REQUEST; i++) {
+      const base = fallbackPlans[i % fallbackPlans.length];
+      expanded.push({
+        ...base,
+        title: `${base.title} ${i + 1}`,
+      });
+    }
+    return expanded;
   }
 
   // ── Phase 2a: Lean user-message builder ───────────────────────────────────
@@ -510,15 +540,16 @@ Each project = one JSON object:
   }
 
   // ── Phase 3: Parallel launch + arrival-ordered streaming ──────────────────
-  // All 3 collectors fire simultaneously. An in-process completion channel
+  // All collectors fire simultaneously. An in-process completion channel
   // (push/wait over a plain array + resolver queue) yields each project to the
   // controller the moment it finishes — no SSE or WebSocket required at this
-  // layer. Latency improvement: ~3× vs the previous sequential architecture.
+  // layer. Latency improvement remains proportional to concurrent workers.
   const orchestrationStart = Date.now();
   const plans = await planProjects();
+  const targetCount = plans.length;
 
   console.log(`\n[projects] ── Phase 2: Parallel Workers ────────────────────────────`);
-  console.log(`[projects]   Launching 3 workers simultaneously...`);
+  console.log(`[projects]   Launching ${targetCount} workers simultaneously...`);
 
   // Completion channel — zero external dependencies
   const arrivals: string[] = [];
@@ -542,7 +573,7 @@ Each project = one JSON object:
       }
     });
 
-  // Launch all 3 in parallel — intentionally NOT awaited here
+  // Launch all workers in parallel — intentionally NOT awaited here
   const workerLaunchTime = Date.now();
   plans.forEach((plan, i) => {
     collectProjectText(plan, i)
@@ -554,7 +585,7 @@ Each project = one JSON object:
 
   // Yield each project as it arrives (fastest-first delivery to client)
   let successCount = 0;
-  for (let i = 0; i < 3; i++) {
+  for (let i = 0; i < targetCount; i++) {
     const raw = await waitArrival();
     if (!raw) {
       console.warn(`[projects]   arrival[${i}] skipped — worker returned empty`);
@@ -576,7 +607,7 @@ Each project = one JSON object:
     console.error(`[projects] Generation FAILED — 0 valid projects produced (${totalMs}ms total)`);
     throw new AppError(503, "AI generation produced no valid projects. Please try again.");
   }
-  console.log(`\n[projects] ── Generation complete — ${successCount}/3 projects in ${totalMs}ms ────\n`);
+  console.log(`\n[projects] ── Generation complete — ${successCount}/${targetCount} projects in ${totalMs}ms ────\n`);
 }
 
 /**

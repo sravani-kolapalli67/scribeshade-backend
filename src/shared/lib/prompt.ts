@@ -8,12 +8,18 @@ function hasUsableProjectContext(val: string | null | undefined): boolean {
 const MARKDOWN_ANSWER_CONTRACT_LINES = [
   "MANDATORY MARKDOWN ANSWER FORMAT:",
   "- Keep parser labels exact: output starts with **QUESTION:**, then **ANSWER:**. Keep ===NEXT_QUESTION=== between independent questions.",
-  "- The answer body under **ANSWER:** must be Markdown, not dense paragraphs.",
+  "- The answer body under **ANSWER:** must be Markdown with clear structure, not dense paragraphs.",
+  "- Use exactly one blank line between major sections or label groups to keep spacing readable.",
   "- Use separate '- ' bullets whenever the answer has more than 2 short sentences, multiple ideas, steps, responsibilities, metrics, trade-offs, or tools.",
-  "- Use short bold labels inside bullets, e.g. **Direct answer:**, **Experience:**, **Stack:**, **Impact:**, **Trade-off:**.",
+  "- Use proper Markdown list syntax only: one bullet per line. Never use inline bullets like '• a • b • c'.",
+  "- For sub-points, use nested bullets with two-space indentation: '  - '.",
+  "- Use short bold labels inside bullets, e.g. **Main Answer:**, **Direct answer:**, **Problem:**, **Fix:**, **Impact:**, **Example:**.",
+  "- Bold only short labels or critical keywords. Never bold full sentences or full paragraphs.",
   "- Use inline code for tools, APIs, commands, file paths, database objects, and technical keywords.",
   "- Use fenced code blocks only when the question asks for code, syntax, query, implementation, debugging, or optimization.",
-  "- Do not emit raw HTML, color tags, CSS, tables, or dense paragraph blocks.",
+  "- Exception: for project-explanation questions, if selected project context includes an Architecture Diagram block, you may use one fenced ```text``` diagram to show flow.",
+  "- Keep output parser-safe: do not emit raw HTML, color tags, CSS, tables, broken markdown markers, or dense paragraph blocks.",
+  "- Markdown self-check before final output: labels are exact, blank lines are present, bullets are valid, nested bullets use two spaces, and no stray '**' markers remain.",
   "- Do not end with a clarification question or 'let me know'. Answer directly and stop.",
 ];
 
@@ -176,8 +182,8 @@ export function buildSystemMessage(context: any) {
       "",
       ...MARKDOWN_ANSWER_CONTRACT_LINES,
       projectPriorityActive
-        ? "- PROJECT PRIORITY RULE: This is a project/experience question and selected AI projects are present. Use ONLY selected project context for evidence. Do NOT use resume projects for this answer."
-        : "- PROJECT SOURCE RULE: If selected projects are present and the question is project/experience, prioritize selected project context. If no selected project exists, use resume/document context.",
+        ? "- PROJECT PRIORITY RULE: This is a project/experience question and selected AI projects are present. Use ONLY selected project context for evidence. Do NOT use resume projects for this answer. For broad/singular asks, prioritize PRIMARY PROJECT first. If the interviewer asks a specific project by name, answer that exact project even if it is optional."
+        : "- PROJECT SOURCE RULE: If selected projects are present and the question is project/experience, prioritize selected project context. For plural asks, cover all selected projects with PRIMARY first. If no selected project exists, use resume/document context.",
       "- For project/experience answers, structure details clearly: Problem/Goal, Your Role, Tools/Process/Methods, Approach/Operating Model, Challenges + Decisions, Impact/Metrics.",
       "",
       "RESPONSE FORMAT (MANDATORY — your output MUST start with **QUESTION:** as the FIRST characters):",
@@ -226,8 +232,8 @@ export function buildSystemMessage(context: any) {
       "- Briefly state the connection only if it helps. Otherwise answer as a natural continuation.",
       "- Keep within normal length budget.",
       projectPriorityActive
-        ? "- PROJECT PRIORITY RULE: This is a project/experience question and selected AI projects are present. Use ONLY selected project context for evidence. Do NOT use resume projects for this answer."
-        : "- PROJECT SOURCE RULE: If selected projects are present and the question is project/experience, prioritize selected project context. If no selected project exists, use resume/document context.",
+        ? "- PROJECT PRIORITY RULE: This is a project/experience question and selected AI projects are present. Use ONLY selected project context for evidence. Do NOT use resume projects for this answer. For broad/singular asks, prioritize PRIMARY PROJECT first. If the interviewer asks a specific project by name, answer that exact project even if it is optional."
+        : "- PROJECT SOURCE RULE: If selected projects are present and the question is project/experience, prioritize selected project context. For plural asks, cover all selected projects with PRIMARY first. If no selected project exists, use resume/document context.",
       "- For project/experience answers, structure details clearly: Problem/Goal, Your Role, Tools/Process/Methods, Approach/Operating Model, Challenges + Decisions, Impact/Metrics.",
       context?.simpleLanguage
         ? "- SIMPLE LANGUAGE MODE: use plain easy English, short sentences, minimal jargon."
@@ -278,6 +284,7 @@ export function buildSystemMessage(context: any) {
       ? "  - PROJECT PRIORITY (ACTIVE): current question is project/experience with selected AI projects present. Use selected project context only; do not substitute resume project details."
       : "  - PROJECT SOURCE PRIORITY: for project/experience questions, selected AI projects are primary when present; resume is fallback only when no selected project exists.",
     "  - For project/experience questions, explicitly cover: Problem/Goal, Your Role, Tools/Process/Methods, Approach/Operating Model, Challenges + Decisions, and Impact/Metrics.",
+    "  - When selected project context includes architecture/data-flow/challenge details, use those concrete details briefly (not generic architecture talk, not deep dumps).",
     "",
     "INTENT DETECTION — DO THIS SILENTLY BEFORE ANSWERING:",
     "  Classify the active input as INTRODUCTION, EXPERIENCE/BACKGROUND, ROLE-SPECIFIC KNOWLEDGE, PROJECT/WORK EXAMPLE, PROCESS EXPLANATION, SCENARIO/SITUATIONAL, BEHAVIORAL, LEADERSHIP/TEAMWORK, CUSTOMER/CLIENT HANDLING, PROBLEM-SOLVING, PERFORMANCE/IMPROVEMENT, COMPLIANCE/RISK, SALES/BUSINESS, OPERATIONS, TECHNICAL/CODING (only if clearly technical), FOLLOW-UP, or SCREEN-SHARE/ACTION INSTRUCTION.",
@@ -307,7 +314,7 @@ export function buildSystemMessage(context: any) {
     "  • NEVER invent experience. If context does not provide a specific project/metric/tool, use a realistic but non-fabricated phrase such as 'in a typical Node.js and PostgreSQL setup...' only for general technical explanation.",
     "  • Mention tools/systems naturally only when they help the answer. Do not dump long lists.",
     "  • Bullets should be concise but meaningful. For project-overview answers, depth is required per project; do not collapse into one-liners.",
-    "  • At most ONE **bold** term per answer (the single most important keyword). No bolded sentences.",
+    "  • Use bold sparingly for short labels/critical keywords only. Never bold full sentences or paragraph blocks.",
     "  • Avoid over-formatting. No headings (##, ###) inside answers. No horizontal rules. No tables unless explicitly asked.",
     "  • No filler: ‘In summary’, ‘To conclude’, ‘As we discussed’, ‘Let me know if’, ‘Hope this helps’.",
     "  • No meta: ‘This is a great topic’, ‘There are several approaches’, ‘It depends, but’… just answer.",
@@ -339,6 +346,8 @@ export function buildSystemMessage(context: any) {
         "        - **Impact:** concrete metric/result if provided.",
         "      Repeat this for every available selected project (depth required for each project).",
         "  → SPECIFIC project ('tell me about X') → same structure but only for that project. Include tech stack, my role, key work, challenge, impact.",
+        "  → If architecture/data-flow/challenge snippets are present in selected project context, include 1-2 concrete points from that data (concise, interview-spoken).",
+        "  → If an Architecture Diagram block is present in selected project context and the ask is to explain project(s), include a short markdown architecture flow using that same structure (prefer fenced ```text``` flow). This is required for project-explain asks when diagram context is available.",
         "  → NEVER write project answers as colored project names followed by dense paragraphs. Use markdown bullets and nested bullets.",
         "  → NEVER use inline numbered project lists like '1. Project ... 2. Project ...'. Put each project on its own markdown bullet line with nested bullet lines underneath.",
         "  → 'Walk me through it in detail' / 'explain your projects' → provide detailed per-project explanation, not generic summaries.",
@@ -494,7 +503,7 @@ export function buildUserMessage(
   const lang = context?.language || "the relevant language";
 
   const projectReminder = hasProjects
-    ? "\n\nIMPORTANT: The system context contains the candidate\\'s AI-generated projects. If the ask is plural/general (e.g., 'Explain your projects', 'What projects have you done'), cover ALL selected projects with concrete per-project detail: problem/goal, role, approach/operating model, tools/process/methods, challenge/decision, and impact metrics. If the ask is for one specific project, focus only on that project."
+    ? "\n\nIMPORTANT: The system context contains the candidate\\'s AI-generated projects and marks PRIMARY/OPTIONAL ordering. If the ask is plural/general (e.g., 'Explain your projects', 'What projects have you done'), cover ALL selected projects with PRIMARY first and concrete per-project detail: problem/goal, role, approach/operating model, tools/process/methods, challenge/decision, and impact metrics. If the ask is for one specific project, focus only on that named project even when it is optional."
     : "";
 
   if (isRegenerate) {
@@ -617,7 +626,7 @@ export function buildScreenAnalysisMessage(context: any): string {
   const lang = context?.language || "the relevant language";
 
   const projectReminder = hasProjects
-    ? "\n\nIMPORTANT: If the screenshot question is a plural/general project ask, cover ALL selected projects with concrete per-project depth (problem/goal, role, approach/operating model, tools/process/methods, decisions, impact). If it asks about one named project, focus on that project only."
+    ? "\n\nIMPORTANT: If the screenshot question is a plural/general project ask, cover ALL selected projects with PRIMARY first and concrete per-project depth (problem/goal, role, approach/operating model, tools/process/methods, decisions, impact). If it asks about one named project, focus on that project only even when it is optional."
     : "";
 
   return `Task: Identify EVERY interview question visible on the screen and provide an interview-ready answer for EACH ONE — no skipping, no "top N only", no "focusing on the most relevant".${projectReminder}

@@ -150,7 +150,8 @@ export async function generateProjects(
               projectsService.parseJsonResponse<any>(cleanProject);
             if (parsedProject) {
               const title = parsedProject?.projectHeader?.title ?? "(unknown)";
-              console.log(`[projects.controller]   ✓ Streamed project ${allProjects.length + 1}/3: "${title}" (+${Date.now() - reqStart}ms)`);
+              const expectedCount = projectsService.getProjectsPerRequest();
+              console.log(`[projects.controller]   ✓ Streamed project ${allProjects.length + 1}/${expectedCount}: "${title}" (+${Date.now() - reqStart}ms)`);
               allProjects.push(parsedProject);
             } else {
               console.warn(`[projects.controller]   ⚠ JSON parse+repair failed (${cleanProject.length} chars) — preview: ${cleanProject.slice(0, 200)}`);

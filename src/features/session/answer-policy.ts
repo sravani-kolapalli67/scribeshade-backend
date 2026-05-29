@@ -1,4 +1,5 @@
 import type { AIAnswerLiveContextMetadata } from "./ai-answer.dto";
+import type { AISessionDecision } from "./ai-session-decision";
 
 export type AnswerIntent =
   | "concept_explanation"
@@ -21,9 +22,9 @@ const EXPLICIT_EXPERIENCE_RE =
 const PROJECT_OVERVIEW_RE =
   /\b(explain|describe|tell me about|walk me through|list|share)\b[\s\w]{0,30}\b(projects|project work|work done|things you built)\b/i;
 const CODE_REF_RE =
-  /\b(this code|the code|above code|previous code|code you wrote|that code|the query|that query|query you wrote|query you wrote before|first line|explain (?:it|the code again)|explain (?:this|that|the|your|previous|above)\s+(?:code|query|snippet|function|logic)|why (?:is|was) this used|why did you use this)\b/i;
+  /\b(this code|the code|above code|previous code|code you wrote|that code|the query|that query|same query|the same query|same code|the same code|same logic|same script|query you wrote|query you wrote before|first line|explain (?:it|the code again)|explain (?:this|that|the|your|previous|above)\s+(?:code|query|snippet|function|logic)|why (?:is|was) this used|why did you use this)\b/i;
 const DEBUG_RE = /\b(debug|fix|issue|bug|error|why failing)\b/i;
-const OPT_RE = /\b(optimi[sz]e|improve performance|make it faster|refactor)\b/i;
+const OPT_RE = /\b(optimi[sz]e|improve performance|make it faster|refactor|what if (?:the|this|that|same)\b.*\b(?:query|code|logic)|slow(?:er)?|performance issue|hitting (?:all|every|maximum|max)|full (?:table )?scan)\b/i;
 const CODE_GEN_RE =
   /\b(write|implement|give|show|create|build)\b.{0,24}\b(code|snippet|function|class|query|api)\b|\b(code|snippet)\b/i;
 const SYSTEM_DESIGN_RE =
@@ -42,9 +43,30 @@ export function classifyAnswerIntent(input: {
   answerMode?: AIAnswerLiveContextMetadata["answerMode"];
   previousCodeBlocks?: string[];
   cieComplexity?: string;
+  aiDecision?: AISessionDecision;
 }): AnswerIntent {
   const q = (input.question || "").toLowerCase().trim();
   const hasPrevCode = !!(input.previousCodeBlocks && input.previousCodeBlocks.length > 0);
+
+  if (input.aiDecision && input.aiDecision.confidence >= 0.62) {
+    switch (input.aiDecision.intent) {
+      case "EXPLAIN_CODE":
+        return "code_explanation_followup";
+      case "DEBUG_CODE":
+        return "code_debug_followup";
+      case "OPTIMIZE_CODE":
+        return "code_optimization_followup";
+      case "SCENARIO_QUESTION":
+        return "scenario_based";
+      case "EXPERIENCE_QUESTION":
+        return "behavioral_project_experience";
+      case "FOLLOW_UP":
+      case "CONTINUE_PREVIOUS":
+        return "general_followup";
+      default:
+        break;
+    }
+  }
 
   if (input.answerMode === "system_design") return "system_design";
   if (input.answerMode === "explain_existing_code" && hasPrevCode) {
@@ -73,6 +95,7 @@ export function buildRequestScopedPolicy(input: {
   question: string;
   metadata?: AIAnswerLiveContextMetadata;
   cieComplexity?: string;
+  aiDecision?: AISessionDecision;
 }): {
   answerIntent: AnswerIntent;
   effectiveAnswerMode:
@@ -95,11 +118,18 @@ export function buildRequestScopedPolicy(input: {
     answerMode: metadata.answerMode,
     previousCodeBlocks: metadata.previousCodeBlocks,
     cieComplexity: input.cieComplexity,
+    aiDecision: input.aiDecision,
   });
 
-  const explicitMode = metadata.answerMode && metadata.answerMode !== "auto"
+  const aiDecisionMode =
+    input.aiDecision &&
+    input.aiDecision.confidence >= 0.62 &&
+    input.aiDecision.answerMode !== "auto"
+      ? input.aiDecision.answerMode
+      : undefined;
+  const explicitMode = aiDecisionMode || (metadata.answerMode && metadata.answerMode !== "auto"
     ? metadata.answerMode
-    : undefined;
+    : undefined);
 
   const effectiveAnswerMode = explicitMode || (() => {
     if (
@@ -121,12 +151,15 @@ export function buildRequestScopedPolicy(input: {
     "REQUEST-SCOPED POLICY (THIS REQUEST ONLY):",
     `- intent: ${answerIntent}`,
     `- mode: ${effectiveAnswerMode}`,
+    input.aiDecision
+      ? `- ai_decision: ${input.aiDecision.intent} confidence=${input.aiDecision.confidence.toFixed(2)} context=${input.aiDecision.contextToUse}`
+      : "",
     "- style: direct, interview-ready, procedural, concise",
     "- output_format: markdown_only_under_answer_marker",
     "- no_dense_paragraphs: true",
     "- bullet_rule: use '- ' bullets with short **Bold labels:** whenever the answer has more than 2 short sentences",
     "- markdown_highlight_rule: use **bold** for short labels/keywords and inline code for tools/APIs/commands; never use raw HTML/color tags",
-  ];
+  ].filter(Boolean);
 
   if (experienceSuppressed) {
     lines.push("- do_not_add_personal_experience: true unless explicitly asked");
@@ -173,6 +206,9 @@ export function buildRequestScopedPolicy(input: {
   }
   if (answerIntent === "general_followup") {
     lines.push("- answer_shape: bullets for **Direct answer:**, **Context:**, **Next point:** when more than 2 sentences are needed");
+  }
+  if (answerIntent === "general_followup" && Array.isArray(metadata.previousCodeBlocks) && metadata.previousCodeBlocks.length > 0) {
+    lines.push("- technical_context: previous answer included code; maintain technical depth, show updated/modified code when the question implies a code change or scenario extension");
   }
 
   let codeContextBlock = "";

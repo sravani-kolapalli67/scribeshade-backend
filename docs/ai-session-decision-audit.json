@@ -1,0 +1,182 @@
+{
+  "auditName": "AI session decision layer realistic replay",
+  "project": "ScribeShade",
+  "createdAt": "2026-05-25",
+  "scope": [
+    "Backend AI session-state decision layer",
+    "Follow-up context binding",
+    "Code/query continuation",
+    "Scenario continuation",
+    "Theory follow-up",
+    "Experience question",
+    "Outside-context fresh question",
+    "Markdown answer policy preservation"
+  ],
+  "executionMode": {
+    "classifier": "mocked AI JSON decisions validated through backend normalizer and policy builder",
+    "liveModelCall": false,
+    "reason": "The test environment should not depend on OpenRouter network availability. Runtime code still calls the AI decision layer and falls back safely when unavailable."
+  },
+  "sessionTranscript": [
+    {
+      "turn": 1,
+      "speaker": "interviewer",
+      "text": "Let us talk about payroll data now. Suppose you need to pull salary records for active employees."
+    },
+    {
+      "turn": 2,
+      "speaker": "candidate",
+      "text": "I can write a query for that and join the employee table with salary history."
+    },
+    {
+      "turn": 3,
+      "speaker": "ai_answer",
+      "question": "How would you pull employee salary records for active payroll review?",
+      "answerShape": "SQL code answer",
+      "containsCode": true,
+      "codePreview": "SELECT e.employee_id, e.full_name, s.salary FROM employees e JOIN salaries s ON s.employee_id = e.employee_id WHERE e.status = 'ACTIVE';"
+    },
+    {
+      "turn": 4,
+      "speaker": "interviewer",
+      "text": "What if the same query takes around two seconds while fetching records?"
+    },
+    {
+      "turn": 5,
+      "speaker": "ai_decision",
+      "expectedIntent": "OPTIMIZE_CODE",
+      "expectedTargetAnswerId": "salary-sql",
+      "expectedContextToUse": "previous_code",
+      "expectedAnswerMode": "explain_existing_code",
+      "expectedBehavior": "Answer with SQL/query optimization guidance using the previous SQL code, not generic database theory."
+    },
+    {
+      "turn": 6,
+      "speaker": "interviewer",
+      "text": "Now imagine the payroll export API becomes slow in production during month-end processing. What would you check first?"
+    },
+    {
+      "turn": 7,
+      "speaker": "ai_answer",
+      "question": "A production API slows down during payroll export. What would you check?",
+      "answerShape": "Scenario/system answer",
+      "containsCode": false,
+      "coveredTopics": ["API latency", "database latency", "queue backlog", "observability"]
+    },
+    {
+      "turn": 8,
+      "speaker": "candidate_manual",
+      "text": "Continue from the database part."
+    },
+    {
+      "turn": 9,
+      "speaker": "ai_decision",
+      "expectedIntent": "CONTINUE_PREVIOUS",
+      "expectedTargetAnswerId": "api-scenario",
+      "expectedContextToUse": "previous_answer",
+      "expectedBehavior": "Continue the scenario from database checks without requiring frontend follow-up detection."
+    },
+    {
+      "turn": 10,
+      "speaker": "interviewer",
+      "text": "Why would indexing help here?"
+    },
+    {
+      "turn": 11,
+      "speaker": "ai_decision",
+      "expectedIntent": "FOLLOW_UP",
+      "expectedContextToUse": "previous_answer",
+      "expectedBehavior": "Explain the theory in context of the previous SQL/performance discussion."
+    },
+    {
+      "turn": 12,
+      "speaker": "interviewer",
+      "text": "Where have you used this kind of optimization in your projects?"
+    },
+    {
+      "turn": 13,
+      "speaker": "ai_decision",
+      "expectedIntent": "EXPERIENCE_QUESTION",
+      "expectedContextToUse": "recent_transcript",
+      "expectedBehavior": "Use resume/project context and avoid a generic theory answer."
+    },
+    {
+      "turn": 14,
+      "speaker": "candidate_manual",
+      "text": "What is the weather in Delhi tomorrow?"
+    },
+    {
+      "turn": 15,
+      "speaker": "ai_decision",
+      "expectedIntent": "NEW_QUESTION",
+      "expectedContextToUse": "none",
+      "expectedBehavior": "Do not bind stale SQL or scenario context."
+    }
+  ],
+  "checks": [
+    {
+      "name": "Indirect SQL performance follow-up",
+      "status": "covered_by_test",
+      "test": "realistic session replay uses AI decisions for code, scenario, theory, experience, and unrelated turns",
+      "assertions": [
+        "decision intent is OPTIMIZE_CODE",
+        "target answer id is salary-sql",
+        "requiresPreviousCode is true",
+        "answer policy is code_optimization_followup",
+        "FOLLOW-UP CODE CONTEXT includes previous SQL"
+      ]
+    },
+    {
+      "name": "Speaker-separated transcript is passed to decision layer",
+      "status": "covered_by_test",
+      "assertions": [
+        "decision prompt includes speakerSeparatedTranscript",
+        "decision prompt includes prior answer id salary-sql"
+      ]
+    },
+    {
+      "name": "Scenario continuation",
+      "status": "covered_by_test",
+      "assertions": [
+        "decision intent is CONTINUE_PREVIOUS",
+        "target answer id is api-scenario",
+        "contextToUse is previous_answer"
+      ]
+    },
+    {
+      "name": "Theory follow-up",
+      "status": "covered_by_test",
+      "assertions": [
+        "decision intent is FOLLOW_UP",
+        "context uses prior discussion"
+      ]
+    },
+    {
+      "name": "Experience question",
+      "status": "covered_by_test",
+      "assertions": [
+        "decision intent is EXPERIENCE_QUESTION",
+        "contextToUse is recent_transcript"
+      ]
+    },
+    {
+      "name": "Outside-context question",
+      "status": "covered_by_test",
+      "assertions": [
+        "decision intent is NEW_QUESTION",
+        "isFollowUp is false",
+        "contextToUse is none"
+      ]
+    }
+  ],
+  "validationCommands": [
+    "pnpm test -- src/features/session/ai-session-decision.test.ts src/features/session/answer-policy.test.ts src/features/session/answer-quality.test.ts",
+    "pnpm type-check",
+    "pnpm run build"
+  ],
+  "notes": [
+    "This audit validates dynamic backend decision behavior without relying on brittle frontend follow-up detection.",
+    "It does not call the live LLM in test mode; runtime code still uses OpenRouter for the decision layer and falls back to deterministic logic on timeout or invalid JSON.",
+    "Markdown answer formatting remains enforced by the backend prompt and answer policy."
+  ]
+}

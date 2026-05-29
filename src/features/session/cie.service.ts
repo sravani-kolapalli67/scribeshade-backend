@@ -229,9 +229,18 @@ export function trimResume(resumeText: string, targetBudget = 900): string {
 export function extractRelevantProjectContext(
   projectRecords: any[],
   query: string,
-  targetBudget = 700
+  targetBudget = 700,
+  options?: {
+    primaryProjectId?: string | null;
+    selectedProjectIds?: string[];
+  },
 ): string {
   if (!projectRecords || projectRecords.length === 0) return "";
+  const selectedProjectIds = Array.isArray(options?.selectedProjectIds)
+    ? options!.selectedProjectIds!
+    : [];
+  const fallbackPrimary = selectedProjectIds[0] || null;
+  const primaryProjectId = options?.primaryProjectId || fallbackPrimary;
 
   // Extract query keywords
   const queryWords = (query || "")
@@ -243,6 +252,15 @@ export function extractRelevantProjectContext(
     project: any;
     score: number;
   }
+
+  const queryLower = (query || "").toLowerCase();
+  const hasExplicitProjectNameMention = projectRecords.some((pr) => {
+    const items = Array.isArray(pr.projects) ? (pr.projects as any[]) : [];
+    return items.some((p: any) => {
+      const title = String(p?.projectHeader?.title || "").toLowerCase().trim();
+      return title.length >= 5 && queryLower.includes(title);
+    });
+  });
 
   // Score each project
   const scoredProjects: ScoredProject[] = [];
@@ -268,16 +286,44 @@ export function extractRelevantProjectContext(
         if (techText.includes(word)) score += 2;
         if (bodyText.includes(word)) score += 1;
       }
-      scoredProjects.push({ project: p, score });
+      const bonus =
+        !hasExplicitProjectNameMention &&
+        primaryProjectId &&
+        String(pr?.id) === primaryProjectId
+          ? 0.5
+          : 0;
+      scoredProjects.push({ project: { ...p, __selectedProjectId: pr?.id }, score: score + bonus });
     }
   }
 
   // For broad "tell me about your projects" asks, keep original order so all
   // selected projects are represented instead of over-favoring one match.
   const overviewMode = isProjectOverviewQuestion(query);
-  if (!overviewMode) {
+  if (overviewMode) {
+    const order = new Map<string, number>();
+    if (primaryProjectId) order.set(primaryProjectId, 0);
+    let i = primaryProjectId ? 1 : 0;
+    for (const id of selectedProjectIds) {
+      if (id === primaryProjectId) continue;
+      if (!order.has(id)) order.set(id, i++);
+    }
+    scoredProjects.sort((a, b) => {
+      const aId = String((a.project as any)?.__selectedProjectId ?? "");
+      const bId = String((b.project as any)?.__selectedProjectId ?? "");
+      const ai = order.get(aId) ?? Number.MAX_SAFE_INTEGER;
+      const bi = order.get(bId) ?? Number.MAX_SAFE_INTEGER;
+      return ai - bi;
+    });
+  } else {
     // Sort by score desc, fallback to original order
     scoredProjects.sort((a, b) => b.score - a.score);
+    if (primaryProjectId && !hasExplicitProjectNameMention) {
+      scoredProjects.sort((a, b) => {
+        const ap = String((a.project as any)?.__selectedProjectId ?? "") === primaryProjectId ? -1 : 0;
+        const bp = String((b.project as any)?.__selectedProjectId ?? "") === primaryProjectId ? -1 : 0;
+        return ap - bp;
+      });
+    }
   }
 
   // Serialize up to token budget
@@ -290,7 +336,12 @@ export function extractRelevantProjectContext(
     
     // Build compressed layout
     const lines: string[] = [];
-    lines.push(`━━━ PROJECT: ${header.title || "Untitled"} ━━━`);
+    const selectedId = String((p as any)?.__selectedProjectId ?? "");
+    const label =
+      primaryProjectId && selectedId === primaryProjectId
+        ? "PRIMARY PROJECT"
+        : "OPTIONAL PROJECT";
+    lines.push(`━━━ ${label}: ${header.title || "Untitled"} ━━━`);
     if (header.role) lines.push(`Role: ${header.role}`);
     if (header.domain) lines.push(`Domain: ${header.domain}`);
     
@@ -306,9 +357,23 @@ export function extractRelevantProjectContext(
 
     // Add sections but in a very dense format
     const sections: any[] = Array.isArray(p.sections) ? p.sections : [];
+    const prioritizedArchitectureSection = sections.find((sec: any) =>
+      sec?.key === "architecture_diagram" ||
+      sec?.key === "architecture_tree" ||
+      sec?.type === "code_block",
+    );
+    const orderedSections = prioritizedArchitectureSection
+      ? [
+          prioritizedArchitectureSection,
+          ...sections.filter((sec) => sec !== prioritizedArchitectureSection),
+        ]
+      : sections;
     const maxBulletsPerSection = overviewMode ? 2 : 3;
     const maxNarrativeChars = overviewMode ? 130 : 200;
-    for (const sec of sections) {
+    let architectureIncluded = false;
+    let flowIncluded = false;
+    let challengeIncluded = false;
+    for (const sec of orderedSections) {
       if (!sec?.type || !sec?.content || sec.type === "tech_tags") continue;
       
       const title = sec.title || sec.key || sec.type;
@@ -338,6 +403,63 @@ export function extractRelevantProjectContext(
         const metrics = sec.content.slice(0, 3).map((m: any) => ` • ${m.metric}: ${m.value}`);
         if (metrics.length > 0) {
           lines.push(`[Metrics]:\n${metrics.join("\n")}`);
+        }
+      } else if (!architectureIncluded && (sec.key === "architecture_diagram" || sec.key === "architecture_tree" || sec.type === "code_block")) {
+        if (typeof sec.content === "string" && sec.content.trim()) {
+          const raw = sec.content.trim();
+          // Preserve diagram shape for project-explanation asks so the model can
+          // reuse the same flow in markdown answers.
+          if (sec.key === "architecture_diagram" || /diagram|architecture/i.test(String(sec.title || ""))) {
+            const diagramLines = raw
+              .split(/\r?\n/)
+              .map((line: string) => line.replace(/\t/g, "  ").replace(/\s+$/g, ""))
+              .filter((line: string) => line.length > 0)
+              .slice(0, 18);
+            if (diagramLines.length > 0) {
+              lines.push("[Architecture Diagram]:");
+              lines.push("```text");
+              lines.push(...diagramLines);
+              lines.push("```");
+              architectureIncluded = true;
+            }
+          }
+          if (!architectureIncluded) {
+            lines.push(`[Architecture]: ${raw.replace(/\s+/g, " ").slice(0, 220)}...`);
+            architectureIncluded = true;
+          }
+        } else if (sec.key === "architecture_tree" && sec.content?.layers && Array.isArray(sec.content.layers)) {
+          const layerNames = sec.content.layers
+            .map((l: any) => l?.name)
+            .filter(Boolean)
+            .slice(0, 4)
+            .join(" -> ");
+          if (layerNames) {
+            lines.push(`[Architecture]: ${layerNames}`);
+            architectureIncluded = true;
+          }
+        }
+      } else if (!flowIncluded && (sec.key === "data_flow" || sec.type === "steps")) {
+        if (Array.isArray(sec.content) && sec.content.length > 0) {
+          const stepSummary = sec.content
+            .slice(0, 3)
+            .map((s: any) => s?.step || s?.title || s?.description)
+            .filter(Boolean)
+            .join(" -> ");
+          if (stepSummary) {
+            lines.push(`[Flow]: ${stepSummary}`);
+            flowIncluded = true;
+          }
+        }
+      } else if (!challengeIncluded && (sec.key === "challenges_resolution" || sec.type === "challenge_cards")) {
+        if (Array.isArray(sec.content) && sec.content.length > 0) {
+          const first = sec.content[0] || {};
+          const challenge = first.challenge || first.title || "";
+          const solution = first.solution || first.body || "";
+          const value = [challenge, solution].filter(Boolean).join(" => ");
+          if (value) {
+            lines.push(`[Challenge]: ${String(value).slice(0, 220)}`);
+            challengeIncluded = true;
+          }
         }
       }
     }
@@ -532,6 +654,17 @@ export async function buildOptimizedContext(
   const hasSelectedProjects =
     Array.isArray(session.projectIds) &&
     (session.projectIds as string[]).length > 0;
+  const selectedProjectIds = Array.isArray(session.projectIds)
+    ? (session.projectIds as unknown[])
+        .filter((v) => typeof v === "string")
+        .map((v) => String(v).trim())
+        .filter(Boolean)
+    : [];
+  const primaryProjectId =
+    typeof (session as any).primaryProjectId === "string" &&
+    (session as any).primaryProjectId.trim().length > 0
+      ? (session as any).primaryProjectId.trim()
+      : (selectedProjectIds[0] ?? null);
   const isProjectQuestion = isProjectExperienceQuestion(query);
   const isProjectOverview = isProjectOverviewQuestion(query);
   const projectPriorityActive =
@@ -578,10 +711,25 @@ export async function buildOptimizedContext(
     includeDocuments && session.documentId
       ? prisma.document.findUnique({ where: { id: session.documentId } }).catch(() => null)
       : Promise.resolve(null),
-    includeProjects && session.projectIds && Array.isArray(session.projectIds) && (session.projectIds as string[]).length > 0
-      ? prisma.project.findMany({ where: { id: { in: session.projectIds as string[] } } }).catch(() => [])
+    includeProjects && selectedProjectIds.length > 0
+      ? prisma.project.findMany({ where: { id: { in: selectedProjectIds } } }).catch(() => [])
       : Promise.resolve([])
   ]);
+  const orderedProjectRecords = selectedProjectIds.length
+    ? [...(projectRecords || [])].sort((a: any, b: any) => {
+        const aId = String(a?.id ?? "");
+        const bId = String(b?.id ?? "");
+        const aIndex =
+          aId === primaryProjectId
+            ? -1
+            : selectedProjectIds.indexOf(aId);
+        const bIndex =
+          bId === primaryProjectId
+            ? -1
+            : selectedProjectIds.indexOf(bId);
+        return aIndex - bIndex;
+      })
+    : [];
 
   // Extract document text if fetched
   let documentRawText = "";
@@ -600,7 +748,10 @@ export async function buildOptimizedContext(
   const optimizedResume = includeResume ? trimResume(resumeRaw, budgets.resume) : "";
 
   const optimizedProjects = includeProjects
-    ? extractRelevantProjectContext(projectRecords || [], query || "", budgets.projects)
+    ? extractRelevantProjectContext(orderedProjectRecords || [], query || "", budgets.projects, {
+        primaryProjectId,
+        selectedProjectIds,
+      })
     : "";
 
   const optimizedDoc = includeDocuments
@@ -655,7 +806,10 @@ export async function buildOptimizedContext(
     const scaleFactor = effectiveBudget / totalCalculated;
 
     if (includeResume) finalResume = trimResume(resumeRaw, Math.floor(resumeTokens * scaleFactor));
-    if (includeProjects) finalProjects = extractRelevantProjectContext(projectRecords || [], query || "", Math.floor(projectsTokens * scaleFactor));
+    if (includeProjects) finalProjects = extractRelevantProjectContext(orderedProjectRecords || [], query || "", Math.floor(projectsTokens * scaleFactor), {
+      primaryProjectId,
+      selectedProjectIds,
+    });
     if (includeDocuments) finalDoc = extractRelevantDocumentContext(documentRawText, query || "", Math.floor(docTokens * scaleFactor));
     if (includeHistory) finalHistory = buildSlidingTranscriptMemory(messages, Math.floor(historyTokens * scaleFactor));
   }

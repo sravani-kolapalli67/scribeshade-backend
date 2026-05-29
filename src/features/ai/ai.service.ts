@@ -4,6 +4,7 @@ import { AppError } from "../../shared/middleware/error.middleware";
 import { prisma } from "../../shared/lib/prisma";
 import { getUnifiedResumeContext } from "../resume/resume.service";
 import type {
+  DetectResumeProjectsRequest,
   ProjectGenerationRequest,
   ProjectGenerationResponse,
   SkillMismatchResult,
@@ -200,6 +201,7 @@ function buildPrompt(input: {
   experienceLevel: string;
   knownSkills: string[];
   categories: string[];
+  primaryResumeProject?: string;
 }) {
   return `You are an expert engineering interview coach and resume strategist.
 
@@ -220,7 +222,77 @@ Experience level: ${input.experienceLevel}
 Known skills: ${input.knownSkills.join(", ")}
 Allowed categories: ${input.categories.join(", ")}
 Job description: ${input.jdText || "(not provided)"}
+Primary resume project to enhance: ${input.primaryResumeProject || "(not provided)"}
 `;
+}
+
+function normalizeProjectTitle(value: string): string {
+  return value.trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+function dedupeProjectTitles(values: string[]): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const value of values) {
+    const cleaned = value.trim().replace(/\s+/g, " ");
+    if (!cleaned) continue;
+    const key = cleaned.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(cleaned);
+  }
+  return result;
+}
+
+function parseProjectLinesFromText(text: string): string[] {
+  const lines = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  const projectLines = lines
+    .filter((line) => /^[•\-\*\d\.\)]\s+/.test(line) || /project/i.test(line))
+    .map((line) => line.replace(/^[•\-\*\d\.\)]\s+/, "").trim())
+    .filter((line) => line.length >= 6 && line.length <= 140);
+
+  return dedupeProjectTitles(projectLines).slice(0, 12);
+}
+
+function detectResumeProjectsFromContext(resume: Awaited<ReturnType<typeof getUnifiedResumeContext>>): string[] {
+  if (!resume) return [];
+
+  const parsed = (resume.parsedData || {}) as Record<string, unknown>;
+  const parsedProjects = Array.isArray(parsed.projects)
+    ? parsed.projects
+        .map((item) => {
+          if (typeof item === "string") return item;
+          if (item && typeof item === "object") {
+            const obj = item as Record<string, unknown>;
+            return String(obj.title || obj.name || obj.project_title || "").trim();
+          }
+          return "";
+        })
+        .filter((v) => v.length >= 2)
+    : [];
+
+  const textProjects = parseProjectLinesFromText(resume.resumeContext || "");
+  return dedupeProjectTitles([...parsedProjects, ...textProjects]).slice(0, 12);
+}
+
+export async function detectResumeProjects(
+  dbUserId: string,
+  payload: DetectResumeProjectsRequest,
+) {
+  const resume = await getUnifiedResumeContext(payload.resume_id);
+  if (!resume) throw new AppError(404, "Resume not found");
+  if (resume.userId !== dbUserId) throw new AppError(403, "Forbidden");
+
+  const projects = detectResumeProjectsFromContext(resume);
+  return {
+    resume_id: payload.resume_id,
+    projects,
+    requires_primary_selection: projects.length > 0,
+  };
 }
 
 async function callProjectModel(prompt: string) {
@@ -364,6 +436,27 @@ export async function generateProjectGeneration(
     throw new AppError(403, "Forbidden");
   }
 
+  if (payload.resume_id) {
+    const detectedProjects = detectResumeProjectsFromContext(resume);
+    if (detectedProjects.length > 0) {
+      if (!payload.primary_resume_project) {
+        throw new AppError(
+          400,
+          "primary_resume_project is required when resume has detected projects",
+        );
+      }
+
+      const selected = normalizeProjectTitle(payload.primary_resume_project);
+      const allowed = detectedProjects.map(normalizeProjectTitle);
+      if (!allowed.includes(selected)) {
+        throw new AppError(
+          400,
+          "primary_resume_project must match one detected resume project",
+        );
+      }
+    }
+  }
+
   const extracted = extractSkillsFromResumeArtifacts(
     resume?.parsedData,
     resume?.metadataIndex,
@@ -391,6 +484,7 @@ export async function generateProjectGeneration(
     experienceLevel: payload.experience_level,
     knownSkills: mismatch.scopeLimited ? mismatch.allowedSkills : allKnownSkills,
     categories,
+    primaryResumeProject: payload.primary_resume_project,
   });
 
   const aiResponse = await callProjectModel(prompt);

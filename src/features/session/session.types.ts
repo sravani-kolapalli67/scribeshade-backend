@@ -42,4 +42,6 @@ export interface CreateSessionData {
   free: boolean;
   /** IDs of AI-generated Project records to include as context */
   projectIds?: string[];
+  /** Primary project ID when multiple projects are selected */
+  primaryProjectId?: string;
 }

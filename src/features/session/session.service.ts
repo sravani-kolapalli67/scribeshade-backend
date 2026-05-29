@@ -24,6 +24,11 @@ import {
 import type { AIAnswerLiveContextMetadata } from "./ai-answer.dto";
 import { buildRequestScopedPolicy } from "./answer-policy";
 import {
+  decideAISessionState,
+  fallbackAISessionDecision,
+  toDecisionContextTargets,
+} from "./ai-session-decision";
+import {
   buildEffectiveLiveContextMetadata,
   classifyConversationIntent,
   deriveTopic,
@@ -45,6 +50,131 @@ const ai = new OpenRouter({
 
 const model = process.env.OPENROUTER_MODEL;
 const ACTIVE_QUESTION_CONFIDENCE_THRESHOLD = 0.58;
+const AI_DECISION_CONFIDENCE_THRESHOLD = 0.62;
+
+const SESSION_LIST_SELECT = {
+  id: true,
+  companyName: true,
+  jobDescription: true,
+  mode: true,
+  free: true,
+  aiUsage: true,
+  status: true,
+  endedAt: true,
+  createdAt: true,
+  updatedAt: true,
+  autoGenerateResponse: true,
+  saveTranscription: true,
+  creditsDeducted: true,
+  deductionReason: true,
+  company: {
+    select: {
+      name: true,
+    },
+  },
+} satisfies Prisma.SessionSelect;
+
+type SessionListFilters = {
+  search?: string;
+  from_date?: string;
+  to_date?: string;
+};
+
+const sessionListInFlight = new Map<
+  string,
+  Promise<Prisma.SessionGetPayload<{ select: typeof SESSION_LIST_SELECT }>[]>
+>();
+
+function createSessionListCacheKey(userId: string, filters?: SessionListFilters): string {
+  return JSON.stringify({
+    userId,
+    search: filters?.search ?? "",
+    from_date: filters?.from_date ?? "",
+    to_date: filters?.to_date ?? "",
+  });
+}
+
+function buildSessionListWhere(userId: string, filters?: SessionListFilters): Prisma.SessionWhereInput {
+  const where: Prisma.SessionWhereInput = { userId };
+
+  if (filters?.search) {
+    where.companyName = { contains: filters.search, mode: "insensitive" };
+  }
+
+  if (filters?.from_date || filters?.to_date) {
+    const createdAt: Prisma.DateTimeFilter = {};
+    if (filters.from_date) {
+      createdAt.gte = new Date(filters.from_date);
+    }
+    if (filters.to_date) {
+      const to = new Date(filters.to_date);
+      to.setHours(23, 59, 59, 999);
+      createdAt.lte = to;
+    }
+    where.createdAt = createdAt;
+  }
+
+  return where;
+}
+
+function uniqNonEmptyStrings(values: unknown[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const value of values) {
+    if (typeof value !== "string") continue;
+    const trimmed = value.trim();
+    if (!trimmed || seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    out.push(trimmed);
+  }
+  return out;
+}
+
+function resolveSessionProjectSelection(input: {
+  projectIds?: string[];
+  primaryProjectId?: string;
+}): { projectIds: string[]; primaryProjectId: string | null } {
+  const deduped = uniqNonEmptyStrings(input.projectIds ?? []);
+  if (deduped.length > 2) {
+    throw new AppError(400, "A maximum of 2 projects can be selected for a session");
+  }
+  if (deduped.length === 0) {
+    return { projectIds: [], primaryProjectId: null };
+  }
+  if (deduped.length === 1) {
+    return { projectIds: deduped, primaryProjectId: deduped[0] };
+  }
+
+  const primary = typeof input.primaryProjectId === "string"
+    ? input.primaryProjectId.trim()
+    : "";
+  if (!primary) {
+    throw new AppError(400, "primaryProjectId is required when selecting 2 projects");
+  }
+  if (!deduped.includes(primary)) {
+    throw new AppError(400, "primaryProjectId must be one of selected projectIds");
+  }
+  return { projectIds: deduped, primaryProjectId: primary };
+}
+
+function orderProjectRecordsBySelection(
+  records: any[],
+  selectedIds: string[],
+  primaryProjectId?: string | null,
+): any[] {
+  const order = new Map<string, number>();
+  if (primaryProjectId) order.set(primaryProjectId, 0);
+  let offset = primaryProjectId ? 1 : 0;
+  for (const id of selectedIds) {
+    if (id === primaryProjectId) continue;
+    if (!order.has(id)) order.set(id, offset++);
+  }
+  return [...records].sort((a, b) => {
+    const ai = order.get(String(a?.id ?? "")) ?? Number.MAX_SAFE_INTEGER;
+    const bi = order.get(String(b?.id ?? "")) ?? Number.MAX_SAFE_INTEGER;
+    return ai - bi;
+  });
+}
 
 /** Normalize human-readable model names sent by frontend to valid OpenRouter slugs */
 const MODEL_ID_MAP: Record<string, string> = {
@@ -123,6 +253,30 @@ function resolveScreenMaxOutputTokens() {
     return Math.min(Math.floor(fromEnv), 8000);
   }
   return 5500;
+}
+
+function isProjectExplainQuestion(question: string): boolean {
+  const q = (question || "").toLowerCase().trim();
+  if (!q) return false;
+  return /\b(explain|describe|walk me through|tell me about)\b[\s\w]{0,40}\b(your\s+)?projects?\b/.test(q);
+}
+
+function extractArchitectureDiagramBlock(projectsContext: unknown): string | null {
+  if (typeof projectsContext !== "string" || !projectsContext.trim()) return null;
+
+  const match = projectsContext.match(
+    /\[Architecture Diagram\]:\s*```text\s*([\s\S]*?)```/i,
+  );
+  if (!match?.[1]) return null;
+
+  const lines = match[1]
+    .split(/\r?\n/)
+    .map((line: string) => line.replace(/\t/g, "  ").trimEnd())
+    .filter(Boolean)
+    .slice(0, 16);
+  if (lines.length === 0) return null;
+
+  return lines.join("\n");
 }
 
 /**
@@ -207,6 +361,10 @@ export async function createSession(data: CreateSessionData) {
   if (openSession) {
     throw new AppError(409, `ACTIVE_SESSION_EXISTS:${openSession.id}`);
   }
+  const projectSelection = resolveSessionProjectSelection({
+    projectIds: data.projectIds,
+    primaryProjectId: data.primaryProjectId,
+  });
 
   let finalCompanyId = "";
 
@@ -259,7 +417,8 @@ export async function createSession(data: CreateSessionData) {
       mode: data.mode,
       free: data.free,
       status: SessionStatus.PRE_CHECK,
-      projectIds: data.projectIds && data.projectIds.length > 0 ? data.projectIds : [],
+      projectIds: projectSelection.projectIds,
+      primaryProjectId: projectSelection.primaryProjectId,
     },
   });
 }
@@ -269,31 +428,28 @@ export async function createSession(data: CreateSessionData) {
  */
 export async function getSessionsByUser(
   userId: string,
-  filters?: { search?: string; from_date?: string; to_date?: string },
+  filters?: SessionListFilters,
 ) {
-  const where: any = { userId };
-
-  if (filters?.search) {
-    where.companyName = { contains: filters.search, mode: "insensitive" };
+  const cacheKey = createSessionListCacheKey(userId, filters);
+  const existing = sessionListInFlight.get(cacheKey);
+  if (existing) {
+    return existing;
   }
 
-  if (filters?.from_date || filters?.to_date) {
-    where.createdAt = {};
-    if (filters.from_date) {
-      where.createdAt.gte = new Date(filters.from_date);
-    }
-    if (filters.to_date) {
-      const to = new Date(filters.to_date);
-      to.setHours(23, 59, 59, 999);
-      where.createdAt.lte = to;
-    }
-  }
-
-  return prisma.session.findMany({
+  const where = buildSessionListWhere(userId, filters);
+  const query = prisma.session.findMany({
     where,
-    include: { feedback: true },
+    select: SESSION_LIST_SELECT,
     orderBy: { createdAt: "desc" },
   });
+
+  sessionListInFlight.set(cacheKey, query);
+
+  try {
+    return await query;
+  } finally {
+    sessionListInFlight.delete(cacheKey);
+  }
 }
 
 /**
@@ -657,25 +813,41 @@ export async function getSessionFullContext(sessionId: string, query?: string) {
   }
 
   // 3. Fetch projects: use session-specific projectIds only
-  const projectIds = Array.isArray(session.projectIds) ? (session.projectIds as string[]) : [];
+  const projectIds = uniqNonEmptyStrings(
+    Array.isArray(session.projectIds) ? (session.projectIds as unknown[]) : [],
+  );
+  const primaryProjectId =
+    typeof (session as any).primaryProjectId === "string" &&
+    (session as any).primaryProjectId.trim().length > 0
+      ? (session as any).primaryProjectId.trim()
+      : (projectIds[0] ?? null);
   let projectRecords: any[] = [];
   if (projectIds.length > 0) {
-    projectRecords = await prisma.project.findMany({
+    const fetched = await prisma.project.findMany({
       where: { id: { in: projectIds } }
     }).catch((e) => { console.warn("Failed to fetch session projects:", e); return []; });
+    projectRecords = orderProjectRecordsBySelection(
+      fetched,
+      projectIds,
+      primaryProjectId,
+    );
   }
 
   // Serialize selected AI projects into a rich, readable context string.
   let projectsText = "";
   if (projectRecords.length > 0) {
     projectsText = projectRecords
-      .map((pr) => {
+      .map((pr, selectedIdx) => {
         const items = Array.isArray(pr.projects) ? (pr.projects as any[]) : [];
         return items
           .map((p: any, idx: number) => {
             const header = p.projectHeader || {};
+            const tag =
+              selectedIdx === 0
+                ? "PRIMARY PROJECT"
+                : "OPTIONAL PROJECT";
             const lines: string[] = [
-              `━━━ PROJECT ${idx + 1}: ${header.title || "Untitled"} ━━━`,
+              `━━━ ${tag} ${selectedIdx + 1}.${idx + 1}: ${header.title || "Untitled"} ━━━`,
               header.tagline ? `Tagline: ${header.tagline}` : "",
               header.domain ? `Domain: ${header.domain}` : "",
               header.role ? `Your Role: ${header.role}` : "",
@@ -1158,6 +1330,7 @@ export async function getAIAnswer(
       resumeId: true,
       documentId: true,
       projectIds: true,
+      primaryProjectId: true,
       userId: true,
       saveTranscription: true,
     },
@@ -1191,41 +1364,49 @@ export async function getAIAnswer(
     const snapshot = await prisma.answerGenerationSnapshot.findUnique({
       where: { id: snapshotId },
     });
-    if (!snapshot) {
-      throw new Error(`Snapshot ${snapshotId} not found`);
+
+    if (snapshot) {
+      finalTranscript = snapshot.originalQuestionTranscript;
+
+      const docText = Array.isArray(snapshot.selectedDocumentContext)
+        ? (snapshot.selectedDocumentContext as string[]).join("\n\n")
+        : (snapshot.selectedDocumentContext as string || "");
+
+      const projText = Array.isArray(snapshot.selectedProjectContext)
+        ? (snapshot.selectedProjectContext as string[]).join("\n\n")
+        : (snapshot.selectedProjectContext as string || "");
+
+      const ragText = Array.isArray(snapshot.ragContext)
+        ? (snapshot.ragContext as string[]).join("\n\n")
+        : (snapshot.ragContext as string || "");
+
+      contextForCall = {
+        company: session.company?.name || session.companyName || "Unknown",
+        role: session.jobDescription || "Interviewee",
+        language: session.language || "General",
+        simpleLanguage: session.simpleLanguage,
+        instructions: session.extraContext || "None",
+        resume: snapshot.selectedResumeContext || "No resume provided.",
+        document: docText || "None provided.",
+        projects: projText || "No projects provided.",
+        history: "No previous interactions in this session.",
+        vectorContext: ragText || null,
+        hasSelectedProjects:
+          Array.isArray(session.projectIds) &&
+          (session.projectIds as string[]).length > 0,
+        projectPriorityMode: "project_questions_only",
+        isProjectQuestion: isProjectExperienceQuestion(finalTranscript),
+      };
+    } else {
+      console.warn(
+        `[AI Answer][Regenerate] Snapshot ${snapshotId} not found. Falling back to live session context.`,
+      );
+      finalSnapshotId = undefined;
+      contextForCall = await buildOptimizedContext(id, finalTranscript, undefined, session);
+      if (!contextForCall) {
+        throw new Error("Failed to build context");
+      }
     }
-
-    finalTranscript = snapshot.originalQuestionTranscript;
-
-    const docText = Array.isArray(snapshot.selectedDocumentContext)
-      ? (snapshot.selectedDocumentContext as string[]).join("\n\n")
-      : (snapshot.selectedDocumentContext as string || "");
-
-    const projText = Array.isArray(snapshot.selectedProjectContext)
-      ? (snapshot.selectedProjectContext as string[]).join("\n\n")
-      : (snapshot.selectedProjectContext as string || "");
-
-    const ragText = Array.isArray(snapshot.ragContext)
-      ? (snapshot.ragContext as string[]).join("\n\n")
-      : (snapshot.ragContext as string || "");
-
-    contextForCall = {
-      company: session.company?.name || session.companyName || "Unknown",
-      role: session.jobDescription || "Interviewee",
-      language: session.language || "General",
-      simpleLanguage: session.simpleLanguage,
-      instructions: session.extraContext || "None",
-      resume: snapshot.selectedResumeContext || "No resume provided.",
-      document: docText || "None provided.",
-      projects: projText || "No projects provided.",
-      history: "No previous interactions in this session.",
-      vectorContext: ragText || null,
-      hasSelectedProjects:
-        Array.isArray(session.projectIds) &&
-        (session.projectIds as string[]).length > 0,
-      projectPriorityMode: "project_questions_only",
-      isProjectQuestion: isProjectExperienceQuestion(finalTranscript),
-    };
   } else {
     contextForCall = await buildOptimizedContext(id, finalTranscript, undefined, session);
     if (!contextForCall) {
@@ -1260,21 +1441,90 @@ export async function getAIAnswer(
       selectedAnswerCodeBlocks: liveContextMetadata?.selectedAnswerCodeBlocks,
       selectedAnswerTopic: liveContextMetadata?.selectedAnswerTopic,
     });
-    const backendDetectedFollowup = followup.isExplicitFollowupReference ||
-      isFollowupConversationIntent(conversationIntent);
+    const fallbackDecision = fallbackAISessionDecision({
+      currentQuestion: guard.resolvedCurrentQuestion,
+      conversationIntent,
+      followup,
+    });
+    const aiDecisionResult = await decideAISessionState({
+      ai,
+      model: targetModel,
+      provider: latencyOptimizedProvider as any,
+      fallback: fallbackDecision,
+      input: {
+        currentQuestion: guard.resolvedCurrentQuestion,
+        recentTranscriptWindow: liveContextMetadata?.recentTranscriptWindow,
+        speakerSeparatedTranscript: liveContextMetadata?.speakerSeparatedTranscript,
+        activeQuestionDetection: detection,
+        previousAiAnswer: liveContextMetadata?.previousAiAnswer,
+        previousCodeBlocks: liveContextMetadata?.previousCodeBlocks,
+        selectedAnswerId: liveContextMetadata?.selectedAnswerId,
+        selectedAnswerQuestion: liveContextMetadata?.selectedAnswerQuestion,
+        selectedAnswerText: liveContextMetadata?.selectedAnswerText,
+        selectedAnswerTopic: liveContextMetadata?.selectedAnswerTopic,
+        answerHistory: toDecisionContextTargets(history),
+        deterministic: {
+          conversationIntent,
+          isExplicitFollowupReference: followup.isExplicitFollowupReference,
+          fallbackTargetId: followup.target?.id || null,
+          fallbackTargetHasCode: !!followup.target?.codeBlocks?.length,
+          fallbackTargetTopic: followup.target?.topic || null,
+          reasonForNoTarget: followup.reasonForNoTarget,
+        },
+      },
+    });
+    const aiDecision = aiDecisionResult.decision;
+    const aiDecisionAuthoritative =
+      !aiDecisionResult.fallbackDecisionUsed &&
+      aiDecision.confidence >= AI_DECISION_CONFIDENCE_THRESHOLD;
+    const aiDetectedFollowup =
+      aiDecision.isFollowUp ||
+      [
+        "FOLLOW_UP",
+        "CONTINUE_PREVIOUS",
+        "EXPLAIN_CODE",
+        "DEBUG_CODE",
+        "OPTIMIZE_CODE",
+        "SCENARIO_QUESTION",
+      ].includes(aiDecision.intent);
+    const backendDetectedFollowup = aiDecisionAuthoritative
+      ? aiDetectedFollowup
+      : followup.isExplicitFollowupReference || isFollowupConversationIntent(conversationIntent);
     const shouldUseFollowupContext = !!detection?.isFollowUp || backendDetectedFollowup;
     const referencedTarget = detection?.referencedHistoryTurnId
       ? history.find((h) => h.id === detection.referencedHistoryTurnId) || null
       : null;
     const topicChanged = !!detection?.topicChanged;
+    const aiDecisionTarget = aiDecision.targetAnswerId
+      ? history.find((h) => h.id === aiDecision.targetAnswerId) || null
+      : null;
+    const aiDecisionLatestCodeTarget =
+      aiDecisionAuthoritative &&
+      aiDecision.requiresPreviousCode &&
+      !aiDecisionTarget
+        ? [...history].reverse().find((h) => h.codeBlocks.length > 0) || null
+        : null;
+    const clearAiFreshQuestion =
+      aiDecisionAuthoritative &&
+      aiDecision.intent === "NEW_QUESTION" &&
+      !aiDecision.isFollowUp &&
+      aiDecision.contextToUse === "none";
+    const effectiveTopicChanged = clearAiFreshQuestion
+      ? true
+      : aiDecisionAuthoritative && aiDetectedFollowup
+        ? false
+        : topicChanged;
     const metadataForRequest = isRegenerate
       ? liveContextMetadata
-      : shouldUseFollowupContext && !topicChanged
+      : shouldUseFollowupContext && !effectiveTopicChanged
       ? liveContextMetadata
       : {
           ...liveContextMetadata,
-          previousAiAnswer: undefined,
-          previousCodeBlocks: undefined,
+          // Always preserve previousAiAnswer/previousCodeBlocks so the AI
+          // maintains technical continuity regardless of follow-up classification.
+          // Only strip the selected-answer bindings that anchor to a specific turn.
+          previousAiAnswer: liveContextMetadata?.previousAiAnswer,
+          previousCodeBlocks: liveContextMetadata?.previousCodeBlocks,
           selectedAnswerId: undefined,
           selectedAnswerQuestion: undefined,
           selectedAnswerText: undefined,
@@ -1310,8 +1560,12 @@ export async function getAIAnswer(
     const selectedTargetForRequest =
       isRegenerate && followup.target
       ? followup.target
-      : topicChanged
+      : effectiveTopicChanged
       ? null
+      : shouldUseFollowupContext && aiDecisionAuthoritative && aiDecisionTarget
+      ? aiDecisionTarget
+      : shouldUseFollowupContext && aiDecisionLatestCodeTarget
+      ? aiDecisionLatestCodeTarget
       : shouldUseFollowupContext && hasExplicitReference && referencedTarget
       ? referencedTarget
       : shouldUseFollowupContext && !hasExplicitReference
@@ -1335,25 +1589,31 @@ export async function getAIAnswer(
       question: guard.resolvedCurrentQuestion,
       metadata: effectiveMetadata,
       cieComplexity: contextForCall?.complexity,
+      aiDecision,
     });
     const codeFollowupConstraint =
-      followup.isExplicitFollowupReference &&
-      isCodeFollowupQuestion(guard.resolvedCurrentQuestion) &&
+      (followup.isExplicitFollowupReference ||
+        (aiDecisionAuthoritative && aiDecision.requiresPreviousCode)) &&
+      (isCodeFollowupQuestion(guard.resolvedCurrentQuestion) || aiDecision.requiresPreviousCode) &&
       selectedCodeContext.codeBlocks.length > 0
         ? "\n- Answer ONLY using the selected prior answer/code as the follow-up target. Do not substitute resume/project context unless user explicitly asks for experience."
         : "";
     const selectedAnswerExcerptBlock =
-      (followup.isExplicitFollowupReference || isRegenerate) &&
-      !isCodeFollowupQuestion(guard.resolvedCurrentQuestion) &&
+      (followup.isExplicitFollowupReference ||
+        (aiDecisionAuthoritative && aiDecision.isFollowUp) ||
+        isRegenerate) &&
+      !(isCodeFollowupQuestion(guard.resolvedCurrentQuestion) || aiDecision.requiresPreviousCode) &&
       selectedTargetForRequest?.answer?.trim() &&
-      (followup.targetConfidence ?? 0) >= 0.6
+      ((followup.targetConfidence ?? 0) >= 0.6 || aiDecisionAuthoritative)
         ? `\nFOLLOW-UP ANSWER CONTEXT (for this request only):\nSelected prior answer excerpt:\n${selectedTargetForRequest.answer
             .trim()
             .slice(0, 800)}`
         : "";
     const noCodeFollowupGuidance =
-      (followup.isExplicitFollowupReference || isRegenerate) &&
-      isCodeFollowupQuestion(guard.resolvedCurrentQuestion) &&
+      (followup.isExplicitFollowupReference ||
+        (aiDecisionAuthoritative && aiDecision.requiresPreviousCode) ||
+        isRegenerate) &&
+      (isCodeFollowupQuestion(guard.resolvedCurrentQuestion) || aiDecision.requiresPreviousCode) &&
       selectedCodeContext.codeBlocks.length === 0
         ? "\nFOLLOW-UP CONTEXT: I do not have a previous code/query in this session to explain. State this briefly, then provide generic guidance."
         : "";
@@ -1379,7 +1639,16 @@ export async function getAIAnswer(
       isRegenerate &&
       (liveContextMetadata as any)?.regenerateInstruction,
     );
-    const userMessage = `${policy.policyBlock}${codeFollowupConstraint}\n${policy.codeContextBlock}${selectedAnswerExcerptBlock}${noCodeFollowupGuidance}${regenerateInstructionBlock}\n\n${baseUserMessage}`;
+    const shouldForceDiagram =
+      !!contextForCall?.hasSelectedProjects &&
+      isProjectExplainQuestion(guard.resolvedCurrentQuestion);
+    const selectedArchitectureDiagram = shouldForceDiagram
+      ? extractArchitectureDiagramBlock(contextForCall?.projects)
+      : null;
+    const projectDiagramConstraint = selectedArchitectureDiagram
+      ? `\nPROJECT-EXPLAIN DIAGRAM REQUIREMENT (HARD):\n- The user asked to explain project(s).\n- You MUST include one markdown architecture flow block under **ANSWER:** using fenced \`\`\`text.\n- Use ONLY the architecture flow from the selected project context below (do not invent or replace it).\nArchitecture flow source:\n\`\`\`text\n${selectedArchitectureDiagram}\n\`\`\``
+      : "";
+    const userMessage = `${policy.policyBlock}${codeFollowupConstraint}\n${policy.codeContextBlock}${selectedAnswerExcerptBlock}${noCodeFollowupGuidance}${regenerateInstructionBlock}${projectDiagramConstraint}\n\n${baseUserMessage}`;
     const systemTokens = estimatePromptTokensForLog(systemPrompt);
     const userTokens = estimatePromptTokensForLog(userMessage);
     console.log(`[CIE] Prompt breakdown | system: ${systemTokens}t | user: ${userTokens}t | total: ${systemTokens + userTokens}t | complexity: ${contextForCall?.complexity || 'unknown'}`);
@@ -1391,6 +1660,20 @@ export async function getAIAnswer(
         weakQuestionReconstructedBackend: guard.weakQuestionReconstructedBackend,
         questionPollutionDetected: guard.questionPollutionDetected,
         conversationIntent,
+        aiDecisionIntent: aiDecision.intent,
+        aiDecisionConfidence: aiDecision.confidence,
+        aiDecisionTargetAnswerId: aiDecision.targetAnswerId,
+        aiDecisionReason: aiDecision.reason,
+        aiDecisionContextToUse: aiDecision.contextToUse,
+        fallbackDecisionUsed: aiDecisionResult.fallbackDecisionUsed,
+        aiDecisionError: aiDecisionResult.error || null,
+        contextBindingSource: aiDecisionAuthoritative && aiDecisionTarget
+          ? "ai_decision"
+          : aiDecisionLatestCodeTarget
+            ? "ai_decision_latest_code"
+          : selectedTargetForRequest
+            ? followup.source
+            : "none",
         backendDetectedFollowup,
         frontendDetectedFollowup: !!detection?.isFollowUp,
         isExplicitFollowupReference: followup.isExplicitFollowupReference,
@@ -1416,6 +1699,7 @@ export async function getAIAnswer(
         regenerateUsedOriginalTranscript,
         regeneratePreservedSelectedTarget,
         regenerateInstructionApplied,
+        diagramConstraintApplied: Boolean(projectDiagramConstraint),
         questionTopic: deriveTopic(guard.resolvedCurrentQuestion, effectiveMetadata.previousAiAnswer),
         answerIntent: policy.answerIntent,
         effectiveAnswerMode: policy.effectiveAnswerMode,

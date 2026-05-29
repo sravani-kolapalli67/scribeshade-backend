@@ -1,0 +1,487 @@
+{
+  "auditName": "AI session decision live OpenRouter audit",
+  "project": "ScribeShade",
+  "createdAt": "2026-05-25T09:17:03.894Z",
+  "liveModelCall": true,
+  "model": "google/gemma-4-26b-a4b-it",
+  "decisionModel": "openai/gpt-4o-mini",
+  "turns": [
+    {
+      "turn": 1,
+      "id": "salary-sql",
+      "source": "interviewer",
+      "input": "We have employee and salary tables. In a payroll review, how would you pull active employee salary records without overcomplicating it?",
+      "expectation": "Generate a technical SQL answer with code.",
+      "decision": {
+        "intent": "NEW_QUESTION",
+        "isFollowUp": false,
+        "targetAnswerId": null,
+        "requiresPreviousCode": false,
+        "answerMode": "code_required",
+        "topic": "SQL Query for Active Employee Salaries",
+        "confidence": 0.9,
+        "reason": "This is a new question seeking a straightforward SQL solution.",
+        "contextToUse": "none"
+      },
+      "decisionFallbackUsed": false,
+      "decisionError": null,
+      "rawDecisionResponse": "{\"outputContract\":{\"intent\":\"NEW_QUESTION\",\"isFollowUp\":false,\"targetAnswerId\":null,\"requiresPreviousCode\":false,\"answerMode\":\"code_required\",\"topic\":\"SQL Query for Active Employee Salaries\",\"confidence\":0.9,\"reason\":\"This is a new question seeking a straightforward SQL solution.\",\"contextToUse\":\"none\"}}",
+      "decisionPrompt": {
+        "system": "You are ScribeShade's backend session-state decision layer.\nReturn strict JSON only. No markdown, no prose.\nDecide whether the current input is a new interview question or a continuation of prior session context.\nPrefer semantic context over keyword matching. Use previous question/answer/code and transcript chronology.\nanswerHistory is ordered oldest to newest. The entry marked recency='most_recent' is the latest AI answer.\nIf the user asks about the same query/code being slow, taking seconds, fetching records slowly, debugging, optimizing, or changing behavior, classify it as OPTIMIZE_CODE or DEBUG_CODE and bind previous code when available.\nFor any current input that begins with or mainly says 'continue', target mostRecentAnswer.id by default.\nIf the user says 'continue from X part', default to the most recent prior AI answer. Only jump to an older answer if the user explicitly names that older answer, says same query/code, or references a selected answer/card.\nFor ambiguous 'continue from database part', prefer the most_recent answer over older SQL/code because the user is usually continuing the current conversation branch.\nOnly target older SQL/code when the current input explicitly says same query, that query, previous query, code, optimize, debug, or similar code-specific wording.\nIf the user asks 'why your changes help' after an optimization answer, classify as FOLLOW_UP or EXPLAIN_CODE and target the most recent optimization answer.\nIf the user asks where they used something in actual projects, classify as EXPERIENCE_QUESTION and use recent_transcript/project context.\nDo not attach stale context to a clearly unrelated fresh question.",
+        "user": "{\"outputContract\":{\"instruction\":\"Return exactly this JSON object shape at top level. Do not wrap it inside schema or any other key.\",\"intent\":\"NEW_QUESTION | FOLLOW_UP | CONTINUE_PREVIOUS | EXPLAIN_CODE | DEBUG_CODE | OPTIMIZE_CODE | SCENARIO_QUESTION | EXPERIENCE_QUESTION | INTERVIEW_INSTRUCTION | UNKNOWN\",\"isFollowUp\":\"boolean\",\"targetAnswerId\":\"string id from answerHistory or null\",\"requiresPreviousCode\":\"boolean\",\"answerMode\":\"auto | theory_only | minimal_code | code_required | explain_existing_code | system_design\",\"topic\":\"short topic\",\"confidence\":\"0..1\",\"reason\":\"short reason\",\"contextToUse\":\"none | previous_answer | previous_code | selected_answer | recent_transcript\"},\"currentQuestion\":\"We have employee and salary tables. In a payroll review, how would you pull active employee salary records without overcomplicating it?\",\"recentTranscriptWindow\":[\"[interviewer]: We have employee and salary tables. In a payroll review, how would you pull active employee salary records without overcomplicating it?\"],\"speakerSeparatedTranscript\":[{\"speakerType\":\"interviewer\",\"content\":\"We have employee and salary tables. In a payroll review, how would you pull active employee salary records without overcomplicating it?\",\"timestamp\":1779700571186}],\"activeQuestionDetection\":null,\"previousAiAnswer\":\"\",\"previousCodeBlocks\":[],\"selectedAnswer\":null,\"answerHistory\":[],\"mostRecentAnswer\":null,\"activeConversationBranch\":null,\"deterministicSignal\":{\"conversationIntent\":\"UNKNOWN\",\"isExplicitFollowupReference\":false,\"fallbackTargetId\":null,\"fallbackTargetHasCode\":false,\"fallbackTargetTopic\":null,\"reasonForNoTarget\":\"fresh_question_no_followup_reference\"}}"
+      },
+      "answer": "**QUESTION:**\nWe have employee and salary tables. In a payroll review, how would you pull active employee salary records without overcomplicating it?\n\n**ANSWER:**\n**Direct answer:** I would use a `JOIN` between the `employees` and `salaries` tables, filtering for an `is_active` flag on the employee side and ensuring we are pulling only the most recent salary record using a window function like `ROW_NUMBER()`.\n\n- **Approach:** \n    - Filter the `employees` table first to minimize the dataset.\n    - Use a Common Table Expression (CTE) to rank salaries by `effective_date` or `id` per employee.\n    - Join the filtered employees to the top-ranked salary record.\n- **Stack:** `SQL` (PostgreSQL/Standard SQL).\n\n```sql\nWITH LatestSalaries AS (\n    SELECT \n        employee_id,\n        salary_amount,\n        effective_date,\n        ROW_NUMBER() OVER (PARTITION BY employee_id ORDER BY effective_date DESC) as rank\n    FROM salaries\n)\nSELECT \n    e.employee_id,\n    e.first_name,\n    e.last_name,\n    s.salary_amount,\n    s.effective_date\nFROM employees e\nJOIN LatestSalaries s ON e.employee_id = s.employee_id\nWHERE e.is_active = TRUE \n  AND s.rank = 1;\n```\n\n- **Reasoning:** \n    - **Efficiency:** Using `ROW_NUMBER()` is more robust than a simple `MAX(date)` because it allows us to pull the entire salary row (amount, currency, etc.) in a single pass without needing multiple joins or subqueries.\n    - **Accuracy:** It prevents duplicates if an employee has multiple salary entries for the same date; the `ORDER BY` acts as a tie-breaker.\n- **Complexity/edge cases:**\n    - **Performance:** On very large datasets, I'd ensure there is an index on `employees(is_active)` and a composite index on `salaries(employee_id, effective_date DESC)`.\n    - **Data Integrity:** If an employee is marked active but has no salary record, a `JOIN` will exclude them. If the payroll review requires seeing \"missing\" salaries, I would switch to a `LEFT JOIN`.",
+      "answerMeta": {
+        "targetAnswerId": null,
+        "codeContextInjected": false,
+        "answerIntent": "code_generation",
+        "answerMode": "code_required",
+        "codeBlocksExtracted": 1
+      },
+      "evaluation": {
+        "passed": true,
+        "checks": [
+          {
+            "name": "intent",
+            "passed": true,
+            "expected": [
+              "NEW_QUESTION"
+            ],
+            "actual": "NEW_QUESTION"
+          },
+          {
+            "name": "contextToUse",
+            "passed": true,
+            "expected": [
+              "none"
+            ],
+            "actual": "none"
+          },
+          {
+            "name": "codeContextInjected",
+            "passed": true,
+            "expected": [
+              "false"
+            ],
+            "actual": "false"
+          }
+        ]
+      }
+    },
+    {
+      "turn": 2,
+      "id": "salary-sql-slow",
+      "source": "interviewer",
+      "input": "Okay, now same one is taking like two seconds when records are being fetched. What would you do there?",
+      "expectation": "AI decision should treat this as a follow-up to the previous SQL code and answer with query optimization, not generic theory.",
+      "decision": {
+        "intent": "OPTIMIZE_CODE",
+        "isFollowUp": false,
+        "targetAnswerId": "salary-sql",
+        "requiresPreviousCode": true,
+        "answerMode": "code_required",
+        "topic": "sql",
+        "confidence": 0.9,
+        "reason": "The question refers to records fetching slowly, indicating a need for optimization.",
+        "contextToUse": "previous_code"
+      },
+      "decisionFallbackUsed": false,
+      "decisionError": null,
+      "rawDecisionResponse": "{\"outputContract\":{\"intent\":\"OPTIMIZE_CODE\",\"isFollowUp\":false,\"targetAnswerId\":\"salary-sql\",\"requiresPreviousCode\":true,\"answerMode\":\"code_required\",\"topic\":\"sql\",\"confidence\":0.9,\"reason\":\"The question refers to records fetching slowly, indicating a need for optimization.\",\"contextToUse\":\"previous_code\"}}",
+      "decisionPrompt": {
+        "system": "You are ScribeShade's backend session-state decision layer.\nReturn strict JSON only. No markdown, no prose.\nDecide whether the current input is a new interview question or a continuation of prior session context.\nPrefer semantic context over keyword matching. Use previous question/answer/code and transcript chronology.\nanswerHistory is ordered oldest to newest. The entry marked recency='most_recent' is the latest AI answer.\nIf the user asks about the same query/code being slow, taking seconds, fetching records slowly, debugging, optimizing, or changing behavior, classify it as OPTIMIZE_CODE or DEBUG_CODE and bind previous code when available.\nFor any current input that begins with or mainly says 'continue', target mostRecentAnswer.id by default.\nIf the user says 'continue from X part', default to the most recent prior AI answer. Only jump to an older answer if the user explicitly names that older answer, says same query/code, or references a selected answer/card.\nFor ambiguous 'continue from database part', prefer the most_recent answer over older SQL/code because the user is usually continuing the current conversation branch.\nOnly target older SQL/code when the current input explicitly says same query, that query, previous query, code, optimize, debug, or similar code-specific wording.\nIf the user asks 'why your changes help' after an optimization answer, classify as FOLLOW_UP or EXPLAIN_CODE and target the most recent optimization answer.\nIf the user asks where they used something in actual projects, classify as EXPERIENCE_QUESTION and use recent_transcript/project context.\nDo not attach stale context to a clearly unrelated fresh question.",
+        "user": "{\"outputContract\":{\"instruction\":\"Return exactly this JSON object shape at top level. Do not wrap it inside schema or any other key.\",\"intent\":\"NEW_QUESTION | FOLLOW_UP | CONTINUE_PREVIOUS | EXPLAIN_CODE | DEBUG_CODE | OPTIMIZE_CODE | SCENARIO_QUESTION | EXPERIENCE_QUESTION | INTERVIEW_INSTRUCTION | UNKNOWN\",\"isFollowUp\":\"boolean\",\"targetAnswerId\":\"string id from answerHistory or null\",\"requiresPreviousCode\":\"boolean\",\"answerMode\":\"auto | theory_only | minimal_code | code_required | explain_existing_code | system_design\",\"topic\":\"short topic\",\"confidence\":\"0..1\",\"reason\":\"short reason\",\"contextToUse\":\"none | previous_answer | previous_code | selected_answer | recent_transcript\"},\"currentQuestion\":\"Okay, now same one is taking like two seconds when records are being fetched. What would you do there?\",\"recentTranscriptWindow\":[\"[interviewer]: We have employee and salary tables. In a payroll review, how would you pull active employee salary records without overcomplicating it?\",\"[interviewer]: Okay, now same one is taking like two seconds when records are being fetched. What would you do there?\"],\"speakerSeparatedTranscript\":[{\"speakerType\":\"interviewer\",\"content\":\"We have employee and salary tables. In a payroll review, how would you pull active employee salary records without overcomplicating it?\",\"timestamp\":1779700571186},{\"speakerType\":\"interviewer\",\"content\":\"Okay, now same one is taking like two seconds when records are being fetched. What would you do there?\",\"timestamp\":1779700578503}],\"activeQuestionDetection\":null,\"previousAiAnswer\":\"\",\"previousCodeBlocks\":[],\"selectedAnswer\":null,\"answerHistory\":[{\"id\":\"salary-sql\",\"question\":\"We have employee and salary tables. In a payroll review, how would you pull active employee salary records without overcomplicating it?\",\"answerExcerpt\":\"**QUESTION:**\\nWe have employee and salary tables. In a payroll review, how would you pull active employee salary records without overcomplicating it?\\n\\n**ANSWER:**\\n**Direct answer:** I would use a `JOIN` between the `employees` and `salaries` tables, filtering for an `is_active` flag on the employee side and ensuring we are pulling only the most recent salary record using a window function like `ROW_NUMBER()`.\\n\\n- **Ap\",\"topic\":\"sql\",\"hasCode\":true,\"codePreview\":\"WITH LatestSalaries AS ( SELECT employee_id, salary_amount, effective_date, ROW_NUMBER() OVER (PARTITION BY employee_id ORDER BY effective_date DESC) as rank FROM salaries ) SELECT e.employee_id, e.first_name, e.last_nam\",\"orderIndex\":0,\"recency\":\"most_recent\"}],\"mostRecentAnswer\":{\"id\":\"salary-sql\",\"question\":\"We have employee and salary tables. In a payroll review, how would you pull active employee salary records without overcomplicating it?\",\"answerExcerpt\":\"**QUESTION:**\\nWe have employee and salary tables. In a payroll review, how would you pull active employee salary records without overcomplicating it?\\n\\n**ANSWER:**\\n**Direct answer:** I would use a `JOIN` between the `employees` and `salaries` tables, filtering for an `is_active` flag on the employee side and ensuring we are pulling only the most recent salary record using a window function like `ROW_NUMBER()`.\\n\\n- **Ap\",\"topic\":\"sql\",\"hasCode\":true,\"codePreview\":\"WITH LatestSalaries AS ( SELECT employee_id, salary_amount, effective_date, ROW_NUMBER() OVER (PARTITION BY employee_id ORDER BY effective_date DESC) as rank FROM salaries ) SELECT e.employee_id, e.first_name, e.last_nam\",\"orderIndex\":0,\"recency\":\"most_recent\"},\"activeConversationBranch\":{\"latestAnswerId\":\"salary-sql\",\"latestQuestion\":\"We have employee and salary tables. In a payroll review, how would you pull active employee salary records without overcomplicating it?\",\"latestTopic\":\"sql\",\"latestAnswerExcerpt\":\"**QUESTION:**\\nWe have employee and salary tables. In a payroll review, how would you pull active employee salary records without overcomplicating it?\\n\\n**ANSWER:**\\n**Direct answer:** I would use a `JOIN` between the `employees` and `salaries` tables, filtering for an `is_active` flag on the employee side and ensuring we are pulling only the most recent salary record using a window function like `ROW_NUMBER()`.\\n\\n- **Ap\"},\"deterministicSignal\":{\"conversationIntent\":\"UNKNOWN\",\"isExplicitFollowupReference\":false,\"fallbackTargetId\":null,\"fallbackTargetHasCode\":false,\"fallbackTargetTopic\":null,\"reasonForNoTarget\":\"fresh_question_no_followup_reference\"}}"
+      },
+      "answer": "**QUESTION:**\nOkay, now same one is taking like two seconds when records are being fetched. What would you do there?\n\n**ANSWER:**\n**Direct answer:** Two seconds is quite slow for a simple join and filter, so I'd start by looking at the execution plan using `EXPLAIN ANALYZE` to see if we're hitting full table scans or expensive nested loops. I'd specifically check if the `is_active` filter or the window function partition is causing the bottleneck.\n\n- **Optimization Steps:**\n    - **Indexing:** I'd ensure there is a composite index on `employees(is_active, employee_id)` and a covering index on `salaries(employee_id, effective_date DESC, salary_amount)` to allow for an Index Only Scan.\n    - **Partitioning/Pruning:** If the `salaries` table is massive, I'd check if we can leverage partitioning by date to reduce the amount of data the window function has to process.\n    - **CTE vs Subquery:** Depending on the optimizer, I might try moving the filter `is_active = TRUE` inside the CTE to reduce the number of rows being ranked by `ROW_NUMBER()`.\n\n- **Refined Code:**\n```sql\n-- Optimization: Filtering inside the CTE to reduce the window function workload\nWITH LatestSalaries AS (\n    SELECT \n        s.employee_id, \n        s.salary_amount, \n        s.effective_date, \n        ROW_NUMBER() OVER (\n            PARTITION BY s.employee_id \n            ORDER BY s.effective_date DESC\n        ) as rank \n    FROM salaries s\n    WHERE EXISTS (\n        SELECT 1 FROM employees e \n        WHERE e.employee_id = s.employee_id \n        AND e.is_active = TRUE\n    )\n)\nSELECT \n    e.employee_id, \n    e.first_name, \n    e.last_name, \n    s.salary_amount, \n    s.effective_date \nFROM employees e\nJOIN LatestSalaries s ON e.employee_id = s.employee_id\nWHERE e.is_active = TRUE \n  AND s.rank = 1;\n```\n\n- **Why it works:**\n    - **Reduced Workload:** By adding the `EXISTS` check or a join inside the CTE, we prevent the `ROW_NUMBER()` function from calculating ranks for inactive employees, which significantly cuts down on CPU and memory usage for the sort operation.\n    - **Index Efficiency:** Using a composite index on the join and filter columns allows the engine to jump straight to the relevant rows rather than scanning the entire `salaries` history.\n\n- **Performance Trade-offs:**\n    - **Write Overhead:** Adding more indexes speeds up this read query but will slightly increase the latency for `INSERT` and `UPDATE` operations on the `salaries` table.\n    - **Maintenance:** If we use partitioning, we need to ensure the partitioning strategy (e.g., by month/year) aligns with how the payroll team queries historical data.",
+      "answerMeta": {
+        "targetAnswerId": "salary-sql",
+        "codeContextInjected": true,
+        "answerIntent": "code_optimization_followup",
+        "answerMode": "code_required",
+        "codeBlocksExtracted": 1
+      },
+      "evaluation": {
+        "passed": true,
+        "checks": [
+          {
+            "name": "intent",
+            "passed": true,
+            "expected": [
+              "OPTIMIZE_CODE",
+              "DEBUG_CODE"
+            ],
+            "actual": "OPTIMIZE_CODE"
+          },
+          {
+            "name": "contextToUse",
+            "passed": true,
+            "expected": [
+              "previous_code",
+              "previous_answer"
+            ],
+            "actual": "previous_code"
+          },
+          {
+            "name": "targetAnswerId",
+            "passed": true,
+            "expected": [
+              "salary-sql"
+            ],
+            "actual": "salary-sql"
+          },
+          {
+            "name": "codeContextInjected",
+            "passed": true,
+            "expected": [
+              "true"
+            ],
+            "actual": "true"
+          }
+        ]
+      }
+    },
+    {
+      "turn": 3,
+      "id": "salary-sql-explain",
+      "source": "candidate_manual",
+      "input": "Explain why your query changes help.",
+      "expectation": "Theory follow-up should stay attached to the SQL optimization context.",
+      "decision": {
+        "intent": "FOLLOW_UP",
+        "isFollowUp": true,
+        "targetAnswerId": "salary-sql-slow",
+        "requiresPreviousCode": true,
+        "answerMode": "explain_existing_code",
+        "topic": "sql",
+        "confidence": 1,
+        "reason": "The question directly follows an earlier optimization discussion.",
+        "contextToUse": "recent_transcript"
+      },
+      "decisionFallbackUsed": false,
+      "decisionError": null,
+      "rawDecisionResponse": "{\"outputContract\":{\"intent\":\"FOLLOW_UP\",\"isFollowUp\":true,\"targetAnswerId\":\"salary-sql-slow\",\"requiresPreviousCode\":true,\"answerMode\":\"explain_existing_code\",\"topic\":\"sql\",\"confidence\":\"1.0\",\"reason\":\"The question directly follows an earlier optimization discussion.\",\"contextToUse\":\"recent_transcript\"}}",
+      "decisionPrompt": {
+        "system": "You are ScribeShade's backend session-state decision layer.\nReturn strict JSON only. No markdown, no prose.\nDecide whether the current input is a new interview question or a continuation of prior session context.\nPrefer semantic context over keyword matching. Use previous question/answer/code and transcript chronology.\nanswerHistory is ordered oldest to newest. The entry marked recency='most_recent' is the latest AI answer.\nIf the user asks about the same query/code being slow, taking seconds, fetching records slowly, debugging, optimizing, or changing behavior, classify it as OPTIMIZE_CODE or DEBUG_CODE and bind previous code when available.\nFor any current input that begins with or mainly says 'continue', target mostRecentAnswer.id by default.\nIf the user says 'continue from X part', default to the most recent prior AI answer. Only jump to an older answer if the user explicitly names that older answer, says same query/code, or references a selected answer/card.\nFor ambiguous 'continue from database part', prefer the most_recent answer over older SQL/code because the user is usually continuing the current conversation branch.\nOnly target older SQL/code when the current input explicitly says same query, that query, previous query, code, optimize, debug, or similar code-specific wording.\nIf the user asks 'why your changes help' after an optimization answer, classify as FOLLOW_UP or EXPLAIN_CODE and target the most recent optimization answer.\nIf the user asks where they used something in actual projects, classify as EXPERIENCE_QUESTION and use recent_transcript/project context.\nDo not attach stale context to a clearly unrelated fresh question.",
+        "user": "{\"outputContract\":{\"instruction\":\"Return exactly this JSON object shape at top level. Do not wrap it inside schema or any other key.\",\"intent\":\"NEW_QUESTION | FOLLOW_UP | CONTINUE_PREVIOUS | EXPLAIN_CODE | DEBUG_CODE | OPTIMIZE_CODE | SCENARIO_QUESTION | EXPERIENCE_QUESTION | INTERVIEW_INSTRUCTION | UNKNOWN\",\"isFollowUp\":\"boolean\",\"targetAnswerId\":\"string id from answerHistory or null\",\"requiresPreviousCode\":\"boolean\",\"answerMode\":\"auto | theory_only | minimal_code | code_required | explain_existing_code | system_design\",\"topic\":\"short topic\",\"confidence\":\"0..1\",\"reason\":\"short reason\",\"contextToUse\":\"none | previous_answer | previous_code | selected_answer | recent_transcript\"},\"currentQuestion\":\"Explain why your query changes help.\",\"recentTranscriptWindow\":[\"[interviewer]: We have employee and salary tables. In a payroll review, how would you pull active employee salary records without overcomplicating it?\",\"[interviewer]: Okay, now same one is taking like two seconds when records are being fetched. What would you do there?\",\"[candidate]: Explain why your query changes help.\"],\"speakerSeparatedTranscript\":[{\"speakerType\":\"interviewer\",\"content\":\"We have employee and salary tables. In a payroll review, how would you pull active employee salary records without overcomplicating it?\",\"timestamp\":1779700571186},{\"speakerType\":\"interviewer\",\"content\":\"Okay, now same one is taking like two seconds when records are being fetched. What would you do there?\",\"timestamp\":1779700578503},{\"speakerType\":\"candidate\",\"content\":\"Explain why your query changes help.\",\"timestamp\":1779700587463}],\"activeQuestionDetection\":null,\"previousAiAnswer\":\"\",\"previousCodeBlocks\":[],\"selectedAnswer\":null,\"answerHistory\":[{\"id\":\"salary-sql\",\"question\":\"We have employee and salary tables. In a payroll review, how would you pull active employee salary records without overcomplicating it?\",\"answerExcerpt\":\"**QUESTION:**\\nWe have employee and salary tables. In a payroll review, how would you pull active employee salary records without overcomplicating it?\\n\\n**ANSWER:**\\n**Direct answer:** I would use a `JOIN` between the `employees` and `salaries` tables, filtering for an `is_active` flag on the employee side and ensuring we are pulling only the most recent salary record using a window function like `ROW_NUMBER()`.\\n\\n- **Ap\",\"topic\":\"sql\",\"hasCode\":true,\"codePreview\":\"WITH LatestSalaries AS ( SELECT employee_id, salary_amount, effective_date, ROW_NUMBER() OVER (PARTITION BY employee_id ORDER BY effective_date DESC) as rank FROM salaries ) SELECT e.employee_id, e.first_name, e.last_nam\",\"orderIndex\":0,\"recency\":\"older\"},{\"id\":\"salary-sql-slow\",\"question\":\"Okay, now same one is taking like two seconds when records are being fetched. What would you do there?\",\"answerExcerpt\":\"**QUESTION:**\\nOkay, now same one is taking like two seconds when records are being fetched. What would you do there?\\n\\n**ANSWER:**\\n**Direct answer:** Two seconds is quite slow for a simple join and filter, so I'd start by looking at the execution plan using `EXPLAIN ANALYZE` to see if we're hitting full table scans or expensive nested loops. I'd specifically check if the `is_active` filter or the window function parti\",\"topic\":\"sql\",\"hasCode\":true,\"codePreview\":\"-- Optimization: Filtering inside the CTE to reduce the window function workload WITH LatestSalaries AS ( SELECT s.employee_id, s.salary_amount, s.effective_date, ROW_NUMBER() OVER ( PARTITION BY s.employee_id ORDER BY s\",\"orderIndex\":1,\"recency\":\"most_recent\"}],\"mostRecentAnswer\":{\"id\":\"salary-sql-slow\",\"question\":\"Okay, now same one is taking like two seconds when records are being fetched. What would you do there?\",\"answerExcerpt\":\"**QUESTION:**\\nOkay, now same one is taking like two seconds when records are being fetched. What would you do there?\\n\\n**ANSWER:**\\n**Direct answer:** Two seconds is quite slow for a simple join and filter, so I'd start by looking at the execution plan using `EXPLAIN ANALYZE` to see if we're hitting full table scans or expensive nested loops. I'd specifically check if the `is_active` filter or the window function parti\",\"topic\":\"sql\",\"hasCode\":true,\"codePreview\":\"-- Optimization: Filtering inside the CTE to reduce the window function workload WITH LatestSalaries AS ( SELECT s.employee_id, s.salary_amount, s.effective_date, ROW_NUMBER() OVER ( PARTITION BY s.employee_id ORDER BY s\",\"orderIndex\":1,\"recency\":\"most_recent\"},\"activeConversationBranch\":{\"latestAnswerId\":\"salary-sql-slow\",\"latestQuestion\":\"Okay, now same one is taking like two seconds when records are being fetched. What would you do there?\",\"latestTopic\":\"sql\",\"latestAnswerExcerpt\":\"**QUESTION:**\\nOkay, now same one is taking like two seconds when records are being fetched. What would you do there?\\n\\n**ANSWER:**\\n**Direct answer:** Two seconds is quite slow for a simple join and filter, so I'd start by looking at the execution plan using `EXPLAIN ANALYZE` to see if we're hitting full table scans or expensive nested loops. I'd specifically check if the `is_active` filter or the window function parti\"},\"deterministicSignal\":{\"conversationIntent\":\"FOLLOW_UP\",\"isExplicitFollowupReference\":true,\"fallbackTargetId\":\"salary-sql-slow\",\"fallbackTargetHasCode\":true,\"fallbackTargetTopic\":\"sql\"}}"
+      },
+      "answer": "**QUESTION:**\nExplain why your query changes help.\n\n**ANSWER:**\n**Direct answer:** The changes I proposed target the two most common bottlenecks in this type of join: reducing the amount of data scanned and minimizing the computational cost of the window function. By adding specific indexes and optimizing how the engine accesses the data, we move from a heavy `Sequential Scan` to much more efficient `Index Scans`.\n\n- **Reducing I/O with Indexes:** \n    - **Composite Index:** Adding `employees(is_active, employee_id)` allows the engine to instantly discard all inactive records without reading the entire table.\n    - **Covering Index:** A covering index on `salaries(employee_id, effective_date DESC, salary_amount)` is critical because it allows for an `Index Only Scan`. This means the database can retrieve the salary and the date directly from the index tree without having to perform a \"heap fetch\" to the actual table data.\n- **Optimizing the Window Function:** \n    - **Partitioning Efficiency:** The `ROW_NUMBER()` function requires a sort operation on the `employee_id` and `effective_date`. By having the index ordered by these columns, the database can often use the existing index order to satisfy the window function, avoiding a costly in-memory or on-disk sort.\n- **Execution Plan Impact:** \n    - **Join Strategy:** These changes typically nudge the optimizer away from a `Nested Loop` join on large datasets or a heavy `Hash Join` that spills to disk, favoring more efficient `Merge Joins` or highly targeted `Index Scans`.\n- **Result:** \n    - **Latency:** In a production environment, this usually brings a multi-second query down to milliseconds because we are only touching the exact pages of data required for the active payroll subset.",
+      "answerMeta": {
+        "targetAnswerId": "salary-sql-slow",
+        "codeContextInjected": false,
+        "answerIntent": "general_followup",
+        "answerMode": "explain_existing_code",
+        "codeBlocksExtracted": 0
+      },
+      "evaluation": {
+        "passed": false,
+        "checks": [
+          {
+            "name": "intent",
+            "passed": true,
+            "expected": [
+              "FOLLOW_UP",
+              "EXPLAIN_CODE"
+            ],
+            "actual": "FOLLOW_UP"
+          },
+          {
+            "name": "contextToUse",
+            "passed": false,
+            "expected": [
+              "previous_answer",
+              "previous_code"
+            ],
+            "actual": "recent_transcript"
+          },
+          {
+            "name": "targetAnswerId",
+            "passed": true,
+            "expected": [
+              "salary-sql-slow"
+            ],
+            "actual": "salary-sql-slow"
+          }
+        ]
+      }
+    },
+    {
+      "turn": 4,
+      "id": "production-scenario",
+      "source": "interviewer",
+      "input": "Switching topic. Imagine the payroll export API slows down during month-end and users complain reports are stuck. What would you check first?",
+      "expectation": "New scenario/system answer, not tied to the SQL code answer as code.",
+      "decision": {
+        "intent": "SCENARIO_QUESTION",
+        "isFollowUp": false,
+        "targetAnswerId": null,
+        "requiresPreviousCode": false,
+        "answerMode": "auto",
+        "topic": "api performance",
+        "confidence": 0.9,
+        "reason": "The user is presenting a new scenario related to API performance, distinct from previous SQL questions.",
+        "contextToUse": "none"
+      },
+      "decisionFallbackUsed": false,
+      "decisionError": null,
+      "rawDecisionResponse": "{\"outputContract\":{\"intent\":\"SCENARIO_QUESTION\",\"isFollowUp\":false,\"targetAnswerId\":null,\"requiresPreviousCode\":false,\"answerMode\":\"auto\",\"topic\":\"api performance\",\"confidence\":0.9,\"reason\":\"The user is presenting a new scenario related to API performance, distinct from previous SQL questions.\",\"contextToUse\":\"none\"}}",
+      "decisionPrompt": {
+        "system": "You are ScribeShade's backend session-state decision layer.\nReturn strict JSON only. No markdown, no prose.\nDecide whether the current input is a new interview question or a continuation of prior session context.\nPrefer semantic context over keyword matching. Use previous question/answer/code and transcript chronology.\nanswerHistory is ordered oldest to newest. The entry marked recency='most_recent' is the latest AI answer.\nIf the user asks about the same query/code being slow, taking seconds, fetching records slowly, debugging, optimizing, or changing behavior, classify it as OPTIMIZE_CODE or DEBUG_CODE and bind previous code when available.\nFor any current input that begins with or mainly says 'continue', target mostRecentAnswer.id by default.\nIf the user says 'continue from X part', default to the most recent prior AI answer. Only jump to an older answer if the user explicitly names that older answer, says same query/code, or references a selected answer/card.\nFor ambiguous 'continue from database part', prefer the most_recent answer over older SQL/code because the user is usually continuing the current conversation branch.\nOnly target older SQL/code when the current input explicitly says same query, that query, previous query, code, optimize, debug, or similar code-specific wording.\nIf the user asks 'why your changes help' after an optimization answer, classify as FOLLOW_UP or EXPLAIN_CODE and target the most recent optimization answer.\nIf the user asks where they used something in actual projects, classify as EXPERIENCE_QUESTION and use recent_transcript/project context.\nDo not attach stale context to a clearly unrelated fresh question.",
+        "user": "{\"outputContract\":{\"instruction\":\"Return exactly this JSON object shape at top level. Do not wrap it inside schema or any other key.\",\"intent\":\"NEW_QUESTION | FOLLOW_UP | CONTINUE_PREVIOUS | EXPLAIN_CODE | DEBUG_CODE | OPTIMIZE_CODE | SCENARIO_QUESTION | EXPERIENCE_QUESTION | INTERVIEW_INSTRUCTION | UNKNOWN\",\"isFollowUp\":\"boolean\",\"targetAnswerId\":\"string id from answerHistory or null\",\"requiresPreviousCode\":\"boolean\",\"answerMode\":\"auto | theory_only | minimal_code | code_required | explain_existing_code | system_design\",\"topic\":\"short topic\",\"confidence\":\"0..1\",\"reason\":\"short reason\",\"contextToUse\":\"none | previous_answer | previous_code | selected_answer | recent_transcript\"},\"currentQuestion\":\"Switching topic. Imagine the payroll export API slows down during month-end and users complain reports are stuck. What would you check first?\",\"recentTranscriptWindow\":[\"[interviewer]: We have employee and salary tables. In a payroll review, how would you pull active employee salary records without overcomplicating it?\",\"[interviewer]: Okay, now same one is taking like two seconds when records are being fetched. What would you do there?\",\"[candidate]: Explain why your query changes help.\",\"[interviewer]: Switching topic. Imagine the payroll export API slows down during month-end and users complain reports are stuck. What would you check first?\"],\"speakerSeparatedTranscript\":[{\"speakerType\":\"interviewer\",\"content\":\"We have employee and salary tables. In a payroll review, how would you pull active employee salary records without overcomplicating it?\",\"timestamp\":1779700571186},{\"speakerType\":\"interviewer\",\"content\":\"Okay, now same one is taking like two seconds when records are being fetched. What would you do there?\",\"timestamp\":1779700578503},{\"speakerType\":\"candidate\",\"content\":\"Explain why your query changes help.\",\"timestamp\":1779700587463},{\"speakerType\":\"interviewer\",\"content\":\"Switching topic. Imagine the payroll export API slows down during month-end and users complain reports are stuck. What would you check first?\",\"timestamp\":1779700592731}],\"activeQuestionDetection\":null,\"previousAiAnswer\":\"\",\"previousCodeBlocks\":[],\"selectedAnswer\":null,\"answerHistory\":[{\"id\":\"salary-sql\",\"question\":\"We have employee and salary tables. In a payroll review, how would you pull active employee salary records without overcomplicating it?\",\"answerExcerpt\":\"**QUESTION:**\\nWe have employee and salary tables. In a payroll review, how would you pull active employee salary records without overcomplicating it?\\n\\n**ANSWER:**\\n**Direct answer:** I would use a `JOIN` between the `employees` and `salaries` tables, filtering for an `is_active` flag on the employee side and ensuring we are pulling only the most recent salary record using a window function like `ROW_NUMBER()`.\\n\\n- **Ap\",\"topic\":\"sql\",\"hasCode\":true,\"codePreview\":\"WITH LatestSalaries AS ( SELECT employee_id, salary_amount, effective_date, ROW_NUMBER() OVER (PARTITION BY employee_id ORDER BY effective_date DESC) as rank FROM salaries ) SELECT e.employee_id, e.first_name, e.last_nam\",\"orderIndex\":0,\"recency\":\"older\"},{\"id\":\"salary-sql-slow\",\"question\":\"Okay, now same one is taking like two seconds when records are being fetched. What would you do there?\",\"answerExcerpt\":\"**QUESTION:**\\nOkay, now same one is taking like two seconds when records are being fetched. What would you do there?\\n\\n**ANSWER:**\\n**Direct answer:** Two seconds is quite slow for a simple join and filter, so I'd start by looking at the execution plan using `EXPLAIN ANALYZE` to see if we're hitting full table scans or expensive nested loops. I'd specifically check if the `is_active` filter or the window function parti\",\"topic\":\"sql\",\"hasCode\":true,\"codePreview\":\"-- Optimization: Filtering inside the CTE to reduce the window function workload WITH LatestSalaries AS ( SELECT s.employee_id, s.salary_amount, s.effective_date, ROW_NUMBER() OVER ( PARTITION BY s.employee_id ORDER BY s\",\"orderIndex\":1,\"recency\":\"older\"},{\"id\":\"salary-sql-explain\",\"question\":\"Explain why your query changes help.\",\"answerExcerpt\":\"**QUESTION:**\\nExplain why your query changes help.\\n\\n**ANSWER:**\\n**Direct answer:** The changes I proposed target the two most common bottlenecks in this type of join: reducing the amount of data scanned and minimizing the computational cost of the window function. By adding specific indexes and optimizing how the engine accesses the data, we move from a heavy `Sequential Scan` to much more efficient `Index Scans`.\\n\\n-\",\"topic\":\"sql\",\"hasCode\":false,\"codePreview\":null,\"orderIndex\":2,\"recency\":\"most_recent\"}],\"mostRecentAnswer\":{\"id\":\"salary-sql-explain\",\"question\":\"Explain why your query changes help.\",\"answerExcerpt\":\"**QUESTION:**\\nExplain why your query changes help.\\n\\n**ANSWER:**\\n**Direct answer:** The changes I proposed target the two most common bottlenecks in this type of join: reducing the amount of data scanned and minimizing the computational cost of the window function. By adding specific indexes and optimizing how the engine accesses the data, we move from a heavy `Sequential Scan` to much more efficient `Index Scans`.\\n\\n-\",\"topic\":\"sql\",\"hasCode\":false,\"codePreview\":null,\"orderIndex\":2,\"recency\":\"most_recent\"},\"activeConversationBranch\":{\"latestAnswerId\":\"salary-sql-explain\",\"latestQuestion\":\"Explain why your query changes help.\",\"latestTopic\":\"sql\",\"latestAnswerExcerpt\":\"**QUESTION:**\\nExplain why your query changes help.\\n\\n**ANSWER:**\\n**Direct answer:** The changes I proposed target the two most common bottlenecks in this type of join: reducing the amount of data scanned and minimizing the computational cost of the window function. By adding specific indexes and optimizing how the engine accesses the data, we move from a heavy `Sequential Scan` to much more efficient `Index Scans`.\\n\\n-\"},\"deterministicSignal\":{\"conversationIntent\":\"SCENARIO_QUESTION\",\"isExplicitFollowupReference\":false,\"fallbackTargetId\":null,\"fallbackTargetHasCode\":false,\"fallbackTargetTopic\":null,\"reasonForNoTarget\":\"fresh_question_no_followup_reference\"}}"
+      },
+      "answer": "**QUESTION:**\nSwitching topic. Imagine the payroll export API slows down during month-end and users complain reports are stuck. What would you check first?\n\n**ANSWER:**\n**Direct answer:** Since this is happening during month-end, I would immediately investigate whether we are hitting a resource bottleneck caused by the increased concurrency and data volume typical of payroll processing cycles.\n\n1. **Diagnosis:**\n    - **Database Performance:** I'd check for long-running queries or locks on the `salaries` or `payroll_records` tables. During month-end, heavy write operations might be blocking the read-heavy export queries.\n    - **Resource Utilization:** I'd look at CPU, memory, and I/O metrics on the database and the API servers to see if we've hit a ceiling.\n    - **Queue/Worker Backlog:** If the export process is asynchronous, I'd check the status of the message queue (e.g., RabbitMQ or Azure Service Bus) to see if workers are overwhelmed or failing.\n    - **Network/API Latency:** I'd check API gateway logs to see if the delay is in the application logic or if there's a timeout/latency issue in the underlying service calls.\n\n2. **Action plan:**\n    - **Identify the bottleneck:** Use `EXPLAIN ANALYZE` on the specific export queries to check for full table scans or expensive joins.\n    - **Check Locks:** Run queries to identify any blocked sessions or deadlocks in `PostgreSQL` that might be stalling the export.\n    - **Review Logs:** Check the application logs for any increased error rates or specific `TimeoutException` messages.\n\n3. **Production fix:**\n    - **Scaling:** If it's a resource issue, I'd consider a temporary scale-up of the database instance or increasing the number of worker nodes in the `Spark` or `Databricks` cluster.\n    - **Query Optimization:** If a specific query is the culprit, I'd look at implementing or updating indexes (e.g., composite indexes on `is_active` and `payroll_period`) to speed up execution.\n    - **Read Replicas:** If the load is purely read-based, I would redirect the export API traffic to a **read replica** to offload the primary database.\n\n4. **Trade-off:**\n    - Scaling up provides immediate relief but increases cloud costs.\n    - Shifting to read replicas helps with performance but introduces the risk of **eventual consistency**, where the report might miss the very latest data updates during the transition.\n\n5. **Recommendation:**\n    - Long-term, I would implement **rate limiting** on the API to prevent total system exhaustion and move toward a more robust **asynchronous architecture** where large exports are handled via dedicated background jobs with highly scalable compute, like `Databricks` jobs, rather than synchronous API calls.",
+      "answerMeta": {
+        "targetAnswerId": null,
+        "codeContextInjected": false,
+        "answerIntent": "scenario_based",
+        "answerMode": "auto",
+        "codeBlocksExtracted": 0
+      },
+      "evaluation": {
+        "passed": true,
+        "checks": [
+          {
+            "name": "intent",
+            "passed": true,
+            "expected": [
+              "SCENARIO_QUESTION",
+              "NEW_QUESTION"
+            ],
+            "actual": "SCENARIO_QUESTION"
+          },
+          {
+            "name": "contextToUse",
+            "passed": true,
+            "expected": [
+              "none",
+              "recent_transcript"
+            ],
+            "actual": "none"
+          },
+          {
+            "name": "codeContextInjected",
+            "passed": true,
+            "expected": [
+              "false"
+            ],
+            "actual": "false"
+          }
+        ]
+      }
+    },
+    {
+      "turn": 5,
+      "id": "production-scenario-db-followup",
+      "source": "candidate_manual",
+      "input": "Continue from the database part of that production API scenario and make it practical.",
+      "expectation": "Scenario continuation should bind to the previous production scenario.",
+      "decision": {
+        "intent": "CONTINUE_PREVIOUS",
+        "isFollowUp": false,
+        "targetAnswerId": "production-scenario",
+        "requiresPreviousCode": false,
+        "answerMode": "auto",
+        "topic": "sql",
+        "confidence": 0.9,
+        "reason": "The user is asking to continue from a previous point in the conversation regarding the database part of a scenario. | active_branch_guard: continue stayed on most recent answer",
+        "contextToUse": "previous_answer"
+      },
+      "decisionFallbackUsed": false,
+      "decisionError": null,
+      "rawDecisionResponse": "{\"outputContract\":{\"intent\":\"CONTINUE_PREVIOUS\",\"isFollowUp\":false,\"targetAnswerId\":\"production-scenario\",\"requiresPreviousCode\":false,\"answerMode\":\"auto\",\"topic\":\"sql\",\"confidence\":0.9,\"reason\":\"The user is asking to continue from a previous point in the conversation regarding the database part of a scenario.\",\"contextToUse\":\"none\"}}",
+      "decisionPrompt": {
+        "system": "You are ScribeShade's backend session-state decision layer.\nReturn strict JSON only. No markdown, no prose.\nDecide whether the current input is a new interview question or a continuation of prior session context.\nPrefer semantic context over keyword matching. Use previous question/answer/code and transcript chronology.\nanswerHistory is ordered oldest to newest. The entry marked recency='most_recent' is the latest AI answer.\nIf the user asks about the same query/code being slow, taking seconds, fetching records slowly, debugging, optimizing, or changing behavior, classify it as OPTIMIZE_CODE or DEBUG_CODE and bind previous code when available.\nFor any current input that begins with or mainly says 'continue', target mostRecentAnswer.id by default.\nIf the user says 'continue from X part', default to the most recent prior AI answer. Only jump to an older answer if the user explicitly names that older answer, says same query/code, or references a selected answer/card.\nFor ambiguous 'continue from database part', prefer the most_recent answer over older SQL/code because the user is usually continuing the current conversation branch.\nOnly target older SQL/code when the current input explicitly says same query, that query, previous query, code, optimize, debug, or similar code-specific wording.\nIf the user asks 'why your changes help' after an optimization answer, classify as FOLLOW_UP or EXPLAIN_CODE and target the most recent optimization answer.\nIf the user asks where they used something in actual projects, classify as EXPERIENCE_QUESTION and use recent_transcript/project context.\nDo not attach stale context to a clearly unrelated fresh question.",
+        "user": "{\"outputContract\":{\"instruction\":\"Return exactly this JSON object shape at top level. Do not wrap it inside schema or any other key.\",\"intent\":\"NEW_QUESTION | FOLLOW_UP | CONTINUE_PREVIOUS | EXPLAIN_CODE | DEBUG_CODE | OPTIMIZE_CODE | SCENARIO_QUESTION | EXPERIENCE_QUESTION | INTERVIEW_INSTRUCTION | UNKNOWN\",\"isFollowUp\":\"boolean\",\"targetAnswerId\":\"string id from answerHistory or null\",\"requiresPreviousCode\":\"boolean\",\"answerMode\":\"auto | theory_only | minimal_code | code_required | explain_existing_code | system_design\",\"topic\":\"short topic\",\"confidence\":\"0..1\",\"reason\":\"short reason\",\"contextToUse\":\"none | previous_answer | previous_code | selected_answer | recent_transcript\"},\"currentQuestion\":\"Continue from the database part of that production API scenario and make it practical.\",\"recentTranscriptWindow\":[\"[interviewer]: We have employee and salary tables. In a payroll review, how would you pull active employee salary records without overcomplicating it?\",\"[interviewer]: Okay, now same one is taking like two seconds when records are being fetched. What would you do there?\",\"[candidate]: Explain why your query changes help.\",\"[interviewer]: Switching topic. Imagine the payroll export API slows down during month-end and users complain reports are stuck. What would you check first?\",\"[candidate]: Continue from the database part of that production API scenario and make it practical.\"],\"speakerSeparatedTranscript\":[{\"speakerType\":\"interviewer\",\"content\":\"We have employee and salary tables. In a payroll review, how would you pull active employee salary records without overcomplicating it?\",\"timestamp\":1779700571186},{\"speakerType\":\"interviewer\",\"content\":\"Okay, now same one is taking like two seconds when records are being fetched. What would you do there?\",\"timestamp\":1779700578503},{\"speakerType\":\"candidate\",\"content\":\"Explain why your query changes help.\",\"timestamp\":1779700587463},{\"speakerType\":\"interviewer\",\"content\":\"Switching topic. Imagine the payroll export API slows down during month-end and users complain reports are stuck. What would you check first?\",\"timestamp\":1779700592731},{\"speakerType\":\"candidate\",\"content\":\"Continue from the database part of that production API scenario and make it practical.\",\"timestamp\":1779700604527}],\"activeQuestionDetection\":null,\"previousAiAnswer\":\"\",\"previousCodeBlocks\":[],\"selectedAnswer\":null,\"answerHistory\":[{\"id\":\"salary-sql\",\"question\":\"We have employee and salary tables. In a payroll review, how would you pull active employee salary records without overcomplicating it?\",\"answerExcerpt\":\"**QUESTION:**\\nWe have employee and salary tables. In a payroll review, how would you pull active employee salary records without overcomplicating it?\\n\\n**ANSWER:**\\n**Direct answer:** I would use a `JOIN` between the `employees` and `salaries` tables, filtering for an `is_active` flag on the employee side and ensuring we are pulling only the most recent salary record using a window function like `ROW_NUMBER()`.\\n\\n- **Ap\",\"topic\":\"sql\",\"hasCode\":true,\"codePreview\":\"WITH LatestSalaries AS ( SELECT employee_id, salary_amount, effective_date, ROW_NUMBER() OVER (PARTITION BY employee_id ORDER BY effective_date DESC) as rank FROM salaries ) SELECT e.employee_id, e.first_name, e.last_nam\",\"orderIndex\":0,\"recency\":\"older\"},{\"id\":\"salary-sql-slow\",\"question\":\"Okay, now same one is taking like two seconds when records are being fetched. What would you do there?\",\"answerExcerpt\":\"**QUESTION:**\\nOkay, now same one is taking like two seconds when records are being fetched. What would you do there?\\n\\n**ANSWER:**\\n**Direct answer:** Two seconds is quite slow for a simple join and filter, so I'd start by looking at the execution plan using `EXPLAIN ANALYZE` to see if we're hitting full table scans or expensive nested loops. I'd specifically check if the `is_active` filter or the window function parti\",\"topic\":\"sql\",\"hasCode\":true,\"codePreview\":\"-- Optimization: Filtering inside the CTE to reduce the window function workload WITH LatestSalaries AS ( SELECT s.employee_id, s.salary_amount, s.effective_date, ROW_NUMBER() OVER ( PARTITION BY s.employee_id ORDER BY s\",\"orderIndex\":1,\"recency\":\"older\"},{\"id\":\"salary-sql-explain\",\"question\":\"Explain why your query changes help.\",\"answerExcerpt\":\"**QUESTION:**\\nExplain why your query changes help.\\n\\n**ANSWER:**\\n**Direct answer:** The changes I proposed target the two most common bottlenecks in this type of join: reducing the amount of data scanned and minimizing the computational cost of the window function. By adding specific indexes and optimizing how the engine accesses the data, we move from a heavy `Sequential Scan` to much more efficient `Index Scans`.\\n\\n-\",\"topic\":\"sql\",\"hasCode\":false,\"codePreview\":null,\"orderIndex\":2,\"recency\":\"older\"},{\"id\":\"production-scenario\",\"question\":\"Switching topic. Imagine the payroll export API slows down during month-end and users complain reports are stuck. What would you check first?\",\"answerExcerpt\":\"**QUESTION:**\\nSwitching topic. Imagine the payroll export API slows down during month-end and users complain reports are stuck. What would you check first?\\n\\n**ANSWER:**\\n**Direct answer:** Since this is happening during month-end, I would immediately investigate whether we are hitting a resource bottleneck caused by the increased concurrency and data volume typical of payroll processing cycles.\\n\\n1. **Diagnosis:**\\n    \",\"topic\":\"sql\",\"hasCode\":false,\"codePreview\":null,\"orderIndex\":3,\"recency\":\"most_recent\"}],\"mostRecentAnswer\":{\"id\":\"production-scenario\",\"question\":\"Switching topic. Imagine the payroll export API slows down during month-end and users complain reports are stuck. What would you check first?\",\"answerExcerpt\":\"**QUESTION:**\\nSwitching topic. Imagine the payroll export API slows down during month-end and users complain reports are stuck. What would you check first?\\n\\n**ANSWER:**\\n**Direct answer:** Since this is happening during month-end, I would immediately investigate whether we are hitting a resource bottleneck caused by the increased concurrency and data volume typical of payroll processing cycles.\\n\\n1. **Diagnosis:**\\n    \",\"topic\":\"sql\",\"hasCode\":false,\"codePreview\":null,\"orderIndex\":3,\"recency\":\"most_recent\"},\"activeConversationBranch\":{\"latestAnswerId\":\"production-scenario\",\"latestQuestion\":\"Switching topic. Imagine the payroll export API slows down during month-end and users complain reports are stuck. What would you check first?\",\"latestTopic\":\"sql\",\"latestAnswerExcerpt\":\"**QUESTION:**\\nSwitching topic. Imagine the payroll export API slows down during month-end and users complain reports are stuck. What would you check first?\\n\\n**ANSWER:**\\n**Direct answer:** Since this is happening during month-end, I would immediately investigate whether we are hitting a resource bottleneck caused by the increased concurrency and data volume typical of payroll processing cycles.\\n\\n1. **Diagnosis:**\\n    \"},\"deterministicSignal\":{\"conversationIntent\":\"CONTINUE_PREVIOUS\",\"isExplicitFollowupReference\":true,\"fallbackTargetId\":\"salary-sql\",\"fallbackTargetHasCode\":true,\"fallbackTargetTopic\":\"sql\"}}"
+      },
+      "answer": "**QUESTION:**\nContinue from the database part of that production API scenario and make it practical.\n\n**ANSWER:**\n**Direct answer:** To make the database investigation practical, I would move from high-level metrics to looking at active sessions and lock contention. If the API is slow, it's often not just a \"slow query,\" but a query being held up by another process, like a heavy month-end write operation or a schema lock.\n\n- **Identify Blocking Locks:** \n    - I'd query the system catalogs (like `pg_stat_activity` in `PostgreSQL`) to find sessions in a `waiting` state. \n    - I'm specifically looking for `granted = f` to see which PID is blocking our API export queries.\n- **Analyze Query Execution in Real-time:**\n    - Once I identify the culprit query, I wouldn't just look at the code; I'd grab the actual parameters being used by the API. \n    - I'd run `EXPLAIN (ANALYZE, BUFFERS)` on that specific execution to see if we are hitting a massive `Disk Scan` because a temporary table or a large join overflowed the `work_mem`.\n- **Check for I/O Wait and Vacuum Issues:**\n    - Since it's month-end, I'd check if `autovacuum` is running aggressively on the `salaries` or `payroll_records` tables. \n    - Excessive bloat from high-frequency updates during payroll runs can cause index scans to become much slower than expected.\n- **Practical Mitigation Steps:**\n    - **Kill/Throttle:** If a non-critical reporting job is the blocker, I'd terminate that session to restore API availability.\n    - **Read Replicas:** If the issue is pure read-volume, I'd suggest offloading those export queries to a `Read Replica` to isolate the heavy analytical load from the primary transactional instance.\n    - **Statement Timeouts:** I'd ensure the API connection string has a strict `statement_timeout` so a single rogue query can't hang a connection indefinitely and exhaust the connection pool.",
+      "answerMeta": {
+        "targetAnswerId": "production-scenario",
+        "codeContextInjected": false,
+        "answerIntent": "general_followup",
+        "answerMode": "auto",
+        "codeBlocksExtracted": 0
+      },
+      "evaluation": {
+        "passed": true,
+        "checks": [
+          {
+            "name": "intent",
+            "passed": true,
+            "expected": [
+              "CONTINUE_PREVIOUS",
+              "FOLLOW_UP",
+              "SCENARIO_QUESTION"
+            ],
+            "actual": "CONTINUE_PREVIOUS"
+          },
+          {
+            "name": "contextToUse",
+            "passed": true,
+            "expected": [
+              "previous_answer",
+              "recent_transcript"
+            ],
+            "actual": "previous_answer"
+          },
+          {
+            "name": "targetAnswerId",
+            "passed": true,
+            "expected": [
+              "production-scenario"
+            ],
+            "actual": "production-scenario"
+          },
+          {
+            "name": "codeContextInjected",
+            "passed": true,
+            "expected": [
+              "false"
+            ],
+            "actual": "false"
+          }
+        ]
+      }
+    },
+    {
+      "turn": 6,
+      "id": "experience-question",
+      "source": "interviewer",
+      "input": "Where have you handled this kind of database or pipeline optimization in your actual projects?",
+      "expectation": "Experience answer should use resume/project context.",
+      "decision": {
+        "intent": "EXPERIENCE_QUESTION",
+        "isFollowUp": false,
+        "targetAnswerId": "production-scenario-db-followup",
+        "requiresPreviousCode": false,
+        "answerMode": "auto",
+        "topic": "database optimization projects",
+        "confidence": 0.9,
+        "reason": "User is asking about past experiences related to the context of database optimization in projects.",
+        "contextToUse": "recent_transcript"
+      },
+      "decisionFallbackUsed": false,
+      "decisionError": null,
+      "rawDecisionResponse": "{\"outputContract\":{\"intent\":\"EXPERIENCE_QUESTION\",\"isFollowUp\":false,\"targetAnswerId\":\"production-scenario-db-followup\",\"requiresPreviousCode\":false,\"answerMode\":\"auto\",\"topic\":\"database optimization projects\",\"confidence\":0.9,\"reason\":\"User is asking about past experiences related to the context of database optimization in projects.\",\"contextToUse\":\"recent_transcript\"}}",
+      "decisionPrompt": {
+        "system": "You are ScribeShade's backend session-state decision layer.\nReturn strict JSON only. No markdown, no prose.\nDecide whether the current input is a new interview question or a continuation of prior session context.\nPrefer semantic context over keyword matching. Use previous question/answer/code and transcript chronology.\nanswerHistory is ordered oldest to newest. The entry marked recency='most_recent' is the latest AI answer.\nIf the user asks about the same query/code being slow, taking seconds, fetching records slowly, debugging, optimizing, or changing behavior, classify it as OPTIMIZE_CODE or DEBUG_CODE and bind previous code when available.\nFor any current input that begins with or mainly says 'continue', target mostRecentAnswer.id by default.\nIf the user says 'continue from X part', default to the most recent prior AI answer. Only jump to an older answer if the user explicitly names that older answer, says same query/code, or references a selected answer/card.\nFor ambiguous 'continue from database part', prefer the most_recent answer over older SQL/code because the user is usually continuing the current conversation branch.\nOnly target older SQL/code when the current input explicitly says same query, that query, previous query, code, optimize, debug, or similar code-specific wording.\nIf the user asks 'why your changes help' after an optimization answer, classify as FOLLOW_UP or EXPLAIN_CODE and target the most recent optimization answer.\nIf the user asks where they used something in actual projects, classify as EXPERIENCE_QUESTION and use recent_transcript/project context.\nDo not attach stale context to a clearly unrelated fresh question.",
+        "user": "{\"outputContract\":{\"instruction\":\"Return exactly this JSON object shape at top level. Do not wrap it inside schema or any other key.\",\"intent\":\"NEW_QUESTION | FOLLOW_UP | CONTINUE_PREVIOUS | EXPLAIN_CODE | DEBUG_CODE | OPTIMIZE_CODE | SCENARIO_QUESTION | EXPERIENCE_QUESTION | INTERVIEW_INSTRUCTION | UNKNOWN\",\"isFollowUp\":\"boolean\",\"targetAnswerId\":\"string id from answerHistory or null\",\"requiresPreviousCode\":\"boolean\",\"answerMode\":\"auto | theory_only | minimal_code | code_required | explain_existing_code | system_design\",\"topic\":\"short topic\",\"confidence\":\"0..1\",\"reason\":\"short reason\",\"contextToUse\":\"none | previous_answer | previous_code | selected_answer | recent_transcript\"},\"currentQuestion\":\"Where have you handled this kind of database or pipeline optimization in your actual projects?\",\"recentTranscriptWindow\":[\"[interviewer]: We have employee and salary tables. In a payroll review, how would you pull active employee salary records without overcomplicating it?\",\"[interviewer]: Okay, now same one is taking like two seconds when records are being fetched. What would you do there?\",\"[candidate]: Explain why your query changes help.\",\"[interviewer]: Switching topic. Imagine the payroll export API slows down during month-end and users complain reports are stuck. What would you check first?\",\"[candidate]: Continue from the database part of that production API scenario and make it practical.\",\"[interviewer]: Where have you handled this kind of database or pipeline optimization in your actual projects?\"],\"speakerSeparatedTranscript\":[{\"speakerType\":\"interviewer\",\"content\":\"We have employee and salary tables. In a payroll review, how would you pull active employee salary records without overcomplicating it?\",\"timestamp\":1779700571186},{\"speakerType\":\"interviewer\",\"content\":\"Okay, now same one is taking like two seconds when records are being fetched. What would you do there?\",\"timestamp\":1779700578503},{\"speakerType\":\"candidate\",\"content\":\"Explain why your query changes help.\",\"timestamp\":1779700587463},{\"speakerType\":\"interviewer\",\"content\":\"Switching topic. Imagine the payroll export API slows down during month-end and users complain reports are stuck. What would you check first?\",\"timestamp\":1779700592731},{\"speakerType\":\"candidate\",\"content\":\"Continue from the database part of that production API scenario and make it practical.\",\"timestamp\":1779700604527},{\"speakerType\":\"interviewer\",\"content\":\"Where have you handled this kind of database or pipeline optimization in your actual projects?\",\"timestamp\":1779700611949}],\"activeQuestionDetection\":null,\"previousAiAnswer\":\"\",\"previousCodeBlocks\":[],\"selectedAnswer\":null,\"answerHistory\":[{\"id\":\"salary-sql\",\"question\":\"We have employee and salary tables. In a payroll review, how would you pull active employee salary records without overcomplicating it?\",\"answerExcerpt\":\"**QUESTION:**\\nWe have employee and salary tables. In a payroll review, how would you pull active employee salary records without overcomplicating it?\\n\\n**ANSWER:**\\n**Direct answer:** I would use a `JOIN` between the `employees` and `salaries` tables, filtering for an `is_active` flag on the employee side and ensuring we are pulling only the most recent salary record using a window function like `ROW_NUMBER()`.\\n\\n- **Ap\",\"topic\":\"sql\",\"hasCode\":true,\"codePreview\":\"WITH LatestSalaries AS ( SELECT employee_id, salary_amount, effective_date, ROW_NUMBER() OVER (PARTITION BY employee_id ORDER BY effective_date DESC) as rank FROM salaries ) SELECT e.employee_id, e.first_name, e.last_nam\",\"orderIndex\":0,\"recency\":\"older\"},{\"id\":\"salary-sql-slow\",\"question\":\"Okay, now same one is taking like two seconds when records are being fetched. What would you do there?\",\"answerExcerpt\":\"**QUESTION:**\\nOkay, now same one is taking like two seconds when records are being fetched. What would you do there?\\n\\n**ANSWER:**\\n**Direct answer:** Two seconds is quite slow for a simple join and filter, so I'd start by looking at the execution plan using `EXPLAIN ANALYZE` to see if we're hitting full table scans or expensive nested loops. I'd specifically check if the `is_active` filter or the window function parti\",\"topic\":\"sql\",\"hasCode\":true,\"codePreview\":\"-- Optimization: Filtering inside the CTE to reduce the window function workload WITH LatestSalaries AS ( SELECT s.employee_id, s.salary_amount, s.effective_date, ROW_NUMBER() OVER ( PARTITION BY s.employee_id ORDER BY s\",\"orderIndex\":1,\"recency\":\"older\"},{\"id\":\"salary-sql-explain\",\"question\":\"Explain why your query changes help.\",\"answerExcerpt\":\"**QUESTION:**\\nExplain why your query changes help.\\n\\n**ANSWER:**\\n**Direct answer:** The changes I proposed target the two most common bottlenecks in this type of join: reducing the amount of data scanned and minimizing the computational cost of the window function. By adding specific indexes and optimizing how the engine accesses the data, we move from a heavy `Sequential Scan` to much more efficient `Index Scans`.\\n\\n-\",\"topic\":\"sql\",\"hasCode\":false,\"codePreview\":null,\"orderIndex\":2,\"recency\":\"older\"},{\"id\":\"production-scenario\",\"question\":\"Switching topic. Imagine the payroll export API slows down during month-end and users complain reports are stuck. What would you check first?\",\"answerExcerpt\":\"**QUESTION:**\\nSwitching topic. Imagine the payroll export API slows down during month-end and users complain reports are stuck. What would you check first?\\n\\n**ANSWER:**\\n**Direct answer:** Since this is happening during month-end, I would immediately investigate whether we are hitting a resource bottleneck caused by the increased concurrency and data volume typical of payroll processing cycles.\\n\\n1. **Diagnosis:**\\n    \",\"topic\":\"sql\",\"hasCode\":false,\"codePreview\":null,\"orderIndex\":3,\"recency\":\"older\"},{\"id\":\"production-scenario-db-followup\",\"question\":\"Continue from the database part of that production API scenario and make it practical.\",\"answerExcerpt\":\"**QUESTION:**\\nContinue from the database part of that production API scenario and make it practical.\\n\\n**ANSWER:**\\n**Direct answer:** To make the database investigation practical, I would move from high-level metrics to looking at active sessions and lock contention. If the API is slow, it's often not just a \\\"slow query,\\\" but a query being held up by another process, like a heavy month-end write operation or a schema \",\"topic\":\"mongodb\",\"hasCode\":false,\"codePreview\":null,\"orderIndex\":4,\"recency\":\"most_recent\"}],\"mostRecentAnswer\":{\"id\":\"production-scenario-db-followup\",\"question\":\"Continue from the database part of that production API scenario and make it practical.\",\"answerExcerpt\":\"**QUESTION:**\\nContinue from the database part of that production API scenario and make it practical.\\n\\n**ANSWER:**\\n**Direct answer:** To make the database investigation practical, I would move from high-level metrics to looking at active sessions and lock contention. If the API is slow, it's often not just a \\\"slow query,\\\" but a query being held up by another process, like a heavy month-end write operation or a schema \",\"topic\":\"mongodb\",\"hasCode\":false,\"codePreview\":null,\"orderIndex\":4,\"recency\":\"most_recent\"},\"activeConversationBranch\":{\"latestAnswerId\":\"production-scenario-db-followup\",\"latestQuestion\":\"Continue from the database part of that production API scenario and make it practical.\",\"latestTopic\":\"mongodb\",\"latestAnswerExcerpt\":\"**QUESTION:**\\nContinue from the database part of that production API scenario and make it practical.\\n\\n**ANSWER:**\\n**Direct answer:** To make the database investigation practical, I would move from high-level metrics to looking at active sessions and lock contention. If the API is slow, it's often not just a \\\"slow query,\\\" but a query being held up by another process, like a heavy month-end write operation or a schema \"},\"deterministicSignal\":{\"conversationIntent\":\"NEW_QUESTION\",\"isExplicitFollowupReference\":false,\"fallbackTargetId\":null,\"fallbackTargetHasCode\":false,\"fallbackTargetTopic\":null,\"reasonForNoTarget\":\"fresh_question_no_followup_reference\"}}"
+      },
+      "answer": "**QUESTION:**\nWhere have you handled this kind of database or pipeline optimization in your actual projects?\n\n**ANSWER:**\n**Direct answer:** I dealt with these exact scenarios—specifically lock contention and query latency during peak loads—while building the **Payroll Analytics Platform**. Because payroll processing is highly seasonal and heavy on month-end writes, I had to optimize both the relational database layer and the Spark processing layer to prevent the API slowdowns we were discussing.\n\n**Experience:**\n- **Problem:** During month-end reconciliation, heavy `INSERT` and `UPDATE` operations on the `salaries` and `attendance` tables in `PostgreSQL` were causing row-level locks, which directly blocked the read-heavy reporting API used by finance teams.\n- **My Role:** I was responsible for designing the ETL architecture and optimizing the production queries that powered our real-time dashboards.\n- **Stack:** `PostgreSQL`, `Databricks`, `Apache Spark`, `Azure Data Factory (ADF)`.\n\n**Approach & Challenges:**\n- **Database Optimization:** To resolve the locking issues, I implemented a strategy of offloading heavy analytical queries from the production `PostgreSQL` instance to a read-replica. I also introduced **partitioning** on large transaction tables by `month` and `year` to ensure the engine wasn't scanning years of historical payroll data for a single month's report.\n- **Pipeline Optimization:** In the `Spark` layer on `Databricks`, I noticed significant data skew during the join between `employees` and `payroll_records`. I handled this by using **salting** techniques to redistribute the skewed keys and switching to `broadcast joins` for smaller dimension tables like `department_codes` to reduce expensive shuffles.\n- **Implementation:** I rewrote several critical SQL queries to use `CTEs` and window functions more efficiently, ensuring we were hitting our new composite indexes rather than falling back to full table scans.\n\n**Impact:**\n- **Latency Reduction:** We reduced the end-to-end reporting latency by roughly 40%, moving from several seconds to sub-second responses for standard lookups.\n- **Stability:** The API-related incidents during month-end processing were virtually eliminated because the heavy analytical workloads were no longer competing for locks with the transactional writes.",
+      "answerMeta": {
+        "targetAnswerId": "production-scenario-db-followup",
+        "codeContextInjected": false,
+        "answerIntent": "behavioral_project_experience",
+        "answerMode": "auto",
+        "codeBlocksExtracted": 0
+      },
+      "evaluation": {
+        "passed": true,
+        "checks": [
+          {
+            "name": "intent",
+            "passed": true,
+            "expected": [
+              "EXPERIENCE_QUESTION"
+            ],
+            "actual": "EXPERIENCE_QUESTION"
+          },
+          {
+            "name": "contextToUse",
+            "passed": true,
+            "expected": [
+              "recent_transcript",
+              "previous_answer"
+            ],
+            "actual": "recent_transcript"
+          },
+          {
+            "name": "codeContextInjected",
+            "passed": true,
+            "expected": [
+              "false"
+            ],
+            "actual": "false"
+          }
+        ]
+      }
+    },
+    {
+      "turn": 7,
+      "id": "outside-context",
+      "source": "candidate_manual",
+      "input": "What is the weather in Delhi tomorrow?",
+      "expectation": "Fresh outside-context question should not reuse stale SQL/scenario context.",
+      "decision": {
+        "intent": "NEW_QUESTION",
+        "isFollowUp": false,
+        "targetAnswerId": null,
+        "requiresPreviousCode": false,
+        "answerMode": "theory_only",
+        "topic": "weather",
+        "confidence": 0.1,
+        "reason": "Unrelated to prior context about database or payroll optimization.",
+        "contextToUse": "none"
+      },
+      "decisionFallbackUsed": false,
+      "decisionError": null,
+      "rawDecisionResponse": "{\"outputContract\":{\"intent\":\"NEW_QUESTION\",\"isFollowUp\":false,\"targetAnswerId\":null,\"requiresPreviousCode\":false,\"answerMode\":\"theory_only\",\"topic\":\"weather\",\"confidence\":0.1,\"reason\":\"Unrelated to prior context about database or payroll optimization.\",\"contextToUse\":\"none\"}}",
+      "decisionPrompt": {
+        "system": "You are ScribeShade's backend session-state decision layer.\nReturn strict JSON only. No markdown, no prose.\nDecide whether the current input is a new interview question or a continuation of prior session context.\nPrefer semantic context over keyword matching. Use previous question/answer/code and transcript chronology.\nanswerHistory is ordered oldest to newest. The entry marked recency='most_recent' is the latest AI answer.\nIf the user asks about the same query/code being slow, taking seconds, fetching records slowly, debugging, optimizing, or changing behavior, classify it as OPTIMIZE_CODE or DEBUG_CODE and bind previous code when available.\nFor any current input that begins with or mainly says 'continue', target mostRecentAnswer.id by default.\nIf the user says 'continue from X part', default to the most recent prior AI answer. Only jump to an older answer if the user explicitly names that older answer, says same query/code, or references a selected answer/card.\nFor ambiguous 'continue from database part', prefer the most_recent answer over older SQL/code because the user is usually continuing the current conversation branch.\nOnly target older SQL/code when the current input explicitly says same query, that query, previous query, code, optimize, debug, or similar code-specific wording.\nIf the user asks 'why your changes help' after an optimization answer, classify as FOLLOW_UP or EXPLAIN_CODE and target the most recent optimization answer.\nIf the user asks where they used something in actual projects, classify as EXPERIENCE_QUESTION and use recent_transcript/project context.\nDo not attach stale context to a clearly unrelated fresh question.",
+        "user": "{\"outputContract\":{\"instruction\":\"Return exactly this JSON object shape at top level. Do not wrap it inside schema or any other key.\",\"intent\":\"NEW_QUESTION | FOLLOW_UP | CONTINUE_PREVIOUS | EXPLAIN_CODE | DEBUG_CODE | OPTIMIZE_CODE | SCENARIO_QUESTION | EXPERIENCE_QUESTION | INTERVIEW_INSTRUCTION | UNKNOWN\",\"isFollowUp\":\"boolean\",\"targetAnswerId\":\"string id from answerHistory or null\",\"requiresPreviousCode\":\"boolean\",\"answerMode\":\"auto | theory_only | minimal_code | code_required | explain_existing_code | system_design\",\"topic\":\"short topic\",\"confidence\":\"0..1\",\"reason\":\"short reason\",\"contextToUse\":\"none | previous_answer | previous_code | selected_answer | recent_transcript\"},\"currentQuestion\":\"What is the weather in Delhi tomorrow?\",\"recentTranscriptWindow\":[\"[interviewer]: We have employee and salary tables. In a payroll review, how would you pull active employee salary records without overcomplicating it?\",\"[interviewer]: Okay, now same one is taking like two seconds when records are being fetched. What would you do there?\",\"[candidate]: Explain why your query changes help.\",\"[interviewer]: Switching topic. Imagine the payroll export API slows down during month-end and users complain reports are stuck. What would you check first?\",\"[candidate]: Continue from the database part of that production API scenario and make it practical.\",\"[interviewer]: Where have you handled this kind of database or pipeline optimization in your actual projects?\",\"[candidate]: What is the weather in Delhi tomorrow?\"],\"speakerSeparatedTranscript\":[{\"speakerType\":\"interviewer\",\"content\":\"We have employee and salary tables. In a payroll review, how would you pull active employee salary records without overcomplicating it?\",\"timestamp\":1779700571186},{\"speakerType\":\"interviewer\",\"content\":\"Okay, now same one is taking like two seconds when records are being fetched. What would you do there?\",\"timestamp\":1779700578503},{\"speakerType\":\"candidate\",\"content\":\"Explain why your query changes help.\",\"timestamp\":1779700587463},{\"speakerType\":\"interviewer\",\"content\":\"Switching topic. Imagine the payroll export API slows down during month-end and users complain reports are stuck. What would you check first?\",\"timestamp\":1779700592731},{\"speakerType\":\"candidate\",\"content\":\"Continue from the database part of that production API scenario and make it practical.\",\"timestamp\":1779700604527},{\"speakerType\":\"interviewer\",\"content\":\"Where have you handled this kind of database or pipeline optimization in your actual projects?\",\"timestamp\":1779700611949},{\"speakerType\":\"candidate\",\"content\":\"What is the weather in Delhi tomorrow?\",\"timestamp\":1779700619622}],\"activeQuestionDetection\":null,\"previousAiAnswer\":\"\",\"previousCodeBlocks\":[],\"selectedAnswer\":null,\"answerHistory\":[{\"id\":\"salary-sql\",\"question\":\"We have employee and salary tables. In a payroll review, how would you pull active employee salary records without overcomplicating it?\",\"answerExcerpt\":\"**QUESTION:**\\nWe have employee and salary tables. In a payroll review, how would you pull active employee salary records without overcomplicating it?\\n\\n**ANSWER:**\\n**Direct answer:** I would use a `JOIN` between the `employees` and `salaries` tables, filtering for an `is_active` flag on the employee side and ensuring we are pulling only the most recent salary record using a window function like `ROW_NUMBER()`.\\n\\n- **Ap\",\"topic\":\"sql\",\"hasCode\":true,\"codePreview\":\"WITH LatestSalaries AS ( SELECT employee_id, salary_amount, effective_date, ROW_NUMBER() OVER (PARTITION BY employee_id ORDER BY effective_date DESC) as rank FROM salaries ) SELECT e.employee_id, e.first_name, e.last_nam\",\"orderIndex\":0,\"recency\":\"older\"},{\"id\":\"salary-sql-slow\",\"question\":\"Okay, now same one is taking like two seconds when records are being fetched. What would you do there?\",\"answerExcerpt\":\"**QUESTION:**\\nOkay, now same one is taking like two seconds when records are being fetched. What would you do there?\\n\\n**ANSWER:**\\n**Direct answer:** Two seconds is quite slow for a simple join and filter, so I'd start by looking at the execution plan using `EXPLAIN ANALYZE` to see if we're hitting full table scans or expensive nested loops. I'd specifically check if the `is_active` filter or the window function parti\",\"topic\":\"sql\",\"hasCode\":true,\"codePreview\":\"-- Optimization: Filtering inside the CTE to reduce the window function workload WITH LatestSalaries AS ( SELECT s.employee_id, s.salary_amount, s.effective_date, ROW_NUMBER() OVER ( PARTITION BY s.employee_id ORDER BY s\",\"orderIndex\":1,\"recency\":\"older\"},{\"id\":\"salary-sql-explain\",\"question\":\"Explain why your query changes help.\",\"answerExcerpt\":\"**QUESTION:**\\nExplain why your query changes help.\\n\\n**ANSWER:**\\n**Direct answer:** The changes I proposed target the two most common bottlenecks in this type of join: reducing the amount of data scanned and minimizing the computational cost of the window function. By adding specific indexes and optimizing how the engine accesses the data, we move from a heavy `Sequential Scan` to much more efficient `Index Scans`.\\n\\n-\",\"topic\":\"sql\",\"hasCode\":false,\"codePreview\":null,\"orderIndex\":2,\"recency\":\"older\"},{\"id\":\"production-scenario\",\"question\":\"Switching topic. Imagine the payroll export API slows down during month-end and users complain reports are stuck. What would you check first?\",\"answerExcerpt\":\"**QUESTION:**\\nSwitching topic. Imagine the payroll export API slows down during month-end and users complain reports are stuck. What would you check first?\\n\\n**ANSWER:**\\n**Direct answer:** Since this is happening during month-end, I would immediately investigate whether we are hitting a resource bottleneck caused by the increased concurrency and data volume typical of payroll processing cycles.\\n\\n1. **Diagnosis:**\\n    \",\"topic\":\"sql\",\"hasCode\":false,\"codePreview\":null,\"orderIndex\":3,\"recency\":\"older\"},{\"id\":\"production-scenario-db-followup\",\"question\":\"Continue from the database part of that production API scenario and make it practical.\",\"answerExcerpt\":\"**QUESTION:**\\nContinue from the database part of that production API scenario and make it practical.\\n\\n**ANSWER:**\\n**Direct answer:** To make the database investigation practical, I would move from high-level metrics to looking at active sessions and lock contention. If the API is slow, it's often not just a \\\"slow query,\\\" but a query being held up by another process, like a heavy month-end write operation or a schema \",\"topic\":\"mongodb\",\"hasCode\":false,\"codePreview\":null,\"orderIndex\":4,\"recency\":\"older\"},{\"id\":\"experience-question\",\"question\":\"Where have you handled this kind of database or pipeline optimization in your actual projects?\",\"answerExcerpt\":\"**QUESTION:**\\nWhere have you handled this kind of database or pipeline optimization in your actual projects?\\n\\n**ANSWER:**\\n**Direct answer:** I dealt with these exact scenarios—specifically lock contention and query latency during peak loads—while building the **Payroll Analytics Platform**. Because payroll processing is highly seasonal and heavy on month-end writes, I had to optimize both the relational database laye\",\"topic\":\"mongodb\",\"hasCode\":false,\"codePreview\":null,\"orderIndex\":5,\"recency\":\"most_recent\"}],\"mostRecentAnswer\":{\"id\":\"experience-question\",\"question\":\"Where have you handled this kind of database or pipeline optimization in your actual projects?\",\"answerExcerpt\":\"**QUESTION:**\\nWhere have you handled this kind of database or pipeline optimization in your actual projects?\\n\\n**ANSWER:**\\n**Direct answer:** I dealt with these exact scenarios—specifically lock contention and query latency during peak loads—while building the **Payroll Analytics Platform**. Because payroll processing is highly seasonal and heavy on month-end writes, I had to optimize both the relational database laye\",\"topic\":\"mongodb\",\"hasCode\":false,\"codePreview\":null,\"orderIndex\":5,\"recency\":\"most_recent\"},\"activeConversationBranch\":{\"latestAnswerId\":\"experience-question\",\"latestQuestion\":\"Where have you handled this kind of database or pipeline optimization in your actual projects?\",\"latestTopic\":\"mongodb\",\"latestAnswerExcerpt\":\"**QUESTION:**\\nWhere have you handled this kind of database or pipeline optimization in your actual projects?\\n\\n**ANSWER:**\\n**Direct answer:** I dealt with these exact scenarios—specifically lock contention and query latency during peak loads—while building the **Payroll Analytics Platform**. Because payroll processing is highly seasonal and heavy on month-end writes, I had to optimize both the relational database laye\"},\"deterministicSignal\":{\"conversationIntent\":\"NEW_QUESTION\",\"isExplicitFollowupReference\":false,\"fallbackTargetId\":null,\"fallbackTargetHasCode\":false,\"fallbackTargetTopic\":null,\"reasonForNoTarget\":\"fresh_question_no_followup_reference\"}}"
+      },
+      "answer": "**QUESTION:**\nWhat is the weather in Delhi tomorrow?\n\n**ANSWER:**\n**Direct answer:** I don't have access to real-time weather data or live internet browsing to check the forecast for Delhi.",
+      "answerMeta": {
+        "targetAnswerId": null,
+        "codeContextInjected": false,
+        "answerIntent": "concept_explanation",
+        "answerMode": "theory_only",
+        "codeBlocksExtracted": 0
+      },
+      "evaluation": {
+        "passed": true,
+        "checks": [
+          {
+            "name": "intent",
+            "passed": true,
+            "expected": [
+              "NEW_QUESTION",
+              "UNKNOWN"
+            ],
+            "actual": "NEW_QUESTION"
+          },
+          {
+            "name": "contextToUse",
+            "passed": true,
+            "expected": [
+              "none"
+            ],
+            "actual": "none"
+          },
+          {
+            "name": "codeContextInjected",
+            "passed": true,
+            "expected": [
+              "false"
+            ],
+            "actual": "false"
+          }
+        ]
+      }
+    }
+  ],
+  "summary": {
+    "totalTurns": 7,
+    "fallbackDecisionCount": 0,
+    "codeContextInjectedCount": 1,
+    "passedTurns": 6,
+    "failedTurns": 1,
+    "intents": [
+      "NEW_QUESTION",
+      "OPTIMIZE_CODE",
+      "FOLLOW_UP",
+      "SCENARIO_QUESTION",
+      "CONTINUE_PREVIOUS",
+      "EXPERIENCE_QUESTION",
+      "NEW_QUESTION"
+    ]
+  }
+}

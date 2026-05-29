@@ -48,6 +48,29 @@ test("compact and follow-up prompts include the same markdown contract", () => {
   assert.ok(followup.includes("'- ' bullets"));
 });
 
+test("project-explain rules include architecture diagram exception and required flow guidance", () => {
+  const prompt = buildSystemMessage({
+    ...baseContext,
+    complexity: "scenario_based",
+    projects:
+      "━━━ PRIMARY PROJECT: Banking Gateway ━━━\n[Architecture Diagram]:\n```text\nA -> B -> C\n```",
+    hasSelectedProjects: true,
+    isProjectQuestion: true,
+    projectPriorityMode: "project_questions_only",
+  });
+
+  assert.ok(
+    prompt.includes(
+      "Exception: for project-explanation questions, if selected project context includes an Architecture Diagram block",
+    ),
+  );
+  assert.ok(
+    prompt.includes(
+      "This is required for project-explain asks when diagram context is available.",
+    ),
+  );
+});
+
 test("user prompts include markdown contract across answer entrypoints", () => {
   const normal = buildUserMessage("How many years of experience do you have?", false, false, {
     ...baseContext,

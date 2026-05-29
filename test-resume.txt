@@ -1,0 +1,33 @@
+
+TEST CANDIDATE
+Senior Data Engineer
+Email: test@example.com | Phone: +1-234-567-8900
+
+SUMMARY
+Data Engineer with 5.9 years of experience in cloud-based data architecture and large-scale data processing.
+
+EXPERIENCE
+
+Senior Data Engineer | 3i Infotech | April 2023 - Present
+- Migrated 10+ legacy data pipelines to Databricks, achieving 40% performance improvement
+- Processing 1TB+ daily data volumes using PySpark for complex transformations
+- Designed and optimized ETL workflows on Databricks with advanced query optimization
+- Reduced query execution times by 30% through performance tuning
+- Built scalable ETL workflows using Azure Data Factory, reducing processing time by 40%
+- Streamlined CI/CD processes via Azure DevOps, cutting deployment time by 50%
+
+Project Engineer | Wipro | November 2018 - October 2021
+- Developed data pipelines using AWS Glue and Redshift
+- Implemented data quality checks and validation frameworks
+- Optimized SQL queries for improved performance
+
+SKILLS
+- Cloud Platforms: Azure, AWS (Redshift, Glue, Athena, Lambda)
+- Big Data: Databricks, PySpark, DataStage
+- Databases: SQL Azure, Redshift
+- Orchestration: Azure Data Factory, AWS Glue
+- Languages: Python, SQL
+- Tools: Azure DevOps, Git, Docker
+
+EDUCATION
+Bachelor of Engineering in Computer Science

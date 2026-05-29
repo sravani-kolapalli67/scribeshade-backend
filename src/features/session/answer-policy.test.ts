@@ -89,3 +89,30 @@ test("emits scenario markdown answer shape", () => {
   assert.ok(policy.policyBlock.includes("**Diagnosis:**"));
   assert.ok(policy.policyBlock.includes("**Recommendation:**"));
 });
+
+test("AI decision can force SQL performance followup into code optimization mode", () => {
+  const policy = buildRequestScopedPolicy({
+    question: "What if the same query takes 2 seconds while fetching records?",
+    metadata: {
+      transcript: "What if the same query takes 2 seconds while fetching records?",
+      previousCodeBlocks: ["SELECT employee_id, salary FROM employees;"],
+      previousAiAnswer: "```sql\nSELECT employee_id, salary FROM employees;\n```",
+    } as any,
+    aiDecision: {
+      intent: "OPTIMIZE_CODE",
+      isFollowUp: true,
+      targetAnswerId: "salary-sql",
+      requiresPreviousCode: true,
+      answerMode: "explain_existing_code",
+      topic: "sql",
+      confidence: 0.92,
+      reason: "same query performance followup",
+      contextToUse: "previous_code",
+    },
+  });
+
+  assert.equal(policy.answerIntent, "code_optimization_followup");
+  assert.equal(policy.effectiveAnswerMode, "explain_existing_code");
+  assert.equal(policy.isCodeFollowup, true);
+  assert.ok(policy.codeContextBlock.includes("FOLLOW-UP CODE CONTEXT"));
+});

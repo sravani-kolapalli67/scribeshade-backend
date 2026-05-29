@@ -2,6 +2,7 @@ import { z } from "zod";
 
 export const projectGenerationRequestSchema = z.object({
   resume_id: z.string().uuid().optional(),
+  primary_resume_project: z.string().min(2).optional(),
   role_type: z.string().min(2, "role_type is required"),
   jd_text: z.string().optional().default(""),
   experience_level: z
@@ -14,6 +15,14 @@ export const projectGenerationRequestSchema = z.object({
 
 export type ProjectGenerationRequest = z.infer<
   typeof projectGenerationRequestSchema
+>;
+
+export const detectResumeProjectsRequestSchema = z.object({
+  resume_id: z.string().uuid(),
+});
+
+export type DetectResumeProjectsRequest = z.infer<
+  typeof detectResumeProjectsRequestSchema
 >;
 
 export const projectGenerationResponseSchema = z.object({

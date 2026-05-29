@@ -39,6 +39,10 @@ export async function createSession(req: Request, res: Response) {
       free: body.free === "true" || body.free === true,
       DocumentId: body.DocumentId || body.documentId || "",
       projectIds,
+      primaryProjectId:
+        typeof body.primaryProjectId === "string"
+          ? body.primaryProjectId
+          : undefined,
     };
 
     if (!data.userId) {

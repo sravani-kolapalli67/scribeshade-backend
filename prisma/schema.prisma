@@ -286,6 +286,7 @@ model Session {
   aiUsage Int @default(0)
 
   // ── optional AI-project context IDs selected at session creation ───────────
+  primaryProjectId String?
   projectIds Json @default("[]")
 
   messages   Json @default("[]")
@@ -722,4 +723,3 @@ model AnswerGenerationSnapshot {
 
   @@index([sessionId])
 }
-
