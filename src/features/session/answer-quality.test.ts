@@ -41,6 +41,38 @@ test("reconstructs weak backend deictic followup from transcript window", () => 
   assert.match(out.reconstructedResolvedQuestion, /user events?/i);
 });
 
+test("does not over-merge standalone questions with previous interviewer turns", () => {
+  const out = guardCurrentQuestion({
+    resolvedQuestion:
+      "Write TypeScript code for a debounce utility function and show practical usage in a React search input.",
+    recentTranscriptWindow: [
+      "[Interviewer]: Before we start coding, introduce yourself and explain your selected project architecture in detail.",
+      "[Interviewer]: Write TypeScript code for a debounce utility function and show practical usage in a React search input.",
+    ],
+  });
+
+  assert.equal(out.weakQuestionReconstructedBackend, false);
+  assert.equal(
+    out.resolvedCurrentQuestion,
+    "Write TypeScript code for a debounce utility function and show practical usage in a React search input.",
+  );
+});
+
+test("does not over-merge long explicit continue question", () => {
+  const current =
+    "Continue from the database part of that notification design and justify indexing choices.";
+  const out = guardCurrentQuestion({
+    resolvedQuestion: current,
+    recentTranscriptWindow: [
+      "[Interviewer]: Write TypeScript code for a debounce utility function and show practical usage in a React search input.",
+      "[Interviewer]: How would you test that debounce logic and which edge cases would you cover?",
+      "[Interviewer]: Switching topic now. Tell me about a conflict with a stakeholder and how you resolved it.",
+      "[Interviewer]: New topic: design a notification system for 1 million events per day and explain scaling and reliability.",
+    ],
+  });
+  assert.equal(out.resolvedCurrentQuestion, current);
+});
+
 test("prefers relevant historical SQL code target over latest unrelated answer", () => {
   const history = toAnswerHistory([
     {
@@ -292,6 +324,36 @@ test("scenario continuation phrases are treated as followups", () => {
   assert.equal(target.target?.id, "mern-scenario");
   assert.equal(target.source, "immediate_previous");
   assert.equal(isFollowupConversationIntent(classifyConversationIntent("continue from database part")), true);
+});
+
+test("example-only short followup binds to immediate previous answer", () => {
+  const history = toAnswerHistory([
+    {
+      messageId: "redis-methods",
+      role: "AI_ASSISTANT",
+      question: "What is get, set, and push method in Redis?",
+      answer:
+        "GET retrieves value, SET stores key-value, and LPUSH/RPUSH add list items.",
+      timestamp: new Date("2026-05-21T10:00:00Z").toISOString(),
+    },
+    {
+      messageId: "redis-followup-context",
+      role: "AI_ASSISTANT",
+      question: "Where are these methods used?",
+      answer: "They are used in caching and queue scenarios.",
+      timestamp: new Date("2026-05-21T10:01:00Z").toISOString(),
+    },
+  ]);
+
+  const target = resolveFollowupTarget({
+    question: "Can you write some examples?",
+    history,
+  });
+
+  assert.equal(classifyConversationIntent("Can you write some examples?"), "FOLLOW_UP");
+  assert.equal(target.source, "immediate_previous");
+  assert.equal(target.target?.id, "redis-followup-context");
+  assert.equal(target.isExplicitFollowupReference, true);
 });
 
 test("transcript normalization is conservative around protected code and paths", () => {

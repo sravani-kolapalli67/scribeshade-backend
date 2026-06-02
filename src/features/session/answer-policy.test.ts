@@ -78,6 +78,22 @@ test("classifies behavioral project experience", () => {
   assert.equal(intent, "behavioral_project_experience");
 });
 
+test("classifies project overview as experience, not concept explanation", () => {
+  const policy = buildRequestScopedPolicy({
+    question: "Explain my projects",
+    metadata: { transcript: "Explain my projects", answerMode: "auto" } as any,
+    cieComplexity: "simple_contextual",
+  });
+
+  assert.equal(policy.answerIntent, "behavioral_project_experience");
+  assert.equal(policy.effectiveAnswerMode, "auto");
+  assert.equal(policy.experienceSuppressed, false);
+  assert.ok(policy.policyBlock.includes("project_coverage: include_all_selected_projects"));
+  assert.ok(policy.policyBlock.includes("project_source_precedence: selected_projects_first"));
+  assert.ok(policy.policyBlock.includes("candidate_voice_rule"));
+  assert.ok(policy.policyBlock.includes("project names, exact numbers"));
+});
+
 test("emits scenario markdown answer shape", () => {
   const policy = buildRequestScopedPolicy({
     question: "In production, how would you debug a slow API?",

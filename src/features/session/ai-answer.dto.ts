@@ -1,8 +1,10 @@
 import { z } from "zod";
 
 export const AI_ANSWER_LIMITS = {
-  recentTranscriptWindowMax: 15,
+  recentTranscriptWindowMax: 60,
   previousAiAnswerMaxChars: 1000,
+  previousAiAnswersMax: 2,
+  previousAiAnswerQuestionMaxChars: 500,
   previousCodeBlocksMax: 2,
   previousCodeBlockMaxChars: 1500,
   selectedAnswerQuestionMaxChars: 500,
@@ -33,6 +35,22 @@ const speakerEntrySchema = z.object({
   content: z.string().trim().min(1),
   timestamp: z.number().optional(),
 });
+const previousAiAnswerEntrySchema = z.object({
+  question: z
+    .string()
+    .trim()
+    .max(AI_ANSWER_LIMITS.previousAiAnswerQuestionMaxChars)
+    .optional(),
+  answer: z
+    .string()
+    .trim()
+    .min(1)
+    .max(AI_ANSWER_LIMITS.previousAiAnswerMaxChars),
+  codeBlocks: z
+    .array(z.string().max(AI_ANSWER_LIMITS.previousCodeBlockMaxChars))
+    .max(AI_ANSWER_LIMITS.previousCodeBlocksMax)
+    .optional(),
+});
 
 const activeQuestionDetectionSchema = z.object({
   activeQuestion: z.string().trim().min(1).max(2000),
@@ -61,6 +79,10 @@ export const aiAnswerRequestSchema = z.object({
   previousAiAnswer: z
     .string()
     .max(AI_ANSWER_LIMITS.previousAiAnswerMaxChars)
+    .optional(),
+  previousAiAnswers: z
+    .array(previousAiAnswerEntrySchema)
+    .max(AI_ANSWER_LIMITS.previousAiAnswersMax)
     .optional(),
   previousCodeBlocks: z
     .array(z.string().max(AI_ANSWER_LIMITS.previousCodeBlockMaxChars))
@@ -119,6 +141,35 @@ export function normalizeAIAnswerRequestBody(
       typeof body.previousAiAnswer === "string"
         ? body.previousAiAnswer.slice(0, AI_ANSWER_LIMITS.previousAiAnswerMaxChars)
         : body.previousAiAnswer,
+    previousAiAnswers: Array.isArray(body.previousAiAnswers)
+      ? body.previousAiAnswers
+          .slice(-AI_ANSWER_LIMITS.previousAiAnswersMax)
+          .map((entry: any) => ({
+            ...(typeof entry?.question === "string"
+              ? {
+                  question: entry.question.slice(
+                    0,
+                    AI_ANSWER_LIMITS.previousAiAnswerQuestionMaxChars,
+                  ),
+                }
+              : {}),
+            answer:
+              typeof entry?.answer === "string"
+                ? entry.answer.slice(0, AI_ANSWER_LIMITS.previousAiAnswerMaxChars)
+                : entry?.answer,
+            ...(Array.isArray(entry?.codeBlocks)
+              ? {
+                  codeBlocks: entry.codeBlocks
+                    .slice(0, AI_ANSWER_LIMITS.previousCodeBlocksMax)
+                    .map((b: any) =>
+                      typeof b === "string"
+                        ? b.slice(0, AI_ANSWER_LIMITS.previousCodeBlockMaxChars)
+                        : b,
+                    ),
+                }
+              : {}),
+          }))
+      : body.previousAiAnswers,
     previousCodeBlocks: Array.isArray(body.previousCodeBlocks)
       ? body.previousCodeBlocks
           .slice(0, AI_ANSWER_LIMITS.previousCodeBlocksMax)

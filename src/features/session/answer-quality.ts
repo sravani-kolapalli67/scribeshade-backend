@@ -53,6 +53,8 @@ const CODE_REF_RE =
   /\b(this code|the code|your code|the code you wrote|above code|previous code|first line|that query|the query|same query|the same query|same code|the same code|same logic|same script|same approach|query you wrote|query you wrote before|that code|what does this code do|explain (?:it|the code again)|explain (?:this|that|the|your|previous|above)\s+(?:code|query|snippet|function|logic)|why (?:is|was) this used|why did you use this|optimi[sz]e (?:this|it|the code|the query)?|debug (?:this|it|the code|the query)?|fix (?:this|it|the code|the query)?|previous answer|above answer)\b/i;
 const FOLLOWUP_RE =
   /\b(explain this|explain that|explain the code again|expand on that|can you expand|can you explain more|can you explain that|tell me more about that|tell me more|why did you use this|why this is used|why|how exactly|same thing|continue(?: from)?|continue from .{1,80}|what about that|what does this mean|previous answer|above answer|before|you wrote|you said|you mentioned|in your previous project|previously you said|the approach|that approach|repeat the answer|what did you say|database part|architecture part|from the (?:database|backend|frontend|api|architecture|deployment|security|scaling) part)\b/i;
+const EXAMPLE_FOLLOWUP_RE =
+  /^(?:can|could|would)\s+you\s+(?:write|give|show|share|provide)\s+(?:some\s+)?(?:examples?|sample(?:s)?|snippet(?:s)?)(?:\s+(?:for|of|on|about).*)?\??$/i;
 const VAGUE_DEICTIC_RE =
   /^(?:that|this|it|that approach|this approach|explain it|explain that|explain this|explain the code|can you explain that|can you explain this|continue|continue from .{1,80}|tell me more|tell me more about that|why\??|why this is used\??|how so\??|how exactly did you do that\??|elaborate|expand|optimi[sz]e this|debug this)\s*$/i;
 const DEBUG_FOLLOWUP_RE = /\b(debug|fix|bug|error|issue|failing|not working)\b/i;
@@ -166,6 +168,7 @@ export function classifyConversationIntent(question: string): ConversationIntent
   if (/^continue\b/i.test(q) || VAGUE_DEICTIC_RE.test(q)) return "CONTINUE_PREVIOUS";
   if (EXPLICIT_EXPERIENCE_RE.test(q)) return "EXPERIENCE_QUESTION";
   if (SCENARIO_FOLLOWUP_RE.test(q)) return "SCENARIO_QUESTION";
+  if (EXAMPLE_FOLLOWUP_RE.test(q)) return "FOLLOW_UP";
   if (FOLLOWUP_RE.test(q)) return "FOLLOW_UP";
   if (INTERVIEW_INSTRUCTION_RE.test(q)) return "INTERVIEW_INSTRUCTION";
   if (/^(what|why|how|when|where|which|who|can|could|would|should|is|are|do|does|did|explain|define|write|implement|design)\b/i.test(q)) {
@@ -229,6 +232,134 @@ function tokenOverlap(a: string, b: string): number {
   let overlap = 0;
   for (const t of ta) if (tb.has(t)) overlap += 1;
   return overlap / Math.max(ta.size, tb.size);
+}
+
+const INTERVIEW_PROMPT_START_RE =
+  /\b(before we start|technical round|quick intro|introduce|tell me|explain|describe|walk me|can you|could you|would you|what|how|why|where|when)\b/i;
+
+function reconstructInterviewerCompoundQuestion(
+  recentTranscriptWindow?: string[],
+): string {
+  const chunks = (recentTranscriptWindow || [])
+    .slice(-20)
+    .map((line) => normalizeSpaces(line))
+    .filter((line) => /^\[interviewer\]:/i.test(line))
+    .map((line) => normalizeSpaces(line.replace(/^\[[^\]]+\]:\s*/, "")))
+    .filter(Boolean);
+  if (!chunks.length) return "";
+  const startIndex = chunks.findIndex((chunk) =>
+    INTERVIEW_PROMPT_START_RE.test(chunk),
+  );
+  const promptChunks = startIndex >= 0 ? chunks.slice(startIndex) : chunks;
+  const merged: string[] = [];
+  for (const chunk of promptChunks) {
+    const prev = merged[merged.length - 1];
+    if (!prev) {
+      merged.push(chunk);
+      continue;
+    }
+    const overlap = tokenOverlap(prev, chunk);
+    if (overlap >= 0.85) {
+      if (chunk.length > prev.length) {
+        merged[merged.length - 1] = chunk;
+      }
+      continue;
+    }
+    if (/\b(and|or|then|also|plus|because|so|where)\s*$/i.test(prev)) {
+      merged[merged.length - 1] = normalizeSpaces(`${prev} ${chunk}`);
+      continue;
+    }
+    merged.push(chunk);
+  }
+  return normalizeSpaces(merged.join(" ")).replace(
+    /^(?:(?:so|okay|great|right|perfect)[,.;:\s]+)+/i,
+    "",
+  );
+}
+
+function containsTokenSequence(tokens: string[], sequence: string[]): boolean {
+  if (!tokens.length || !sequence.length || sequence.length > tokens.length) {
+    return false;
+  }
+  for (let i = 0; i <= tokens.length - sequence.length; i += 1) {
+    if (sequence.every((token, index) => tokens[i + index] === token)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function mergeCurrentTailIntoCompound(
+  interviewerCompound: string,
+  currentQuestion: string,
+): string {
+  const compound = normalizeSpaces(interviewerCompound);
+  const current = normalizeSpaces(currentQuestion);
+  if (!compound || !current) return compound || current;
+
+  const compoundTokens = tokenize(compound);
+  const currentWords = current.split(/\s+/).filter(Boolean);
+  const currentTokens = currentWords.map((word) => tokenize(word)[0]).filter(Boolean);
+  let prefixLength = 0;
+  for (
+    let length = Math.min(currentTokens.length, compoundTokens.length);
+    length >= 3;
+    length -= 1
+  ) {
+    if (containsTokenSequence(compoundTokens, currentTokens.slice(0, length))) {
+      prefixLength = length;
+      break;
+    }
+  }
+
+  if (!prefixLength || prefixLength >= currentWords.length) return compound;
+  const suffix = currentWords.slice(prefixLength).join(" ").trim();
+  if (!suffix) return compound;
+  return normalizeSpaces(`${compound.replace(/[?.!,;:]+$/g, "")} ${suffix}`);
+}
+
+function shouldPreferInterviewerCompound(
+  currentQuestion: string,
+  interviewerCompound: string,
+): boolean {
+  const currentWords = tokenize(currentQuestion).length;
+  const compoundWords = tokenize(interviewerCompound).length;
+  if (compoundWords < Math.max(10, currentWords + 4)) return false;
+  const overlap = tokenOverlap(currentQuestion, interviewerCompound);
+  const currentStartsAsTail = /^\s*(and|or|also|maybe|where|then)\b/i.test(
+    currentQuestion,
+  );
+  if ((overlap < 0.18 && !currentStartsAsTail) || overlap > 0.95) return false;
+  const hasCompoundSignal =
+    /\b(and|also|before|intro|introduce|experience|project|frontend|backend)\b/i.test(
+      interviewerCompound,
+    );
+  return hasCompoundSignal;
+}
+
+function shouldAttemptInterviewerCompoundReconstruction(question: string): boolean {
+  const normalized = normalizeSpaces(question);
+  if (!normalized) return false;
+  if (isWeakDeicticQuestion(normalized)) {
+    if (/^continue(?:\s+from)?\b/i.test(normalized) && tokenize(normalized).length > 10) {
+      return false;
+    }
+    return true;
+  }
+
+  const continuationStart =
+    /^(continue\b|and\b|also\b|then\b|what about\b|where\b|why\b|how so\b)/i.test(
+      normalized,
+    );
+  if (!continuationStart) return false;
+
+  const explicitStandaloneStart =
+    /^(switching topic\b|new topic\b|related follow-?up\b|write\b|design\b|tell me\b|explain\b|describe\b|walk me\b|what\b|how\b|why\b|can you\b|could you\b|would you\b|which\b|who\b)/i.test(
+      normalized,
+    );
+  if (explicitStandaloneStart) return false;
+
+  return tokenize(normalized).length <= 10;
 }
 
 function isLikelyPollutedJoin(question: string): boolean {
@@ -314,7 +445,28 @@ export function guardCurrentQuestion(input: {
   }
 
   let weakQuestionReconstructedBackend = false;
-  if (isWeakDeicticQuestion(cleaned) && hasStrongTopicTerms(transcriptTail)) {
+  if (shouldAttemptInterviewerCompoundReconstruction(cleaned)) {
+    const interviewerCompound = reconstructInterviewerCompoundQuestion(
+      input.recentTranscriptWindow,
+    );
+    const interviewerCompoundWithTail = interviewerCompound
+      ? mergeCurrentTailIntoCompound(interviewerCompound, cleaned)
+      : "";
+    if (
+      interviewerCompoundWithTail &&
+      shouldPreferInterviewerCompound(cleaned, interviewerCompoundWithTail)
+    ) {
+      cleaned = interviewerCompoundWithTail;
+      weakQuestionReconstructedBackend = true;
+    }
+  }
+  const shouldSkipLongContinueReconstruction =
+    /^continue(?:\s+from)?\b/i.test(cleaned) && tokenize(cleaned).length > 10;
+  if (
+    isWeakDeicticQuestion(cleaned) &&
+    hasStrongTopicTerms(transcriptTail) &&
+    !shouldSkipLongContinueReconstruction
+  ) {
     const rebuilt = reconstructWeakFollowupFromTranscript(cleaned, input.recentTranscriptWindow);
     if (rebuilt.reconstructed && rebuilt.reconstructed !== cleaned) {
       cleaned = rebuilt.reconstructed;
@@ -405,8 +557,12 @@ export function resolveFollowupTarget(input: {
 }): FollowupTargetResult {
   const q = normalizeSpaces(normalizeTranscriptForQuestionDetection(input.question));
   const isExplicitFollowupReference =
-    CODE_REF_RE.test(q) || FOLLOWUP_RE.test(q) || VAGUE_DEICTIC_RE.test(q);
+    CODE_REF_RE.test(q) ||
+    FOLLOWUP_RE.test(q) ||
+    VAGUE_DEICTIC_RE.test(q) ||
+    EXAMPLE_FOLLOWUP_RE.test(q);
   const isVagueDeictic = VAGUE_DEICTIC_RE.test(q);
+  const isExampleFollowup = EXAMPLE_FOLLOWUP_RE.test(q);
   const history = input.history;
   const selectedAnswerId = input.selectedAnswerId?.trim();
   const selectedAnswerText = input.selectedAnswerText?.trim();
@@ -552,6 +708,17 @@ export function resolveFollowupTarget(input: {
       isExplicitFollowupReference: true,
       ...(selectedAnswerIgnoredReason ? { selectedAnswerIgnoredReason } : {}),
       targetConfidence: 0.55,
+    };
+  }
+
+  if (isExampleFollowup) {
+    const immediate = history[history.length - 1];
+    return {
+      target: immediate,
+      source: "immediate_previous",
+      isExplicitFollowupReference: true,
+      ...(selectedAnswerIgnoredReason ? { selectedAnswerIgnoredReason } : {}),
+      targetConfidence: 0.58,
     };
   }
 

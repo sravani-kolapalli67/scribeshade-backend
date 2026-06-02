@@ -126,6 +126,7 @@ export interface ExportPdfInput {
   userId?: string;
   resumeId?: string;
   populatedHtml?: string;
+  suggestedFilename?: string;
 }
 
 // ─── Section Validation Types ─────────────────────────────────────────────────

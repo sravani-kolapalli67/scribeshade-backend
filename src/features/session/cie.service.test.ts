@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   classifyComplexity,
   detectFollowupIntent,
+  extractResumeProjectContext,
   extractRelevantProjectContext,
   isProjectExperienceQuestion,
 } from "./cie.service";
@@ -137,6 +138,35 @@ test("CIE project context preserves architecture diagram markdown block", () => 
   assert.ok(context.includes("[Architecture Diagram]:"));
   assert.ok(context.includes("```text"));
   assert.ok(context.includes("Web -> API Gateway -> Service"));
+});
+
+test("CIE extracts project/work context from selected resume for project asks", () => {
+  const context = extractResumeProjectContext(
+    [
+      "SUMMARY",
+      "Data engineer with Azure experience.",
+      "SKILLS",
+      "Python Azure Databricks",
+      "PROJECTS",
+      "Hilton Grand Vacations",
+      "438 Days",
+      "- Spearheading migration of legacy data pipelines to cloud-based architecture using Databricks and Azure.",
+      "- Managing high-volume data processing and governance policies.",
+      "INFY",
+      "366 Days",
+      "- Developed a secure and scalable Data Lake to improve data accessibility.",
+      "- Focused on large-scale data integration and automation.",
+      "EDUCATION",
+      "Bachelor of Engineering",
+    ].join("\n"),
+    "Explain my projects",
+    900,
+  );
+
+  assert.ok(context.includes("RESUME-BACKED PROJECT/WORK CONTEXT"));
+  assert.ok(context.includes("Hilton Grand Vacations"));
+  assert.ok(context.includes("INFY"));
+  assert.ok(context.includes("Databricks and Azure"));
 });
 
 test("CIE keeps architecture diagram block even under tighter project token budget", () => {

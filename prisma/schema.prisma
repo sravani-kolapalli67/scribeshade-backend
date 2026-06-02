@@ -305,6 +305,9 @@ model Session {
   transcriptChunks TranscriptChunk[]
   askAiMessages    AskAiMessage[]
   snapshots        AnswerGenerationSnapshot[]
+  topicMemories    SessionTopicMemory[]
+  turnMemories     SessionTurnMemory[]
+  candidateDigest  CandidateContextDigest?
 
   @@index([userId, createdAt(sort: Desc)])
   @@index([companyId])
@@ -421,6 +424,67 @@ model SessionNotes {
   
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
+}
+
+model SessionTopicMemory {
+  id             String              @id @default(uuid())
+  sessionId      String
+  session        Session             @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  topicTitle     String
+  topicKeywords  String[]
+  currentSummary String              @db.Text
+  lastQuestion   String?             @db.Text
+  lastAnswer     String?             @db.Text
+  active         Boolean             @default(true)
+  startedAt      DateTime            @default(now())
+  updatedAt      DateTime            @updatedAt
+  turnMemories   SessionTurnMemory[]
+
+  @@index([sessionId, active])
+  @@index([sessionId, updatedAt])
+}
+
+model SessionTurnMemory {
+  id                String              @id @default(uuid())
+  sessionId         String
+  session           Session             @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  transcriptChunkId String?
+  topicId           String?
+  topic             SessionTopicMemory? @relation(fields: [topicId], references: [id], onDelete: SetNull)
+  questionRaw       String              @db.Text
+  questionClean     String              @db.Text
+  answerRaw         String              @db.Text
+  answerSummary     String              @db.Text
+  answerType        String
+  codeBlocks        Json?
+  keyClaims         String[]
+  followupKeys      String[]
+  createdAt         DateTime            @default(now())
+
+  @@index([sessionId, createdAt])
+  @@index([sessionId, topicId, createdAt])
+}
+
+model CandidateContextDigest {
+  id              String   @id @default(uuid())
+  sessionId       String   @unique
+  session         Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  resumeId        String
+  documentId      String?
+  projectIds      String[]
+  sourceHash      String
+  status          String   @default("READY")
+  errorMessage    String?  @db.Text
+  resumeDigest    String   @db.Text
+  skills          String[]
+  projectCards    Json
+  experienceFacts Json
+  domainKeywords  String[]
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([sourceHash])
+  @@index([status])
 }
 
 // ─── Credit system models ─────────────────────────────────────────────────────

@@ -54,6 +54,7 @@ export interface AISessionDecisionInput {
   speakerSeparatedTranscript?: AIAnswerLiveContextMetadata["speakerSeparatedTranscript"];
   activeQuestionDetection?: AIAnswerLiveContextMetadata["activeQuestionDetection"];
   previousAiAnswer?: string;
+  previousAiAnswers?: AIAnswerLiveContextMetadata["previousAiAnswers"];
   previousCodeBlocks?: string[];
   selectedAnswerId?: string;
   selectedAnswerQuestion?: string;
@@ -283,10 +284,17 @@ export function buildAISessionDecisionMessages(input: AISessionDecisionInput) {
       contextToUse: "none | previous_answer | previous_code | selected_answer | recent_transcript",
     },
     currentQuestion: input.currentQuestion,
-    recentTranscriptWindow: input.recentTranscriptWindow?.slice(-8) || [],
-    speakerSeparatedTranscript: (input.speakerSeparatedTranscript || []).slice(-8),
+    recentTranscriptWindow: input.recentTranscriptWindow?.slice(-20) || [],
+    speakerSeparatedTranscript: (input.speakerSeparatedTranscript || []).slice(-20),
     activeQuestionDetection: input.activeQuestionDetection || null,
     previousAiAnswer: clip(input.previousAiAnswer, 700),
+    previousAiAnswers: (input.previousAiAnswers || [])
+      .slice(-2)
+      .map((entry) => ({
+        ...(entry.question ? { question: clip(entry.question, 220) } : {}),
+        answer: clip(entry.answer, 700),
+        codeBlocks: (entry.codeBlocks || []).slice(0, 2).map((block) => clip(block, 320)),
+      })),
     previousCodeBlocks: (input.previousCodeBlocks || []).slice(0, 2).map((b) => clip(b, 700)),
     selectedAnswer: input.selectedAnswerId
       ? {

@@ -3,7 +3,7 @@ import { OpenRouter } from "@openrouter/sdk";
 import { CreateSessionData } from "./session.types";
 import * as qaService from "../qa/qa.service";
 import sharp from "sharp";
-import { Language, Industry, SessionStatus, DeductionReason, Prisma } from "@prisma/client";
+import { Language, Industry, SessionStatus, DeductionReason, Prisma, SpeakerType, ChunkType } from "@prisma/client";
 import * as documentService from "../document/document.service";
 import path from "path";
 import { AppError } from "../../shared/middleware/error.middleware";
@@ -41,6 +41,16 @@ import {
   selectTargetCodeContext,
   toAnswerHistory,
 } from "./answer-quality";
+import {
+  enqueueCandidateDigestWarmup,
+} from "./candidate-digest.service";
+import {
+  orchestrateAIContext,
+  type ContextOrchestrationResult,
+  type QuestionMeta,
+} from "./context-orchestrator.service";
+import { writeTopicMemory } from "./topic-memory.service";
+import { writeTurnMemory } from "./turn-memory.service";
 
 const ai = new OpenRouter({
   apiKey: process.env.OPENROUTER_API_KEY || "",
@@ -51,6 +61,27 @@ const ai = new OpenRouter({
 const model = process.env.OPENROUTER_MODEL;
 const ACTIVE_QUESTION_CONFIDENCE_THRESHOLD = 0.58;
 const AI_DECISION_CONFIDENCE_THRESHOLD = 0.62;
+const LIVE_TRANSCRIPT_GROUP_ID = "live-transcript";
+const LEGACY_TRANSCRIPT_FLUSH_DELAY_MS = Number(process.env.LEGACY_TRANSCRIPT_FLUSH_DELAY_MS || 7000);
+const liveTranscriptFlushTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+type LiveMessageRole = "INTERVIEWER" | "AI_ASSISTANT" | "USER";
+
+type LegacyTranscriptSnapshot = {
+  messageId?: string;
+  role: LiveMessageRole;
+  question: string;
+  answer: string;
+  timestamp: string;
+  time?: string;
+  snapshotId?: string;
+};
+
+type AppendMessageResult = {
+  messageId?: string;
+  transcriptChunkId?: string;
+  saved: boolean;
+};
 
 const SESSION_LIST_SELECT = {
   id: true,
@@ -115,6 +146,152 @@ function buildSessionListWhere(userId: string, filters?: SessionListFilters): Pr
   }
 
   return where;
+}
+
+function mapLiveRoleToSpeakerType(role: LiveMessageRole): SpeakerType {
+  if (role === "INTERVIEWER") return SpeakerType.INTERVIEWER;
+  if (role === "AI_ASSISTANT") return SpeakerType.ASSISTANT;
+  return SpeakerType.CANDIDATE;
+}
+
+function mapSpeakerTypeToLiveRole(speakerType: SpeakerType | null): LiveMessageRole {
+  if (speakerType === SpeakerType.INTERVIEWER) return "INTERVIEWER";
+  if (speakerType === SpeakerType.ASSISTANT) return "AI_ASSISTANT";
+  return "USER";
+}
+
+function mapLiveRoleToChunkType(role: LiveMessageRole): ChunkType {
+  if (role === "AI_ASSISTANT") return ChunkType.ANSWER;
+  if (role === "INTERVIEWER") return ChunkType.QUESTION;
+  return ChunkType.CONTEXT;
+}
+
+function buildTranscriptContent(question: string, answer: string): string {
+  return answer ? `Q: ${question}\n\nA: ${answer}` : question;
+}
+
+function legacyMessageFromChunk(chunk: {
+  questionId: string | null;
+  speakerType: SpeakerType | null;
+  question: string | null;
+  aiAnswer: string | null;
+  content: string;
+  startTime: number | null;
+  createdAt: Date;
+}): LegacyTranscriptSnapshot {
+  const role = mapSpeakerTypeToLiveRole(chunk.speakerType);
+  const question = chunk.question || chunk.content || "";
+  const answer = chunk.aiAnswer || "";
+  const createdAt = chunk.createdAt.toISOString();
+  return {
+    messageId: chunk.questionId?.replace(/^live:/, ""),
+    role,
+    question,
+    answer,
+    timestamp: createdAt,
+    time:
+      typeof chunk.startTime === "number" && chunk.startTime > 0
+        ? new Date(chunk.startTime).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+        : undefined,
+  };
+}
+
+function legacyTranscriptEntryFromMessage(message: LegacyTranscriptSnapshot) {
+  return {
+    ...message,
+    messageId: message.messageId,
+    role: message.role,
+    question: message.question,
+    answer: message.answer,
+    content: buildTranscriptContent(message.question, message.answer),
+    time:
+      message.time ||
+      new Date(message.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+    createdAt: message.timestamp,
+    snapshotId: message.snapshotId,
+  };
+}
+
+function mergeLegacyMessages(
+  existing: unknown,
+  liveMessages: LegacyTranscriptSnapshot[],
+): LegacyTranscriptSnapshot[] {
+  const result = Array.isArray(existing) ? [...(existing as LegacyTranscriptSnapshot[])] : [];
+  const indexByMessageId = new Map<string, number>();
+  result.forEach((message, index) => {
+    if (message?.messageId) indexByMessageId.set(message.messageId, index);
+  });
+
+  liveMessages.forEach((message) => {
+    if (message.messageId && indexByMessageId.has(message.messageId)) {
+      result[indexByMessageId.get(message.messageId) as number] = {
+        ...result[indexByMessageId.get(message.messageId) as number],
+        ...message,
+      };
+      return;
+    }
+    result.push(message);
+    if (message.messageId) indexByMessageId.set(message.messageId, result.length - 1);
+  });
+
+  return result;
+}
+
+async function flushSessionTranscriptLegacySnapshot(sessionId: string): Promise<void> {
+  const session = await prisma.session.findUnique({
+    where: { id: sessionId },
+    select: { id: true, messages: true, transcript: true, saveTranscription: true },
+  });
+  if (!session || session.saveTranscription === false) return;
+
+  const chunks = await prisma.transcriptChunk.findMany({
+    where: {
+      sessionId,
+      questionGroupId: LIVE_TRANSCRIPT_GROUP_ID,
+    },
+    orderBy: [{ startTime: "asc" }, { createdAt: "asc" }, { id: "asc" }],
+    select: {
+      id: true,
+      questionId: true,
+      speakerType: true,
+      question: true,
+      aiAnswer: true,
+      content: true,
+      startTime: true,
+      createdAt: true,
+    },
+  });
+  if (chunks.length === 0) return;
+
+  const liveMessages = chunks.map(legacyMessageFromChunk);
+  const messages = mergeLegacyMessages(session.messages, liveMessages);
+  const transcript = messages.map(legacyTranscriptEntryFromMessage);
+
+  await prisma.session.update({
+    where: { id: sessionId },
+    data: { messages, transcript },
+  });
+}
+
+function scheduleLegacyTranscriptFlush(sessionId: string, delayMs: number): void {
+  const existing = liveTranscriptFlushTimers.get(sessionId);
+  if (existing) clearTimeout(existing);
+  const timer = setTimeout(() => {
+    liveTranscriptFlushTimers.delete(sessionId);
+    flushSessionTranscriptLegacySnapshot(sessionId).catch((error) => {
+      console.error("[live-transcript-flush] failed", { sessionId, error });
+    });
+  }, delayMs);
+  liveTranscriptFlushTimers.set(sessionId, timer);
+}
+
+export async function forceFlushSessionTranscript(sessionId: string): Promise<void> {
+  const existing = liveTranscriptFlushTimers.get(sessionId);
+  if (existing) {
+    clearTimeout(existing);
+    liveTranscriptFlushTimers.delete(sessionId);
+  }
+  await flushSessionTranscriptLegacySnapshot(sessionId);
 }
 
 function uniqNonEmptyStrings(values: unknown[]): string[] {
@@ -279,6 +456,86 @@ function extractArchitectureDiagramBlock(projectsContext: unknown): string | nul
   return lines.join("\n");
 }
 
+function synthesizeArchitectureFlowFromProjectContext(
+  projectsContext: unknown,
+): string | null {
+  if (typeof projectsContext !== "string" || !projectsContext.trim()) return null;
+  const text = projectsContext;
+  const architectureLine =
+    text.match(/\[Architecture\]:\s*([^\n]+)/i)?.[1]?.trim() || "";
+  const flowLine =
+    text.match(/\[Flow\]:\s*([^\n]+)/i)?.[1]?.trim() || "";
+  const techLine =
+    text.match(/\[Tech\]:\s*([^\n]+)/i)?.[1]?.trim() || "";
+
+  if (flowLine) {
+    return flowLine.replace(/\s+/g, " ").slice(0, 220);
+  }
+
+  if (architectureLine) {
+    const compact = architectureLine.replace(/\s+/g, " ").slice(0, 220);
+    if (compact.includes("->")) return compact;
+    return `Source Data -> ${compact} -> Business Output`;
+  }
+
+  if (techLine) {
+    const tech = techLine
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean);
+    if (tech.length >= 3) {
+      return `${tech[0]} -> ${tech[1]} -> ${tech[2]}`;
+    }
+    if (tech.length === 2) {
+      return `${tech[0]} -> ${tech[1]} -> Output`;
+    }
+    if (tech.length === 1) {
+      return `Source Data -> ${tech[0]} -> Output`;
+    }
+  }
+
+  return "Source Data -> Processing/Orchestration -> Storage/Serving -> Output";
+}
+
+async function loadLiveAnswerHistoryMessages(sessionId: string): Promise<
+  Array<{
+    role: "AI_ASSISTANT";
+    messageId: string;
+    question: string;
+    answer: string;
+    timestamp: string;
+  }>
+> {
+  const chunks = await prisma.transcriptChunk.findMany({
+    where: {
+      sessionId,
+      questionGroupId: LIVE_TRANSCRIPT_GROUP_ID,
+      speakerType: SpeakerType.ASSISTANT,
+      aiAnswer: { not: null },
+    },
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    take: 80,
+    select: {
+      id: true,
+      questionId: true,
+      question: true,
+      aiAnswer: true,
+      createdAt: true,
+    },
+  });
+
+  return chunks
+    .reverse()
+    .map((chunk) => ({
+      role: "AI_ASSISTANT" as const,
+      messageId: (chunk.questionId || chunk.id).replace(/^live:/, ""),
+      question: chunk.question || "",
+      answer: chunk.aiAnswer || "",
+      timestamp: chunk.createdAt.toISOString(),
+    }))
+    .filter((entry) => entry.answer.trim().length > 0);
+}
+
 /**
  * Maps a session language string to a Prisma Language enum value.
  */
@@ -401,7 +658,7 @@ export async function createSession(data: CreateSessionData) {
     finalCompanyId = company.id;
   }
 
-  return prisma.session.create({
+  const session = await prisma.session.create({
     data: {
       userId: data.userId,
       companyName: data.companyName || "",
@@ -421,6 +678,15 @@ export async function createSession(data: CreateSessionData) {
       primaryProjectId: projectSelection.primaryProjectId,
     },
   });
+
+  enqueueCandidateDigestWarmup(session.id).catch((error) => {
+    console.warn("[candidate-digest] create-session warmup enqueue failed", {
+      sessionId: session.id,
+      error,
+    });
+  });
+
+  return session;
 }
 
 /**
@@ -658,6 +924,12 @@ export async function deactivateSession(
     return { session: updated, didTransition: true };
   });
 
+  if (session.saveTranscription !== false) {
+    await forceFlushSessionTranscript(id).catch((error) => {
+      console.error("[live-transcript-flush] deactivate flush failed", { sessionId: id, error });
+    });
+  }
+
   // Enqueue deduction job only when we actually transitioned to COMPLETING
   if (didTransition && session.status === SessionStatus.COMPLETING) {
     if (session.bracketConfigSnapshot) {
@@ -721,6 +993,10 @@ export async function abandonStaleSession(
     });
   });
 
+  await forceFlushSessionTranscript(sessionId).catch((error) => {
+    console.error("[live-transcript-flush] abandon flush failed", { sessionId, error });
+  });
+
   console.log(`[watchdog] Session ${sessionId} abandoned — hold released, 0 credits charged.`);
 }
 
@@ -746,6 +1022,10 @@ export async function creditExhaustionClose(
         creditExhaustedAt: new Date(),
       },
     });
+  });
+
+  await forceFlushSessionTranscript(sessionId).catch((error) => {
+    console.error("[live-transcript-flush] credit-exhaustion flush failed", { sessionId, error });
   });
 
   // Notify frontend via SSE
@@ -1104,8 +1384,22 @@ function processAIStream(
   targetModel?: string,
   snapshotId?: string,
   isRegenerate: boolean = false,
+  authoritativeQuestion?: string,
+  questionMeta?: QuestionMeta,
+  orchestration?: ContextOrchestrationResult,
 ) {
   const segmentMarker = /\n?={3,}NEXT_QUESTION={3,}\n?/i;
+  const rewriteFirstQuestionBlock = (text: string): string => {
+    if (!authoritativeQuestion?.trim()) return text;
+    const questionLine = authoritativeQuestion.replace(/\s+/g, " ").trim();
+    if (!questionLine) return text;
+    const rewritten = text.replace(
+      /(\*?\*?QUESTION:\*?\*?\s*)([\s\S]*?)(\s*\*?\*?ANSWER:\*?\*?)/i,
+      (_full, prefix, _questionBody, suffix) =>
+        `${String(prefix).trimEnd()}\n${questionLine}\n\n${String(suffix).trimStart()}`,
+    );
+    return rewritten;
+  };
   const extractPairs = (text: string) => {
     const segments = text
       .split(segmentMarker)
@@ -1136,13 +1430,37 @@ function processAIStream(
 
   async function* streamGenerator() {
     let fullResponse = "";
+    const modelCallStartedAt = Date.now();
+    let firstTokenLogged = false;
+
+    if (questionMeta) {
+      yield { text: `===QUESTION_META=${JSON.stringify(questionMeta)}===\n` };
+    }
 
     for await (const delta of result.getTextStream()) {
       if (delta) {
+        if (!firstTokenLogged) {
+          firstTokenLogged = true;
+          const firstTokenMs = Date.now() - modelCallStartedAt;
+          console.log("[AI Stream][Timing][BE]", {
+            sessionId,
+            firstTokenMs,
+            model: targetModel || "default",
+          });
+          if (firstTokenMs > 2500) {
+            console.warn("[AI Stream][first-token-slow]", {
+              sessionId,
+              firstTokenMs,
+              model: targetModel || "default",
+            });
+          }
+        }
         fullResponse += delta;
         yield { text: delta };
       }
     }
+
+    const finalResponse = rewriteFirstQuestionBlock(fullResponse || (await result.getText()));
 
     if (snapshotId) {
       yield { text: `\n===SNAPSHOT_ID=${snapshotId}===` };
@@ -1151,7 +1469,6 @@ function processAIStream(
     // Post-processing: extract Q&A and persist (fire-and-forget)
     (async () => {
       try {
-        const finalResponse = fullResponse || await result.getText();
         const extractedPairs = extractPairs(finalResponse);
 
         if (extractedPairs.length > 0 && session) {
@@ -1191,7 +1508,7 @@ function processAIStream(
                   answer,
                 ).catch((e: any) => console.error("updateMessageAnswer Error:", e));
               } else {
-                await appendMessage(
+                const appendResult = await appendMessage(
                   sessionId,
                   "AI_ASSISTANT",
                   question,
@@ -1199,6 +1516,36 @@ function processAIStream(
                   undefined,
                   snapshotId,
                 ).catch((e) => console.error("appendMessage Error:", e));
+                if (appendResult && orchestration) {
+                  const topicTitle =
+                    orchestration.questionMeta.topic ||
+                    orchestration.reconstructedQuestion.topicId ||
+                    "general";
+                  const topicKeywords = [
+                    ...orchestration.candidateDigest.domainKeywords.slice(0, 12),
+                    ...orchestration.reconstructedQuestion.displayQuestion
+                      .split(/\W+/)
+                      .filter((word) => word.length > 2)
+                      .slice(0, 12),
+                  ];
+                  await writeTurnMemory({
+                    sessionId,
+                    transcriptChunkId: appendResult.transcriptChunkId,
+                    topicId: orchestration.activeTopic?.id,
+                    questionRaw: orchestration.reconstructedQuestion.displayQuestion,
+                    questionClean: question,
+                    answerRaw: answer,
+                    saveTranscription: session.saveTranscription !== false,
+                  }).catch((e) => console.error("writeTurnMemory Error:", e));
+                  await writeTopicMemory({
+                    sessionId,
+                    question,
+                    answer,
+                    topicTitle,
+                    topicKeywords,
+                    saveTranscription: session.saveTranscription !== false,
+                  }).catch((e) => console.error("writeTopicMemory Error:", e));
+                }
               }
             }
           }
@@ -1219,6 +1566,7 @@ export async function analyzeScreen(
   id: string,
   file: Express.Multer.File,
   aiModel?: string,
+  liveContextMetadata?: AIAnswerLiveContextMetadata,
 ) {
   // Skip recompression if the frontend already sent a pre-compressed JPEG (<= 600 KB).
   // Otherwise apply sharp to enforce a safe size cap for the LLM vision API.
@@ -1231,11 +1579,25 @@ export async function analyzeScreen(
       .toBuffer()
       .catch((err) => { console.error("Sharp compression error:", err); throw err; });
 
+  const screenQuestionRaw =
+    liveContextMetadata?.activeQuestionDetection?.cleanedQuestion?.trim() ||
+    liveContextMetadata?.activeQuestionDetection?.activeQuestion?.trim() ||
+    (liveContextMetadata?.recentTranscriptWindow || []).join(" ").trim() ||
+    "screen visible interview question";
+  const guardedScreenQuestion = guardCurrentQuestion({
+    resolvedQuestion: screenQuestionRaw,
+    recentTranscriptWindow: liveContextMetadata?.recentTranscriptWindow,
+  });
+  const screenContextQuestion = normalizeTranscriptForQuestionDetection(
+    guardedScreenQuestion.resolvedCurrentQuestion || screenQuestionRaw,
+  );
   const sessionPromise = prisma.session.findUnique({ where: { id }, include: { company: true } });
+  const contextBuildStartedAt = Date.now();
   const contextPromise = sessionPromise.then((loadedSession) =>
-    buildOptimizedContext(id, "screen visible interview question", 1800, loadedSession, {
+    buildOptimizedContext(id, screenContextQuestion, 1800, loadedSession, {
       complexity: "simple_contextual",
       disableProjectPriority: true,
+      contextMode: "live",
     }),
   );
 
@@ -1248,15 +1610,51 @@ export async function analyzeScreen(
   if (!session) {
     throw new Error("Session not found");
   }
+  const contextBuildMs = Date.now() - contextBuildStartedAt;
+  if (contextBuildMs > 500) {
+    console.warn("[Analyze Screen][context-slow]", { sessionId: id, contextBuildMs });
+  }
 
   try {
     const targetModel = resolveModelId(aiModel) || model;
     // ── Full Prompt Budget Accounting (screen analysis) ──────────────────
     const screenSystemPrompt = buildScreenSystemMessage(context);
-    const screenUserText = buildScreenAnalysisMessage(context);
+    const priorAnswersBlock =
+      Array.isArray(liveContextMetadata?.previousAiAnswers) &&
+      liveContextMetadata.previousAiAnswers.length > 0
+        ? `\n\nRecent AI context:\n${liveContextMetadata.previousAiAnswers
+            .slice(-2)
+            .map((entry, index) => {
+              const question = (entry.question || "").trim();
+              const answer = (entry.answer || "").trim().slice(0, 700);
+              return question
+                ? `- Prior ${index + 1} Q: ${question}\n  A: ${answer}`
+                : `- Prior ${index + 1} A: ${answer}`;
+            })
+            .join("\n")}`
+        : "";
+    const transcriptContextBlock =
+      liveContextMetadata?.recentTranscriptWindow?.length
+        ? `\n\nRecent transcript context:\n${liveContextMetadata.recentTranscriptWindow
+            .slice(-20)
+            .join("\n")}`
+        : "";
+    const questionContextBlock = screenContextQuestion
+      ? `\n\nCurrent interview question context:\n${screenContextQuestion}`
+      : "";
+    const screenUserText = `${buildScreenAnalysisMessage(context)}${questionContextBlock}${transcriptContextBlock}${priorAnswersBlock}`;
     const screenSystemTokens = estimatePromptTokensForLog(screenSystemPrompt);
     const screenUserTokens = estimatePromptTokensForLog(screenUserText);
     console.log(`[CIE] Screen analysis prompt | system: ${screenSystemTokens}t | user: ${screenUserTokens}t | total: ${screenSystemTokens + screenUserTokens}t | complexity: ${context?.complexity || 'unknown'}`);
+    console.log("[Analyze Screen][Timing][BE]", {
+      sessionId: id,
+      contextBuildMs,
+      questionLength: screenContextQuestion.length,
+      recentTranscriptWindowCount:
+        liveContextMetadata?.recentTranscriptWindow?.length || 0,
+      previousAiAnswersCount:
+        liveContextMetadata?.previousAiAnswers?.length || 0,
+    });
 
     const result = ai.callModel({
       model: targetModel,
@@ -1344,20 +1742,30 @@ export async function getAIAnswer(
   let targetModel = resolveModelId(aiModel) || model;
   let finalTranscript = transcript;
   let finalSnapshotId = snapshotId;
+  let orchestration: ContextOrchestrationResult | undefined;
+  const contextBuildStartedAt = Date.now();
   const detection =
     !isRegenerate && liveContextMetadata?.activeQuestionDetection
       ? liveContextMetadata.activeQuestionDetection
       : undefined;
 
-  if (detection?.ignoredNoise || (detection && detection.confidenceScore < ACTIVE_QUESTION_CONFIDENCE_THRESHOLD)) {
-    return (async function* () {
-      yield { text: "===NO_NEW_QUESTION===" };
-    })();
+  if (!isRegenerate) {
+    orchestration = await orchestrateAIContext({
+      sessionId: id,
+      resolvedQuestion: finalTranscript,
+      metadata: liveContextMetadata,
+    });
+    finalTranscript = orchestration.decision.questionForLLM;
+    if (!orchestration.decision.shouldAnswer) {
+      return (async function* () {
+        yield {
+          text: `===QUESTION_META=${JSON.stringify(orchestration!.questionMeta)}===\n`,
+        };
+        yield { text: "===NO_NEW_QUESTION===" };
+      })();
+    }
   }
 
-  if (detection?.cleanedQuestion?.trim()) {
-    finalTranscript = detection.cleanedQuestion.trim();
-  }
   finalTranscript = normalizeTranscriptForQuestionDetection(finalTranscript);
 
   if (isRegenerate && snapshotId) {
@@ -1402,19 +1810,33 @@ export async function getAIAnswer(
         `[AI Answer][Regenerate] Snapshot ${snapshotId} not found. Falling back to live session context.`,
       );
       finalSnapshotId = undefined;
-      contextForCall = await buildOptimizedContext(id, finalTranscript, undefined, session);
+      contextForCall = await buildOptimizedContext(id, finalTranscript, undefined, session, {
+        contextMode: "live",
+      });
       if (!contextForCall) {
         throw new Error("Failed to build context");
       }
     }
   } else {
-    contextForCall = await buildOptimizedContext(id, finalTranscript, undefined, session);
+    contextForCall = await buildOptimizedContext(id, finalTranscript, undefined, session, {
+      contextMode: "live",
+    });
     if (!contextForCall) {
       throw new Error("Failed to build context");
+    }
+    if (orchestration) {
+      contextForCall = {
+        ...contextForCall,
+        history: `${orchestration.contextPacket}\n\n${contextForCall.history || ""}`,
+      };
     }
     if (!finalSnapshotId) {
       finalSnapshotId = crypto.randomUUID();
     }
+  }
+  const contextBuildMs = Date.now() - contextBuildStartedAt;
+  if (contextBuildMs > 500) {
+    console.warn("[AI Answer Debug][context-slow]", { sessionId: id, contextBuildMs });
   }
 
   try {
@@ -1422,6 +1844,7 @@ export async function getAIAnswer(
       console.log("[AI Answer Debug] CIE snapshot:", {
         resolvedQuestionLength: transcript?.length || 0,
         cieTierSelected: contextForCall?.complexity || "unknown",
+        contextBuildMs,
       });
     }
     // ── Full Prompt Budget Accounting ──────────────────────────────────────
@@ -1430,7 +1853,16 @@ export async function getAIAnswer(
       resolvedQuestion: originalResolvedQuestion,
       recentTranscriptWindow: liveContextMetadata?.recentTranscriptWindow,
     });
-    const history = toAnswerHistory((session as any).messages);
+    const liveHistoryMessages = await loadLiveAnswerHistoryMessages(id).catch((error) => {
+      console.warn("[AI Answer Debug] failed loading live transcript chunk history", {
+        sessionId: id,
+        error,
+      });
+      return [];
+    });
+    const history = toAnswerHistory(
+      liveHistoryMessages.length > 0 ? liveHistoryMessages : (session as any).messages,
+    );
     const conversationIntent = classifyConversationIntent(guard.resolvedCurrentQuestion);
     const followup = resolveFollowupTarget({
       question: guard.resolvedCurrentQuestion,
@@ -1446,32 +1878,52 @@ export async function getAIAnswer(
       conversationIntent,
       followup,
     });
-    const aiDecisionResult = await decideAISessionState({
-      ai,
-      model: targetModel,
-      provider: latencyOptimizedProvider as any,
-      fallback: fallbackDecision,
-      input: {
-        currentQuestion: guard.resolvedCurrentQuestion,
-        recentTranscriptWindow: liveContextMetadata?.recentTranscriptWindow,
-        speakerSeparatedTranscript: liveContextMetadata?.speakerSeparatedTranscript,
-        activeQuestionDetection: detection,
-        previousAiAnswer: liveContextMetadata?.previousAiAnswer,
-        previousCodeBlocks: liveContextMetadata?.previousCodeBlocks,
-        selectedAnswerId: liveContextMetadata?.selectedAnswerId,
-        selectedAnswerQuestion: liveContextMetadata?.selectedAnswerQuestion,
-        selectedAnswerText: liveContextMetadata?.selectedAnswerText,
-        selectedAnswerTopic: liveContextMetadata?.selectedAnswerTopic,
-        answerHistory: toDecisionContextTargets(history),
-        deterministic: {
-          conversationIntent,
-          isExplicitFollowupReference: followup.isExplicitFollowupReference,
-          fallbackTargetId: followup.target?.id || null,
-          fallbackTargetHasCode: !!followup.target?.codeBlocks?.length,
-          fallbackTargetTopic: followup.target?.topic || null,
-          reasonForNoTarget: followup.reasonForNoTarget,
-        },
-      },
+    const decisionStartedAt = Date.now();
+    const shouldUseDeterministicDecision =
+      conversationIntent !== "UNKNOWN" ||
+      followup.isExplicitFollowupReference ||
+      !!followup.target ||
+      !!detection?.isFollowUp;
+    const aiDecisionResult = shouldUseDeterministicDecision
+      ? {
+          decision: fallbackDecision,
+          fallbackDecisionUsed: true,
+          error: "deterministic_live_decision",
+        }
+      : await decideAISessionState({
+          ai,
+          model: targetModel,
+          provider: latencyOptimizedProvider as any,
+          fallback: fallbackDecision,
+          timeoutMs: 450,
+          input: {
+            currentQuestion: guard.resolvedCurrentQuestion,
+            recentTranscriptWindow: liveContextMetadata?.recentTranscriptWindow,
+            speakerSeparatedTranscript: liveContextMetadata?.speakerSeparatedTranscript,
+            activeQuestionDetection: detection,
+            previousAiAnswer: liveContextMetadata?.previousAiAnswer,
+            previousAiAnswers: liveContextMetadata?.previousAiAnswers,
+            previousCodeBlocks: liveContextMetadata?.previousCodeBlocks,
+            selectedAnswerId: liveContextMetadata?.selectedAnswerId,
+            selectedAnswerQuestion: liveContextMetadata?.selectedAnswerQuestion,
+            selectedAnswerText: liveContextMetadata?.selectedAnswerText,
+            selectedAnswerTopic: liveContextMetadata?.selectedAnswerTopic,
+            answerHistory: toDecisionContextTargets(history),
+            deterministic: {
+              conversationIntent,
+              isExplicitFollowupReference: followup.isExplicitFollowupReference,
+              fallbackTargetId: followup.target?.id || null,
+              fallbackTargetHasCode: !!followup.target?.codeBlocks?.length,
+              fallbackTargetTopic: followup.target?.topic || null,
+              reasonForNoTarget: followup.reasonForNoTarget,
+            },
+          },
+        });
+    console.log("[AI Answer Debug] decision timing:", {
+      sessionId: id,
+      decisionMs: Date.now() - decisionStartedAt,
+      deterministic: shouldUseDeterministicDecision,
+      error: aiDecisionResult.error || null,
     });
     const aiDecision = aiDecisionResult.decision;
     const aiDecisionAuthoritative =
@@ -1540,6 +1992,30 @@ export async function getAIAnswer(
     let previousAiAnswerIgnoredReason: string | null = null;
     const metadataAfterPreviousAnswerGuard = { ...(metadataForRequest || {}) };
     if (
+      !metadataAfterPreviousAnswerGuard.previousAiAnswer &&
+      Array.isArray((metadataAfterPreviousAnswerGuard as any).previousAiAnswers) &&
+      (metadataAfterPreviousAnswerGuard as any).previousAiAnswers.length > 0
+    ) {
+      const latestPreviousAnswer = (metadataAfterPreviousAnswerGuard as any).previousAiAnswers[
+        (metadataAfterPreviousAnswerGuard as any).previousAiAnswers.length - 1
+      ];
+      if (latestPreviousAnswer?.answer) {
+        metadataAfterPreviousAnswerGuard.previousAiAnswer = String(
+          latestPreviousAnswer.answer,
+        ).slice(0, 1000);
+      }
+      if (
+        !metadataAfterPreviousAnswerGuard.previousCodeBlocks &&
+        Array.isArray(latestPreviousAnswer?.codeBlocks)
+      ) {
+        metadataAfterPreviousAnswerGuard.previousCodeBlocks =
+          latestPreviousAnswer.codeBlocks
+            .slice(0, 2)
+            .map((block: unknown) => String(block || "").slice(0, 1500))
+            .filter(Boolean);
+      }
+    }
+    if (
       metadataAfterPreviousAnswerGuard.previousAiAnswer &&
       followup.isExplicitFollowupReference
     ) {
@@ -1577,6 +2053,7 @@ export async function getAIAnswer(
       selectedTarget: selectedTargetForRequest,
     });
     const selectedCodeContext = selectTargetCodeContext(selectedTargetForRequest);
+    const hasAnyRecentCodeHistory = history.some((entry) => entry.codeBlocks.length > 0);
 
     const systemPrompt = buildSystemMessage(contextForCall);
     const baseUserMessage = buildUserMessage(
@@ -1614,7 +2091,8 @@ export async function getAIAnswer(
         (aiDecisionAuthoritative && aiDecision.requiresPreviousCode) ||
         isRegenerate) &&
       (isCodeFollowupQuestion(guard.resolvedCurrentQuestion) || aiDecision.requiresPreviousCode) &&
-      selectedCodeContext.codeBlocks.length === 0
+      selectedCodeContext.codeBlocks.length === 0 &&
+      !hasAnyRecentCodeHistory
         ? "\nFOLLOW-UP CONTEXT: I do not have a previous code/query in this session to explain. State this briefly, then provide generic guidance."
         : "";
     const strictFollowupBindingApplied = Boolean(
@@ -1639,16 +2117,24 @@ export async function getAIAnswer(
       isRegenerate &&
       (liveContextMetadata as any)?.regenerateInstruction,
     );
-    const shouldForceDiagram =
-      !!contextForCall?.hasSelectedProjects &&
-      isProjectExplainQuestion(guard.resolvedCurrentQuestion);
+    const shouldForceDiagram = isProjectExplainQuestion(guard.resolvedCurrentQuestion);
     const selectedArchitectureDiagram = shouldForceDiagram
       ? extractArchitectureDiagramBlock(contextForCall?.projects)
       : null;
-    const projectDiagramConstraint = selectedArchitectureDiagram
-      ? `\nPROJECT-EXPLAIN DIAGRAM REQUIREMENT (HARD):\n- The user asked to explain project(s).\n- You MUST include one markdown architecture flow block under **ANSWER:** using fenced \`\`\`text.\n- Use ONLY the architecture flow from the selected project context below (do not invent or replace it).\nArchitecture flow source:\n\`\`\`text\n${selectedArchitectureDiagram}\n\`\`\``
+    const synthesizedArchitectureDiagram = shouldForceDiagram && !selectedArchitectureDiagram
+      ? synthesizeArchitectureFlowFromProjectContext(contextForCall?.projects)
+      : null;
+    const architectureFlowForPrompt =
+      selectedArchitectureDiagram || synthesizedArchitectureDiagram;
+    const projectDiagramConstraint =
+      shouldForceDiagram && architectureFlowForPrompt
+        ? `\nPROJECT-EXPLAIN DIAGRAM REQUIREMENT (HARD):\n- The user asked to explain project(s).\n- You MUST include one markdown architecture flow block under **ANSWER:** using fenced \`\`\`text.\n- Use the architecture flow context below as your structure; stay conservative and do not invent unrelated systems.\nArchitecture flow source:\n\`\`\`text\n${architectureFlowForPrompt}\n\`\`\``
+        : "";
+    const authoritativeQuestionConstraint = `\nCURRENT QUESTION (AUTHORITATIVE):\n${guard.resolvedCurrentQuestion}\n\nOUTPUT QUESTION RULE (HARD):\n- In the first **QUESTION:** block, repeat ONLY the CURRENT QUESTION above as one clean line.\n- Do NOT prepend previous questions, transcript lines, or earlier turn text.\n- Do NOT merge prior turns unless the CURRENT QUESTION itself explicitly contains multiple independent questions.`;
+    const orchestratorPacketBlock = orchestration
+      ? `\n${orchestration.contextPacket}\n`
       : "";
-    const userMessage = `${policy.policyBlock}${codeFollowupConstraint}\n${policy.codeContextBlock}${selectedAnswerExcerptBlock}${noCodeFollowupGuidance}${regenerateInstructionBlock}${projectDiagramConstraint}\n\n${baseUserMessage}`;
+    const userMessage = `${policy.policyBlock}${orchestratorPacketBlock}${codeFollowupConstraint}\n${policy.codeContextBlock}${selectedAnswerExcerptBlock}${noCodeFollowupGuidance}${regenerateInstructionBlock}${projectDiagramConstraint}${authoritativeQuestionConstraint}\n\n${baseUserMessage}`;
     const systemTokens = estimatePromptTokensForLog(systemPrompt);
     const userTokens = estimatePromptTokensForLog(userMessage);
     console.log(`[CIE] Prompt breakdown | system: ${systemTokens}t | user: ${userTokens}t | total: ${systemTokens + userTokens}t | complexity: ${contextForCall?.complexity || 'unknown'}`);
@@ -1744,7 +2230,10 @@ export async function getAIAnswer(
       contextForCall,
       targetModel,
       finalSnapshotId,
-      isRegenerate
+      isRegenerate,
+      guard.resolvedCurrentQuestion,
+      orchestration?.questionMeta,
+      orchestration,
     );
   } catch (err: any) {
     console.error("OpenRouter Streaming Error (getAIAnswer):", err);
@@ -1774,62 +2263,51 @@ export async function transcribe(file: Express.Multer.File) {
  */
 export async function appendMessage(
   sessionId: string,
-  role: "INTERVIEWER" | "AI_ASSISTANT" | "USER",
+  role: LiveMessageRole,
   question: string,
   answer: string,
   time?: string,
   snapshotId?: string,
   messageId?: string,
-) {
+): Promise<AppendMessageResult | undefined> {
+  const startedAt = Date.now();
   const session = await prisma.session.findUnique({
     where: { id: sessionId },
-    select: { messages: true, transcript: true, saveTranscription: true },
+    select: { id: true, userId: true, saveTranscription: true },
   });
 
   if (!session) throw new Error("Session not found");
 
   // Ephemeral session — user opted out of all persistence.
   // Skip both messages[] and transcript[] writes entirely.
-  if (session.saveTranscription === false) return;
+  if (session.saveTranscription === false) return { messageId, saved: false };
 
-  const currentMessages = Array.isArray(session.messages)
-    ? (session.messages as any[])
-    : [];
-
-  const currentTranscript = Array.isArray(session.transcript)
-    ? (session.transcript as any[])
-    : [];
-
-  const newMessage = {
-    messageId,
-    role,
-    question,
-    answer,
-    timestamp: new Date().toISOString(),
-    time,
-    snapshotId,
-  };
-
-  const transcriptEntry = {
-    messageId,
-    role,
-    question,
-    answer,
-    content: answer ? `Q: ${question}\n\nA: ${answer}` : question,
-    time:
-      time ||
-      new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
-    createdAt: new Date().toISOString(),
-    snapshotId,
-  };
-
-  return prisma.session.update({
-    where: { id: sessionId },
+  const timestamp = Date.now();
+  const resolvedMessageId = messageId || crypto.randomUUID();
+  const chunk = await prisma.transcriptChunk.create({
     data: {
-      messages: [...currentMessages, newMessage],
-      transcript: [...currentTranscript, transcriptEntry],
+      sessionId,
+      userId: session.userId,
+      questionId: resolvedMessageId,
+      question,
+      aiAnswer: answer || null,
+      content: buildTranscriptContent(question, answer || ""),
+      technologies: [],
+      speakerType: mapLiveRoleToSpeakerType(role),
+      chunkType: mapLiveRoleToChunkType(role),
+      questionGroupId: LIVE_TRANSCRIPT_GROUP_ID,
+      startTime: timestamp,
+      isQuestion: role === "INTERVIEWER",
     },
   });
+
+  scheduleLegacyTranscriptFlush(sessionId, LEGACY_TRANSCRIPT_FLUSH_DELAY_MS);
+  const totalMs = Date.now() - startedAt;
+  const logPayload = { sessionId, messageId: resolvedMessageId, role, totalMs };
+  if (totalMs > 500) console.warn("[save-message][slow]", logPayload);
+  else console.info("[save-message][fast]", logPayload);
+
+  return { messageId: resolvedMessageId, transcriptChunkId: chunk.id, saved: true };
 }
 
 function normalizePatchText(text: string): string {
@@ -1850,7 +2328,7 @@ export async function patchTranscriptMessage(
 ) {
   const session = await prisma.session.findUnique({
     where: { id: sessionId },
-    select: { messages: true, transcript: true, saveTranscription: true },
+    select: { id: true, saveTranscription: true },
   });
 
   if (!session) throw new Error("Session not found");
@@ -1869,8 +2347,31 @@ export async function patchTranscriptMessage(
         ? "INTERVIEWER"
         : undefined;
 
-  const messages = Array.isArray(session.messages) ? ([...session.messages] as any[]) : [];
-  const transcript = Array.isArray(session.transcript) ? ([...session.transcript] as any[]) : [];
+  const chunkPatch = await prisma.transcriptChunk.updateMany({
+    where: {
+      sessionId,
+      questionGroupId: LIVE_TRANSCRIPT_GROUP_ID,
+      questionId: messageId,
+    },
+    data: {
+      question: patchedText,
+      content: patchedText,
+    },
+  });
+
+  if (chunkPatch.count > 0) {
+    scheduleLegacyTranscriptFlush(sessionId, 250);
+    return { id: sessionId, patchedChunks: chunkPatch.count };
+  }
+
+  const legacySession = await prisma.session.findUnique({
+    where: { id: sessionId },
+    select: { messages: true, transcript: true },
+  });
+  if (!legacySession) throw new Error("Session not found");
+
+  const messages = Array.isArray(legacySession.messages) ? ([...legacySession.messages] as any[]) : [];
+  const transcript = Array.isArray(legacySession.transcript) ? ([...legacySession.transcript] as any[]) : [];
 
   const findLegacyMessageIndex = () => {
     for (let i = messages.length - 1; i >= 0; i--) {

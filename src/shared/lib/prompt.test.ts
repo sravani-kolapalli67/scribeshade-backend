@@ -32,6 +32,18 @@ test("system prompt requires markdown answer body and allows answer-body bold la
   assert.equal(prompt.includes("Never put '**' anywhere except"), false);
 });
 
+test("markdown contract requires spacing, keyword highlighting, and candidate voice", () => {
+  const prompt = buildSystemMessage({
+    ...baseContext,
+    complexity: "simple_contextual",
+  });
+
+  assert.ok(prompt.includes("Put one blank line between top-level project bullets"));
+  assert.ok(prompt.includes("Highlight exact numbers and measurable values with bold"));
+  assert.ok(prompt.includes("Use inline code for explicit tools"));
+  assert.ok(prompt.includes("Do not explain like a tutor"));
+});
+
 test("compact and follow-up prompts include the same markdown contract", () => {
   const compact = buildSystemMessage({
     ...baseContext,
@@ -69,6 +81,41 @@ test("project-explain rules include architecture diagram exception and required 
       "This is required for project-explain asks when diagram context is available.",
     ),
   );
+});
+
+test("compact resume-backed project prompts require in-depth per-project structure", () => {
+  const prompt = buildSystemMessage({
+    ...baseContext,
+    complexity: "simple_contextual",
+    projects:
+      "RESUME-BACKED PROJECT/WORK CONTEXT (selected resume only; do not invent beyond this):\nPROJECTS\nHilton Grand Vacations\n- Migrated legacy data pipelines using Databricks and Azure.",
+    hasSelectedProjects: false,
+    isProjectQuestion: true,
+  });
+
+  assert.ok(prompt.includes("PROJECT EXPLANATION FORMAT"));
+  assert.ok(prompt.includes("CANDIDATE'S RESUME PROJECT/WORK CONTEXT"));
+  assert.ok(prompt.includes("Do not start with a generic overview paragraph"));
+  assert.ok(prompt.includes("**Business problem:**"));
+  assert.ok(prompt.includes("**Architecture/approach:**"));
+  assert.ok(prompt.includes("Keep each nested point interview-spoken"));
+  assert.ok(prompt.includes("you MAY infer the business problem and architecture flow"));
+  assert.ok(prompt.includes("Do not invent company names, tools, exact metrics"));
+});
+
+test("simple language keeps project headings but requires easy wording", () => {
+  const prompt = buildSystemMessage({
+    ...baseContext,
+    complexity: "simple_contextual",
+    simpleLanguage: true,
+    projects:
+      "RESUME-BACKED PROJECT/WORK CONTEXT (selected resume only; do not invent beyond this):\nPROJECTS\nINFY\n- Developed a scalable Data Lake.",
+    hasSelectedProjects: false,
+    isProjectQuestion: true,
+  });
+
+  assert.ok(prompt.includes("If simple language mode is on, keep the same headings"));
+  assert.ok(prompt.includes("SIMPLE LANGUAGE MODE: use plain easy English"));
 });
 
 test("user prompts include markdown contract across answer entrypoints", () => {

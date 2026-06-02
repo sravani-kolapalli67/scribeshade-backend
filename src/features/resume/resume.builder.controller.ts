@@ -190,7 +190,16 @@ export async function enhanceSectionHandler(
   next: NextFunction,
 ): Promise<void> {
   try {
-    const { userId: bodyUserId, sectionId, currentText, jobDescription, jobTitle, resumeContext } =
+    const {
+      userId: bodyUserId,
+      sectionId,
+      currentText,
+      jobDescription,
+      jobTitle,
+      resumeContext,
+      qualityIssues,
+      qualitySuggestions,
+    } =
       req.body as Partial<EnhanceSectionInput>;
 
     // userId is preferred from the resolved body (resolveUserId middleware converts
@@ -210,6 +219,8 @@ export async function enhanceSectionHandler(
       jobDescription,
       jobTitle,
       resumeContext,
+      qualityIssues,
+      qualitySuggestions,
       idempotencyKey: req.idempotencyKey ?? null,
       resumeId: (req.body as { resumeId?: string }).resumeId ?? null,
     });
@@ -292,7 +303,7 @@ export async function exportPdfHandler(
 ): Promise<void> {
   const _ct0 = Date.now();
   try {
-    const { userId, resumeId, populatedHtml } = req.body as Partial<ExportPdfInput>;
+    const { userId, resumeId, populatedHtml, suggestedFilename } = req.body as Partial<ExportPdfInput>;
     console.info(JSON.stringify({ event: "pdf_handler_start", resumeId: resumeId ?? null, htmlBytes: populatedHtml?.length ?? 0 }));
 
     if (!resumeId && !populatedHtml) {
@@ -300,7 +311,7 @@ export async function exportPdfHandler(
       return;
     }
 
-    const result = await exportResumeHtml({ userId: userId ?? "", resumeId, populatedHtml });
+    const result = await exportResumeHtml({ userId: userId ?? "", resumeId, populatedHtml, suggestedFilename });
 
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader("Content-Disposition", `attachment; filename="${result.filename}"`);

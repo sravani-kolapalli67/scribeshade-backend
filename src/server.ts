@@ -6,6 +6,7 @@ import { env } from "./config/env";
 import { creditDeductionWorker } from "./features/jobs/credit-deduction.job";
 import { sessionWatchdogWorker, scheduleWatchdog } from "./features/jobs/session-watchdog.job";
 import { holdExpiryWorker } from "./features/jobs/hold-expiry.job";
+import { candidateDigestWorker } from "./features/jobs/candidate-digest.job";
 import { warmBrowser } from "./features/resume/resume.builder.service";
 import { validateAiConfig } from "./shared/utils/ai-validator";
 
@@ -31,6 +32,7 @@ const startServer = async () => {
     void creditDeductionWorker;
     void sessionWatchdogWorker;
     void holdExpiryWorker;
+    void candidateDigestWorker;
 
     // Schedule the recurring watchdog tick
     scheduleWatchdog().catch((err) =>

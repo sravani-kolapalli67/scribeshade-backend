@@ -311,12 +311,43 @@ export async function analyzeScreen(req: Request, res: Response) {
     const id = req.params.id as string;
     const file = req.file;
     const aiModel = req.body.aiModel;
+    const contextPayloadRaw = req.body?.contextPayload;
+    const contextPayload =
+      typeof contextPayloadRaw === "string"
+        ? (() => {
+            try {
+              return JSON.parse(contextPayloadRaw);
+            } catch {
+              return null;
+            }
+          })()
+        : null;
+    const normalizedContext =
+      contextPayload && typeof contextPayload === "object"
+        ? normalizeAIAnswerRequestBody(contextPayload).liveContextMetadata
+        : undefined;
 
     if (!file) {
       return res.status(400).json({ error: "No screenshot provided" });
     }
 
-    const result = await sessionService.analyzeScreen(id, file, aiModel);
+    if (process.env.NODE_ENV !== "production") {
+      console.log("[Analyze Screen][BE] context snapshot", {
+        sessionId: id,
+        hasContextPayload: !!contextPayload,
+        recentTranscriptWindowCount:
+          normalizedContext?.recentTranscriptWindow?.length || 0,
+        previousAiAnswersCount:
+          normalizedContext?.previousAiAnswers?.length || 0,
+      });
+    }
+
+    const result = await sessionService.analyzeScreen(
+      id,
+      file,
+      aiModel,
+      normalizedContext,
+    );
 
     // Set streaming headers (Plain text for easier frontend consumption)
     res.setHeader("Content-Type", "text/plain; charset=utf-8");
@@ -368,10 +399,12 @@ export async function getAIAnswer(req: Request, res: Response) {
   let inFlightKey: string | null = null;
   let requestId = "";
   try {
+    const normalizeStartedAt = Date.now();
     const id = req.params.id as string;
     const { isCustomQuery, isRegenerate, regenerate, snapshotId, aiModel } = req.body;
     const isRegen = !!isRegenerate || !!regenerate;
     const normalized = normalizeAIAnswerRequestBody(req.body);
+    const normalizeMs = Date.now() - normalizeStartedAt;
     const resolvedQuestion = normalized.resolvedQuestion;
     requestId =
       String(req.body?.requestId || req.header("x-request-id") || "").trim() ||
@@ -412,6 +445,8 @@ export async function getAIAnswer(req: Request, res: Response) {
           normalized.liveContextMetadata?.recentTranscriptWindow?.length || 0,
         previousAiAnswerPresent:
           !!normalized.liveContextMetadata?.previousAiAnswer,
+        previousAiAnswersCount:
+          normalized.liveContextMetadata?.previousAiAnswers?.length || 0,
         selectedAnswerIdFromFrontend:
           normalized.liveContextMetadata?.selectedAnswerId || null,
         selectedAnswerQuestionPresent:
@@ -421,6 +456,7 @@ export async function getAIAnswer(req: Request, res: Response) {
         selectedAnswerCodeBlocksCount:
           normalized.liveContextMetadata?.selectedAnswerCodeBlocks?.length || 0,
         answerMode: normalized.liveContextMetadata?.answerMode || "auto",
+        normalizeMs,
       });
       console.log("[AI Answer Debug][BE] Processing pipeline:", {
         step1: "normalizeAIAnswerRequestBody",
@@ -483,6 +519,7 @@ export async function getAIAnswer(req: Request, res: Response) {
  * Manually saves a message to the session history.
  */
 export async function saveMessage(req: Request, res: Response) {
+  const startedAt = Date.now();
   try {
     const id = req.params.id as string;
     const { role, question, answer, time, messageId } = req.body;
@@ -491,7 +528,7 @@ export async function saveMessage(req: Request, res: Response) {
       return res.status(400).json({ error: "role and question are required" });
     }
 
-    const updatedSession = await sessionService.appendMessage(
+    const result = await sessionService.appendMessage(
       id,
       role as any,
       question,
@@ -500,9 +537,30 @@ export async function saveMessage(req: Request, res: Response) {
       undefined,
       messageId
     );
-    // appendMessage returns undefined for ephemeral sessions (saveTranscription === false).
-    // Respond with an empty messages array so the client behaves consistently.
-    return res.json({ success: true, messages: updatedSession?.messages ?? [] });
+    const includeMessages = req.query.includeMessages === "true";
+    if (includeMessages) {
+      await sessionService.forceFlushSessionTranscript(id);
+      const session = await prisma.session.findUnique({
+        where: { id },
+        select: { messages: true },
+      });
+      return res.json({
+        success: true,
+        messageId: result?.messageId ?? messageId,
+        saved: result?.saved ?? false,
+        messages: Array.isArray(session?.messages) ? session?.messages : [],
+      });
+    }
+    const totalMs = Date.now() - startedAt;
+    if (totalMs > 500) {
+      console.warn("[save-message][controller-slow]", { sessionId: id, messageId: result?.messageId ?? messageId, totalMs });
+    }
+    return res.json({
+      success: true,
+      messageId: result?.messageId ?? messageId,
+      saved: result?.saved ?? false,
+      messages: [],
+    });
   } catch (error: any) {
     console.error("Save Message Error:", error);
     return res

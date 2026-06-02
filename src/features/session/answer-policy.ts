@@ -80,6 +80,7 @@ export function classifyAnswerIntent(input: {
     if (OPT_RE.test(q)) return "code_optimization_followup";
     return "code_explanation_followup";
   }
+  if (PROJECT_OVERVIEW_RE.test(q)) return "behavioral_project_experience";
   if (EXPLICIT_EXPERIENCE_RE.test(q)) return "behavioral_project_experience";
   if (SYSTEM_DESIGN_RE.test(q)) return "system_design";
   if (SCENARIO_RE.test(q) || input.cieComplexity === "scenario_based") return "scenario_based";
@@ -158,7 +159,8 @@ export function buildRequestScopedPolicy(input: {
     "- output_format: markdown_only_under_answer_marker",
     "- no_dense_paragraphs: true",
     "- bullet_rule: use '- ' bullets with short **Bold labels:** whenever the answer has more than 2 short sentences",
-    "- markdown_highlight_rule: use **bold** for short labels/keywords and inline code for tools/APIs/commands; never use raw HTML/color tags",
+    "- markdown_highlight_rule: use **bold** for short labels, project names, exact numbers, and major outcomes; use inline code for explicit tools/APIs/commands; never use raw HTML/color tags",
+    "- candidate_voice_rule: answer like the candidate speaking in an interview, not like a tutor or theoretical explainer",
   ].filter(Boolean);
 
   if (experienceSuppressed) {
@@ -166,10 +168,11 @@ export function buildRequestScopedPolicy(input: {
   }
   if (answerIntent === "behavioral_project_experience") {
     lines.push("- include_resume_or_project_backed_examples: true");
+    lines.push("- project_source_precedence: selected_projects_first; resume_context_secondary_only_for_missing_details_or_when_projects_absent");
     const isProjectOverview = PROJECT_OVERVIEW_RE.test(input.question || "");
     if (isProjectOverview) {
       lines.push("- project_coverage: include_all_selected_projects");
-      lines.push("- project_depth_per_item: problem, role, architecture, stack, decisions, impact_metrics");
+      lines.push("- project_depth_per_item: business_problem, role, architecture_or_flow, stack_from_context, key_work, impact_without_invented_metrics");
       lines.push("- avoid_generic_summary: true");
     } else {
       lines.push("- project_depth_single: include_problem_role_stack_architecture_challenge_impact");

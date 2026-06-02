@@ -28,3 +28,13 @@ export const holdExpiryQueue = new Queue("hold-expiry", {
     backoff: { type: "exponential", delay: 2000 },
   },
 });
+
+export const candidateDigestQueue = new Queue("candidate-digest", {
+  connection: redisConnection,
+  defaultJobOptions: {
+    attempts: 3,
+    backoff: { type: "exponential", delay: 2000 },
+    removeOnComplete: { count: 500 },
+    removeOnFail: { count: 200 },
+  },
+});

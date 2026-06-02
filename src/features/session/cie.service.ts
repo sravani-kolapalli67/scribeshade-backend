@@ -29,6 +29,14 @@ export function estimatePromptTokens(text: string): number {
   return encoding.encode(text).length;
 }
 
+function trimTextToTokenBudget(text: string, tokenBudget: number): string {
+  if (!text || tokenBudget <= 0) return "";
+  const tokens = encoding.encode(text);
+  if (tokens.length <= tokenBudget) return text;
+  if (tokenBudget <= 8) return encoding.decode(tokens.slice(0, tokenBudget));
+  return `${encoding.decode(tokens.slice(0, tokenBudget - 8))}\n... (truncated)`;
+}
+
 /**
  * Scans a user query for follow-up and continuation keywords.
  */
@@ -75,6 +83,20 @@ export function isProjectOverviewQuestion(query: string | undefined): boolean {
   return /\b(explain|describe|tell me about|walk me through|list|share)\b[\s\w]{0,30}\b(projects|project work|work done|things you built)\b/i.test(
     normalized,
   );
+}
+
+function isMixedExperienceProjectQuestion(query: string | undefined): boolean {
+  if (!query || !query.trim()) return false;
+  const normalized = normalizeTranscriptForQuestionDetection(query).toLowerCase();
+  const asksIntroOrExperience =
+    /\b(introduce|intro|about yourself|experience|years of experience|work experience|mern|tech stack)\b/.test(
+      normalized,
+    );
+  const asksProject =
+    /\b(project|frontend|backend|full stack|full-stack|worked on)\b/.test(
+      normalized,
+    );
+  return asksIntroOrExperience && asksProject;
 }
 
 /**
@@ -221,6 +243,110 @@ export function trimResume(resumeText: string, targetBudget = 900): string {
   if (tokens.length <= targetBudget) return resumeText;
   const sliced = tokens.slice(0, targetBudget);
   return encoding.decode(sliced) + "\n... (truncated to fit budget)";
+}
+
+function isResumeSectionHeading(line: string, pattern: RegExp): boolean {
+  const normalized = line.trim().replace(/[:\-]+$/g, "");
+  return normalized.length <= 60 && pattern.test(normalized);
+}
+
+function splitResumeLines(resumeText: string): string[] {
+  return resumeText
+    .split(/\r?\n/)
+    .map((line) => line.replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+}
+
+function extractSectionByHeading(
+  lines: string[],
+  startPattern: RegExp,
+  stopPattern: RegExp,
+): string {
+  const startIndex = lines.findIndex((line) =>
+    isResumeSectionHeading(line, startPattern),
+  );
+  if (startIndex < 0) return "";
+
+  const selected: string[] = [];
+  for (let index = startIndex; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (
+      index > startIndex &&
+      isResumeSectionHeading(line, stopPattern)
+    ) {
+      break;
+    }
+    selected.push(line);
+  }
+  return selected.join("\n").trim();
+}
+
+function buildScoredResumeBlocks(resumeText: string, query: string): string[] {
+  const queryWords = (query || "")
+    .toLowerCase()
+    .match(/\w+/g) || [];
+  const keywords = queryWords.filter((word) => word.length > 2 && !STOP_WORDS.has(word));
+  const rawBlocks = resumeText
+    .split(/\n\s*\n+/)
+    .map((block) => block.replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+  const blocks = rawBlocks.length >= 3
+    ? rawBlocks
+    : splitResumeLines(resumeText)
+        .reduce<string[]>((acc, line, index) => {
+          const blockIndex = Math.floor(index / 4);
+          acc[blockIndex] = [acc[blockIndex], line].filter(Boolean).join("\n");
+          return acc;
+        }, []);
+
+  const scored = blocks.map((block, index) => {
+    const lower = block.toLowerCase();
+    let score = 0;
+    if (/\b(projects?|work experience|professional experience|experience|employment)\b/.test(lower)) score += 8;
+    if (/\b(databricks|azure|data lake|data warehouse|pipeline|migration|integration|automation|governance|retail|hilton|infy)\b/.test(lower)) score += 4;
+    if (/\b(days?|months?|years?)\b/.test(lower)) score += 2;
+    for (const keyword of keywords) {
+      if (lower.includes(keyword)) score += 2;
+    }
+    return { block, index, score };
+  });
+
+  return scored
+    .filter((entry) => entry.score > 0)
+    .sort((a, b) => b.score - a.score || a.index - b.index)
+    .slice(0, 8)
+    .sort((a, b) => a.index - b.index)
+    .map((entry) => entry.block);
+}
+
+export function extractResumeProjectContext(
+  resumeText: string,
+  query: string,
+  targetBudget = 1600,
+): string {
+  if (!resumeText.trim()) return "";
+  const lines = splitResumeLines(resumeText);
+  const projectSection = extractSectionByHeading(
+    lines,
+    /^(projects?|project experience|academic projects|professional projects|work projects)$/i,
+    /^(education|skills?|technical skills?|certifications?|summary|profile|objective|achievements?|awards?|languages?|contact|personal details)$/i,
+  );
+  const experienceSection = extractSectionByHeading(
+    lines,
+    /^(professional experience|work experience|experience|employment history|internships?)$/i,
+    /^(education|skills?|technical skills?|certifications?|summary|profile|objective|projects?|achievements?|awards?|languages?|contact|personal details)$/i,
+  );
+  const selectedSections = [projectSection, experienceSection]
+    .filter((section) => section.length >= 80);
+  const scoredBlocks = selectedSections.length > 0
+    ? selectedSections
+    : buildScoredResumeBlocks(resumeText, query);
+  const body = scoredBlocks.join("\n\n").trim();
+  if (!body) return "";
+  return trimResume(
+    `RESUME-BACKED PROJECT/WORK CONTEXT (selected resume only; do not invent beyond this):\n${body}`,
+    targetBudget,
+  );
 }
 
 /**
@@ -582,7 +708,11 @@ export function buildSlidingTranscriptMemory(
 
   const formattedRecent = recentTurns.map((m, idx) => {
     const orderIdx = olderTurns.length + idx + 1;
-    return `Turn ${orderIdx} (Interviewer asked):\n  Q: ${m.question.trim()}\n  A: ${m.answer.trim()}`;
+    const perTurnBudget = Math.max(120, Math.floor(targetBudget / Math.max(recentTurns.length, 1)));
+    return trimTextToTokenBudget(
+      `Turn ${orderIdx} (Interviewer asked):\n  Q: ${m.question.trim()}\n  A: ${m.answer.trim()}`,
+      perTurnBudget,
+    );
   });
 
   const formattedOlder = olderTurns.map((m, idx) => {
@@ -621,7 +751,7 @@ export function buildSlidingTranscriptMemory(
     }
   }
 
-  return historyText;
+  return trimTextToTokenBudget(historyText, targetBudget);
 }
 
 /**
@@ -637,8 +767,10 @@ export async function buildOptimizedContext(
   options?: {
     complexity?: QuestionComplexity;
     disableProjectPriority?: boolean;
+    contextMode?: "live" | "offline";
   },
 ) {
+  const contextMode = options?.contextMode || "offline";
   const session =
     preloadedSession ||
     (await prisma.session.findUnique({
@@ -666,13 +798,23 @@ export async function buildOptimizedContext(
       ? (session as any).primaryProjectId.trim()
       : (selectedProjectIds[0] ?? null);
   const isProjectQuestion = isProjectExperienceQuestion(query);
+  const isMixedExperienceProject = isMixedExperienceProjectQuestion(query);
   const isProjectOverview = isProjectOverviewQuestion(query);
+  const resumeProjectFallbackActive =
+    !hasSelectedProjects &&
+    isProjectQuestion &&
+    !!session.resumeId;
   const projectPriorityActive =
-    hasSelectedProjects && isProjectQuestion && !options?.disableProjectPriority;
+    hasSelectedProjects &&
+    isProjectQuestion &&
+    !options?.disableProjectPriority;
   const budgets = projectPriorityActive
     ? {
         ...baseBudgets,
-        resume: 0,
+        // For hybrid intro + project asks, keep a small resume budget as secondary context.
+        resume: isMixedExperienceProject
+          ? Math.max(260, Math.min(baseBudgets.resume || 320, 420))
+          : 0,
         projects: isProjectOverview
           ? Math.max(
               baseBudgets.projects + baseBudgets.resume,
@@ -697,11 +839,16 @@ export async function buildOptimizedContext(
   console.log(`[CIE] Complexity: ${complexity} | Query: "${queryPreview}" (${wordCount} words)`);
 
   // ── Step 2: Conditionally fetch only what the tier needs ──────────────────
-  const includeResume = shouldIncludeResume(complexity) && !projectPriorityActive;
+  const includeResume =
+    (shouldIncludeResume(complexity) ||
+      resumeProjectFallbackActive ||
+      (projectPriorityActive && isMixedExperienceProject)) &&
+    (!projectPriorityActive || isMixedExperienceProject);
   const includeProjects = shouldIncludeProjects(complexity);
   const includeDocuments = shouldIncludeDocuments(complexity);
   const includeHistory = shouldIncludeHistory(complexity);
-  const includeVector = shouldIncludeVectorRAG(complexity);
+  const includeVector = contextMode !== "live" && shouldIncludeVectorRAG(complexity);
+  const sourceTimingsStartedAt = Date.now();
 
   // Parallel fetch — only the sources this tier requires
   const [resume, document, projectRecords] = await Promise.all([
@@ -715,6 +862,7 @@ export async function buildOptimizedContext(
       ? prisma.project.findMany({ where: { id: { in: selectedProjectIds } } }).catch(() => [])
       : Promise.resolve([])
   ]);
+  const sourceFetchMs = Date.now() - sourceTimingsStartedAt;
   const orderedProjectRecords = selectedProjectIds.length
     ? [...(projectRecords || [])].sort((a: any, b: any) => {
         const aId = String(a?.id ?? "");
@@ -745,25 +893,39 @@ export async function buildOptimizedContext(
 
   // ── Step 3: Apply per-source budgets from the complexity tier ─────────────
   const resumeRaw = resume?.resumeContext || "";
-  const optimizedResume = includeResume ? trimResume(resumeRaw, budgets.resume) : "";
+  const resumeBudget = resumeProjectFallbackActive
+    ? Math.max(budgets.resume, isProjectOverview ? 1800 : 1200)
+    : budgets.resume;
+  const optimizedResume = includeResume ? trimResume(resumeRaw, resumeBudget) : "";
+  const resumeProjectContext = resumeProjectFallbackActive
+    ? extractResumeProjectContext(
+        resumeRaw,
+        query || "",
+        isProjectOverview ? 2200 : 1400,
+      )
+    : "";
 
   const optimizedProjects = includeProjects
     ? extractRelevantProjectContext(orderedProjectRecords || [], query || "", budgets.projects, {
         primaryProjectId,
         selectedProjectIds,
       })
-    : "";
+    : resumeProjectContext;
+  const effectiveIncludeProjects = includeProjects || !!resumeProjectContext;
 
   const optimizedDoc = includeDocuments
     ? extractRelevantDocumentContext(documentRawText, query || "", budgets.document)
     : "";
 
+  const historyStartedAt = Date.now();
   const messages = Array.isArray(session.messages) ? (session.messages as any[]) : [];
   const optimizedHistory = includeHistory
     ? buildSlidingTranscriptMemory(messages, budgets.history)
     : "";
+  const historyMs = Date.now() - historyStartedAt;
 
   // Semantic Vector RAG — only for tiers that include it
+  const vectorStartedAt = Date.now();
   let vectorContext = "";
   if (includeVector && query) {
     try {
@@ -786,6 +948,7 @@ export async function buildOptimizedContext(
       console.warn("Failed vector context in CIE:", e);
     }
   }
+  const vectorMs = Date.now() - vectorStartedAt;
 
   // ── Step 4: Aggregate and enforce budget ──────────────────────────────────
   let resumeTokens = estimatePromptTokens(optimizedResume);
@@ -806,13 +969,28 @@ export async function buildOptimizedContext(
     const scaleFactor = effectiveBudget / totalCalculated;
 
     if (includeResume) finalResume = trimResume(resumeRaw, Math.floor(resumeTokens * scaleFactor));
-    if (includeProjects) finalProjects = extractRelevantProjectContext(orderedProjectRecords || [], query || "", Math.floor(projectsTokens * scaleFactor), {
-      primaryProjectId,
-      selectedProjectIds,
-    });
+    if (includeProjects) {
+      finalProjects = extractRelevantProjectContext(orderedProjectRecords || [], query || "", Math.floor(projectsTokens * scaleFactor), {
+        primaryProjectId,
+        selectedProjectIds,
+      });
+    } else if (resumeProjectContext) {
+      finalProjects = trimResume(resumeProjectContext, Math.max(700, Math.floor(projectsTokens * scaleFactor)));
+    }
     if (includeDocuments) finalDoc = extractRelevantDocumentContext(documentRawText, query || "", Math.floor(docTokens * scaleFactor));
     if (includeHistory) finalHistory = buildSlidingTranscriptMemory(messages, Math.floor(historyTokens * scaleFactor));
   }
+
+  let remainingBudget = effectiveBudget;
+  finalResume = trimTextToTokenBudget(finalResume, remainingBudget);
+  remainingBudget -= estimatePromptTokens(finalResume);
+  finalProjects = trimTextToTokenBudget(finalProjects, remainingBudget);
+  remainingBudget -= estimatePromptTokens(finalProjects);
+  finalDoc = trimTextToTokenBudget(finalDoc, remainingBudget);
+  remainingBudget -= estimatePromptTokens(finalDoc);
+  finalHistory = trimTextToTokenBudget(finalHistory, remainingBudget);
+  remainingBudget -= estimatePromptTokens(finalHistory);
+  vectorContext = trimTextToTokenBudget(vectorContext, remainingBudget);
 
   // ── Step 5: Structured logging ────────────────────────────────────────────
   const included: string[] = [];
@@ -820,7 +998,7 @@ export async function buildOptimizedContext(
 
   if (includeResume && finalResume) included.push(`resume(${estimatePromptTokens(finalResume)}t)`);
   else skipped.push("resume");
-  if (includeProjects && finalProjects) included.push(`projects(${estimatePromptTokens(finalProjects)}t)`);
+  if (effectiveIncludeProjects && finalProjects) included.push(`projects(${estimatePromptTokens(finalProjects)}t)`);
   else skipped.push("projects");
   if (includeDocuments && finalDoc) included.push(`documents(${estimatePromptTokens(finalDoc)}t)`);
   else skipped.push("documents");
@@ -835,6 +1013,12 @@ export async function buildOptimizedContext(
   console.log(`[CIE] Included: ${included.length > 0 ? included.join(", ") : "(none)"}`);
   console.log(`[CIE] Skipped: ${skipped.length > 0 ? skipped.join(", ") : "(none)"}`);
   console.log(`[CIE] Final context: ${finalTotal} tokens (budget: ${effectiveBudget})`);
+  console.log("[CIE] Source timings", {
+    contextMode,
+    sourceFetchMs,
+    historyMs,
+    vectorMs,
+  });
 
   return {
     company: session.company?.name || session.companyName || "Unknown",

@@ -1,0 +1,248 @@
+{
+  "apiBaseUrl": "http://127.0.0.1:3200/api",
+  "startedAt": "2026-06-01T16:21:57.487Z",
+  "endedAt": "2026-06-01T16:23:25.760Z",
+  "sessionId": "b357f443-6fe0-4f29-a38b-b20b8557bc22",
+  "userId": "6c803fe5-48e9-4daa-ba25-44a66714f775",
+  "resumeId": "02316abc-6447-4122-a4c0-5659b3c56339",
+  "projectIds": [],
+  "totalTurns": 8,
+  "passedTurns": 8,
+  "failedTurns": 0,
+  "turnResults": [
+    {
+      "id": "intro-project",
+      "question": "Before we start coding, introduce yourself and explain your selected project architecture in detail.",
+      "answerPreview": "**QUESTION:**\nBefore we start coding, introduce yourself and explain your selected project architecture in detail.\n\n**ANSWER:**\n- **About Me:**\n  - I am a Data Engineer with over **5 years** of experience.\n  - I specialize in building and fixing data pipelines",
+      "checks": [
+        {
+          "check": "must_contain:project",
+          "pass": true,
+          "details": "present"
+        },
+        {
+          "check": "must_contain:architecture",
+          "pass": true,
+          "details": "present"
+        },
+        {
+          "check": "question_block_not_overmerged",
+          "pass": true,
+          "details": "question_block_len=100,max=320"
+        },
+        {
+          "check": "question_block_not_containing_previous_turn",
+          "pass": true,
+          "details": "clean"
+        },
+        {
+          "check": "require_architecture_text_block",
+          "pass": true,
+          "details": "present"
+        }
+      ],
+      "pass": true
+    },
+    {
+      "id": "code-write",
+      "question": "Write TypeScript code for a debounce utility function and show practical usage in a React search input.",
+      "answerPreview": "**QUESTION:**\nWrite TypeScript code for a debounce utility function and show practical usage in a React search input.\n\n**ANSWER:**\n- **Direct answer:** A debounce function limits how often a piece of code runs. It waits for a set amount of time to pass after t",
+      "checks": [
+        {
+          "check": "must_contain:debounce",
+          "pass": true,
+          "details": "present"
+        },
+        {
+          "check": "question_block_not_overmerged",
+          "pass": true,
+          "details": "question_block_len=103,max=320"
+        },
+        {
+          "check": "question_block_not_containing_previous_turn",
+          "pass": true,
+          "details": "clean"
+        },
+        {
+          "check": "require_code_block",
+          "pass": true,
+          "details": "code_blocks=1"
+        }
+      ],
+      "pass": true
+    },
+    {
+      "id": "code-followup-explain",
+      "question": "Could you explain how the code you used performs and what makes it effective?",
+      "answerPreview": "**QUESTION:**\nCould you explain how the code you used performs and what makes it effective?\n\n**ANSWER:**\n- **Direct answer:** The code is effective because it uses a **closure** to keep track of the timer and `useCallback` to ensure the function remains stable",
+      "checks": [
+        {
+          "check": "must_contain:code",
+          "pass": true,
+          "details": "present"
+        },
+        {
+          "check": "must_contain:performance",
+          "pass": true,
+          "details": "present"
+        },
+        {
+          "check": "must_not_contain:I don't have a specific code snippet",
+          "pass": true,
+          "details": "not present"
+        },
+        {
+          "check": "question_block_not_overmerged",
+          "pass": true,
+          "details": "question_block_len=77,max=320"
+        },
+        {
+          "check": "question_block_not_containing_previous_turn",
+          "pass": true,
+          "details": "clean"
+        }
+      ],
+      "pass": true
+    },
+    {
+      "id": "code-followup-related",
+      "question": "How would you test that debounce logic and which edge cases would you cover?",
+      "answerPreview": "**QUESTION:**\nHow would you test that debounce logic and which edge cases would you cover?\n\n**ANSWER:**\n- **Direct answer:** I would use **unit tests** with **fake timers** to control time precisely without having to wait for real seconds to pass.\n- **Testing ",
+      "checks": [
+        {
+          "check": "must_contain:test",
+          "pass": true,
+          "details": "present"
+        },
+        {
+          "check": "must_contain:edge",
+          "pass": true,
+          "details": "present"
+        },
+        {
+          "check": "question_block_not_overmerged",
+          "pass": true,
+          "details": "question_block_len=76,max=320"
+        },
+        {
+          "check": "question_block_not_containing_previous_turn",
+          "pass": true,
+          "details": "clean"
+        }
+      ],
+      "pass": true
+    },
+    {
+      "id": "topic-switch-behavioral",
+      "question": "Switching topic now. Tell me about a conflict with a stakeholder and how you resolved it.",
+      "answerPreview": "**QUESTION:**\nSwitching topic now. Tell me about a conflict with a stakeholder and how you resolved it.\n\n**ANSWER:**\n- **Direct answer:** I once had a conflict with a business analyst regarding the timeline for a data migration task. They wanted the new `IDMC`",
+      "checks": [
+        {
+          "check": "must_contain:stakeholder",
+          "pass": true,
+          "details": "present"
+        },
+        {
+          "check": "must_contain:resolved",
+          "pass": true,
+          "details": "present"
+        },
+        {
+          "check": "question_block_not_overmerged",
+          "pass": true,
+          "details": "question_block_len=89,max=320"
+        },
+        {
+          "check": "question_block_not_containing_previous_turn",
+          "pass": true,
+          "details": "clean"
+        }
+      ],
+      "pass": true
+    },
+    {
+      "id": "topic-followup-behavioral",
+      "question": "Related follow-up: what communication strategy did you use and what was the measurable outcome?",
+      "answerPreview": "**QUESTION:**\nWhat communication strategy did you use and what was the measurable outcome?\n\n**ANSWER:**\n- **Direct answer:** For the `PowerCenter` to `IDMC` migration, I focused on **transparency** and **regular technical syncs** to ensure the business and the",
+      "checks": [
+        {
+          "check": "must_contain:communication",
+          "pass": true,
+          "details": "present"
+        },
+        {
+          "check": "must_contain:outcome",
+          "pass": true,
+          "details": "present"
+        },
+        {
+          "check": "question_block_not_overmerged",
+          "pass": true,
+          "details": "question_block_len=76,max=320"
+        },
+        {
+          "check": "question_block_not_containing_previous_turn",
+          "pass": true,
+          "details": "clean"
+        }
+      ],
+      "pass": true
+    },
+    {
+      "id": "topic-switch-system-design",
+      "question": "New topic: design a notification system for 1 million events per day and explain scaling and reliability.",
+      "answerPreview": "**QUESTION:**\ndesign a notification system for 1 million events per day and explain scaling and reliability.\n\n**ANSWER:**\n- **Direct answer:** For **1 million events per day**, I would build an asynchronous, event-driven system using a message queue to separat",
+      "checks": [
+        {
+          "check": "must_contain:scal",
+          "pass": true,
+          "details": "present"
+        },
+        {
+          "check": "must_contain:reliab",
+          "pass": true,
+          "details": "present"
+        },
+        {
+          "check": "question_block_not_overmerged",
+          "pass": true,
+          "details": "question_block_len=94,max=320"
+        },
+        {
+          "check": "question_block_not_containing_previous_turn",
+          "pass": true,
+          "details": "clean"
+        }
+      ],
+      "pass": true
+    },
+    {
+      "id": "scenario-followup-db",
+      "question": "Continue from the database part of that notification design and justify indexing choices.",
+      "answerPreview": "**QUESTION:**\nContinue from the database part of that notification design and justify indexing choices.\n\n**ANSWER:**\n- **Direct answer:** For the database layer, I would use a relational database like `PostgreSQL` to store notification metadata and status. Sin",
+      "checks": [
+        {
+          "check": "must_contain:database",
+          "pass": true,
+          "details": "present"
+        },
+        {
+          "check": "must_contain:index",
+          "pass": true,
+          "details": "present"
+        },
+        {
+          "check": "question_block_not_overmerged",
+          "pass": true,
+          "details": "question_block_len=89,max=320"
+        },
+        {
+          "check": "question_block_not_containing_previous_turn",
+          "pass": true,
+          "details": "clean"
+        }
+      ],
+      "pass": true
+    }
+  ]
+}

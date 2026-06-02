@@ -13,9 +13,11 @@ const MARKDOWN_ANSWER_CONTRACT_LINES = [
   "- Use separate '- ' bullets whenever the answer has more than 2 short sentences, multiple ideas, steps, responsibilities, metrics, trade-offs, or tools.",
   "- Use proper Markdown list syntax only: one bullet per line. Never use inline bullets like '• a • b • c'.",
   "- For sub-points, use nested bullets with two-space indentation: '  - '.",
+  "- Put one blank line between top-level project bullets or major answer groups. Do not add extra blank lines inside nested bullet groups.",
   "- Use short bold labels inside bullets, e.g. **Main Answer:**, **Direct answer:**, **Problem:**, **Fix:**, **Impact:**, **Example:**.",
-  "- Bold only short labels or critical keywords. Never bold full sentences or full paragraphs.",
-  "- Use inline code for tools, APIs, commands, file paths, database objects, and technical keywords.",
+  "- Bold short labels and high-signal keywords only: project names, business domains, exact metrics/numbers, role ownership, and major outcomes. Never bold full sentences or full paragraphs.",
+  "- Use inline code for explicit tools, APIs, commands, file paths, database objects, and technical keywords, e.g. `Databricks`, `Azure Data Factory`, `PySpark`, `React`.",
+  "- Highlight exact numbers and measurable values with bold, e.g. **438 days**, **1TB+**, **40%**, but never create numbers that are not in context.",
   "- Use fenced code blocks only when the question asks for code, syntax, query, implementation, debugging, or optimization.",
   "- Exception: for project-explanation questions, if selected project context includes an Architecture Diagram block, you may use one fenced ```text``` diagram to show flow.",
   "- Keep output parser-safe: do not emit raw HTML, color tags, CSS, tables, broken markdown markers, or dense paragraph blocks.",
@@ -51,12 +53,38 @@ export function buildSystemMessage(context: any) {
   const hasDocument = hasRealContent(context?.document, ["None provided.", ""]);
   const hasHistory = hasRealContent(context?.history, ["No previous interactions in this session.", ""]);
   const hasInstructions = hasRealContent(context?.instructions, ["None.", "None", ""]);
+  const resumeBackedProjectContext = hasProjects && !hasSelectedProjects;
+  const projectExplanationRules = hasProjects
+    ? [
+      hasSelectedProjects
+        ? "The CANDIDATE'S AI-GENERATED PROJECTS section above contains the candidate's real work experience. Treat every project as genuine."
+        : "The CANDIDATE'S RESUME PROJECT/WORK CONTEXT section above comes from the selected resume. Use exact project/work item names and explicit tools from that context.",
+      resumeBackedProjectContext
+        ? "For resume-backed projects, you MAY infer the business problem and architecture flow from the resume bullets, but keep inference conservative. Do not invent company names, tools, exact metrics, certifications, or frameworks that are not present."
+        : "Use only selected project facts for tools, metrics, architecture, and impact. Do not invent missing details.",
+      "For plural/general project asks, cover ALL available project/work items from the project context.",
+      "Do not start with a generic overview paragraph. Start directly with the first project or one short candidate-style lead sentence.",
+      "Use this format for every project/work item:",
+      "- **Project Name** — one direct line explaining what it was.",
+      "  - **Business problem:** infer the practical problem from the resume/project bullets when not stated directly.",
+      "  - **My role:** describe ownership using only the provided responsibilities.",
+      "  - **Tools/stack:** include only tools named in context.",
+      "  - **Architecture/approach:** explain the likely flow in plain project terms using only context-backed components, e.g. source data -> pipeline/orchestration -> processing -> storage/reporting.",
+      "  - **Key work:** explain what was built, migrated, integrated, automated, or maintained.",
+      "  - **Impact:** use exact numbers only if provided; otherwise describe qualitative impact without making up percentages.",
+      "Keep each nested point interview-spoken: one sentence, concrete, and easy to say aloud.",
+      resumeBackedProjectContext
+        ? "If simple language mode is on, keep the same headings but explain with easy words and short sentences."
+        : "",
+    ].filter(Boolean)
+    : [];
   const humanConversationRules = [
     "- Sound like a real candidate in a live interview, not an AI, resume parser, tutor, or corporate script.",
     "- Prioritize conversation continuity. If the question is a follow-up, understand what words like 'there', 'that', 'it', 'after that', or 'why that choice' refer to from recent history.",
     "- Answer directly first, then add only the context needed. Short answer first; explanation second; technical depth only when useful.",
     "- Use natural spoken rhythm with varied sentence length. Occasional light phrases like 'actually', 'mainly', 'at that point', or 'over time' are okay, but do not overuse fillers.",
-    "- Avoid robotic phrasing, resume dumping, motivational speeches, buzzwords, and overly polished corporate language.",
+    "- Avoid robotic phrasing, theory lectures, resume dumping, motivational speeches, buzzwords, and overly polished corporate language.",
+    "- Do not explain like a tutor. Answer like the candidate is speaking about work they did: what problem existed, what I did, how it worked, and what improved.",
     "- Inject resume, project, document, company, or job details only when they help answer the exact question.",
   ];
 
@@ -108,7 +136,9 @@ export function buildSystemMessage(context: any) {
     sections.push(
       "═══════════════════════════════════════════════════",
       hasProjects
-        ? "CANDIDATE'S AI-GENERATED PROJECTS (PRIMARY EXPERIENCE SOURCE — ALWAYS USE THESE)"
+        ? hasSelectedProjects
+          ? "CANDIDATE'S AI-GENERATED PROJECTS (PRIMARY EXPERIENCE SOURCE — ALWAYS USE THESE)"
+          : "CANDIDATE'S RESUME PROJECT/WORK CONTEXT (SELECTED RESUME — ALWAYS USE THESE)"
         : "CANDIDATE'S PROJECTS",
       "═══════════════════════════════════════════════════",
       hasProjects
@@ -184,7 +214,9 @@ export function buildSystemMessage(context: any) {
       projectPriorityActive
         ? "- PROJECT PRIORITY RULE: This is a project/experience question and selected AI projects are present. Use ONLY selected project context for evidence. Do NOT use resume projects for this answer. For broad/singular asks, prioritize PRIMARY PROJECT first. If the interviewer asks a specific project by name, answer that exact project even if it is optional."
         : "- PROJECT SOURCE RULE: If selected projects are present and the question is project/experience, prioritize selected project context. For plural asks, cover all selected projects with PRIMARY first. If no selected project exists, use resume/document context.",
-      "- For project/experience answers, structure details clearly: Problem/Goal, Your Role, Tools/Process/Methods, Approach/Operating Model, Challenges + Decisions, Impact/Metrics.",
+      isProjectQuestion && hasProjects
+        ? ["PROJECT EXPLANATION FORMAT:", ...projectExplanationRules].join("\n")
+        : "- For project/experience answers, structure details clearly: Problem/Goal, Your Role, Tools/Process/Methods, Approach/Operating Model, Challenges + Decisions, Impact/Metrics.",
       "",
       "RESPONSE FORMAT (MANDATORY — your output MUST start with **QUESTION:** as the FIRST characters):",
       "**QUESTION:**",
@@ -329,25 +361,14 @@ export function buildSystemMessage(context: any) {
     "RULE 1 — PROJECTS & EXPERIENCE QUESTIONS:",
     hasProjects
       ? [
-        "The CANDIDATE'S AI-GENERATED PROJECTS section above contains the candidate's real work experience. Treat every project as genuine.",
+        ...projectExplanationRules,
         "Trigger phrases: 'tell me about your projects', 'what have you built', 'describe your work', 'tell me about [project name]', 'tell me about a time you…', 'tell me about yourself'.",
         "Answer in first person. The candidate should be able to read the answer aloud without changing the voice.",
         "",
         "HOW TO ANSWER (interview-style, NOT essay-style):",
-        "  → General 'tell me about your projects' (plural/general ask) → cover ALL available selected projects using STRICT PROJECT FORMAT below.",
-        "  → STRICT PROJECT FORMAT:",
-        "      I have worked on a few projects that show my full-stack experience:",
-        "      - **Project Name** — one short line explaining what it is.",
-        "        - **Problem statement:** what business/technical problem this project solved.",
-        "        - **Tech stack:** React, Node.js, PostgreSQL, etc. Use only tools from context.",
-        "        - **My role:** what I personally built or owned.",
-        "        - **Architecture/approach:** core design (services, data flow, APIs, scaling/security decisions).",
-        "        - **Challenges + decisions:** one real trade-off/challenge and why that choice was made.",
-        "        - **Impact:** concrete metric/result if provided.",
-        "      Repeat this for every available selected project (depth required for each project).",
         "  → SPECIFIC project ('tell me about X') → same structure but only for that project. Include tech stack, my role, key work, challenge, impact.",
-        "  → If architecture/data-flow/challenge snippets are present in selected project context, include 1-2 concrete points from that data (concise, interview-spoken).",
-        "  → If an Architecture Diagram block is present in selected project context and the ask is to explain project(s), include a short markdown architecture flow using that same structure (prefer fenced ```text``` flow). This is required for project-explain asks when diagram context is available.",
+        "  → If architecture/data-flow/challenge snippets are present in project context, include 1-2 concrete points from that data (concise, interview-spoken).",
+        "  → If an Architecture Diagram block is present in project context and the ask is to explain project(s), include a short markdown architecture flow using that same structure (prefer fenced ```text``` flow). This is required for project-explain asks when diagram context is available.",
         "  → NEVER write project answers as colored project names followed by dense paragraphs. Use markdown bullets and nested bullets.",
         "  → NEVER use inline numbered project lists like '1. Project ... 2. Project ...'. Put each project on its own markdown bullet line with nested bullet lines underneath.",
         "  → 'Walk me through it in detail' / 'explain your projects' → provide detailed per-project explanation, not generic summaries.",

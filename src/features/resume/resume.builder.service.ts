@@ -58,6 +58,198 @@ const VALID_SECTION_IDS = [
   "publications",
 ] as const;
 
+const RESUME_SECTION_HEADING_PATTERNS = [
+  /^\*{0,2}\s*(technical\s+skills|skills|core\s+skills|key\s+skills)\s*\*{0,2}\s*:?\s*$/i,
+] as const;
+
+function stripMarkdownEmphasis(text: string): string {
+  return text
+    .replace(/\*\*/g, "")
+    .replace(/`/g, "")
+    .trim();
+}
+
+function stripResumeSectionHeadings(text: string): string {
+  return text
+    .split("\n")
+    .map((line) => stripMarkdownEmphasis(line))
+    .filter((line) => {
+      const normalized = line.trim();
+      if (!normalized) return true;
+      return !RESUME_SECTION_HEADING_PATTERNS.some((pattern) => pattern.test(normalized));
+    })
+    .join("\n")
+    .trim();
+}
+
+function buildEnhanceOutputInstructions(sectionId: string): string {
+  if (sectionId !== "skills") {
+    return [
+      "- Use strong action verbs.",
+      "- Add quantified impact where possible (e.g. \"reduced load time by 40%\").",
+      "- Keep the same format (plain text, not HTML).",
+      "- Do not include markdown headings, section titles, explanations, or labels unless they already exist in this exact section format.",
+      "- Return ONLY the rewritten section text.",
+    ].join("\n");
+  }
+
+  return [
+    "- Reorganize the skills based on the quality issues and suggestions.",
+    "- Return ONLY valid JSON. No markdown, no code fence, no explanation.",
+    "- JSON schema:",
+    "{",
+    "  \"skillsLanguages\": \"comma-separated programming/query languages only\",",
+    "  \"skillsFrameworks\": \"comma-separated frameworks, libraries, big-data engines, orchestration tools\",",
+    "  \"skillsDatabases\": \"comma-separated databases, warehouses, query engines, storage systems\",",
+    "  \"skillsTools\": \"comma-separated cloud, DevOps, BI, governance, monitoring, and platforms\"",
+    "}",
+    "- Do not include \"Technical Skills\", \"Skills\", markdown bold, bullets, numbering, explanations, or extra headings.",
+    "- Remove duplicates and keep the strongest role-relevant skills first.",
+    "- Keep each JSON value concise enough to fit an input field.",
+  ].join("\n");
+}
+
+function extractJsonObject(text: string): Record<string, unknown> | null {
+  const trimmed = text
+    .replace(/^```(?:json)?/i, "")
+    .replace(/```$/i, "")
+    .trim();
+  const start = trimmed.indexOf("{");
+  const end = trimmed.lastIndexOf("}");
+  if (start === -1 || end === -1 || end <= start) return null;
+  try {
+    const parsed = JSON.parse(trimmed.slice(start, end + 1));
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    return parsed as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+function cleanEnhancedFieldValue(value: unknown): string {
+  if (Array.isArray(value)) {
+    return value
+      .filter((item): item is string => typeof item === "string")
+      .map((item) => stripMarkdownEmphasis(item))
+      .filter(Boolean)
+      .join(", ");
+  }
+  if (typeof value !== "string") return "";
+  return stripResumeSectionHeadings(value)
+    .replace(/^\s*[-*•]\s*/, "")
+    .replace(/^\s*\d+[.)]\s*/, "")
+    .replace(/^[^:]{1,48}:\s*/, "")
+    .trim();
+}
+
+function getFirstStringValue(source: Record<string, unknown>, keys: string[]): string {
+  for (const key of keys) {
+    const value = cleanEnhancedFieldValue(source[key]);
+    if (value) return value;
+  }
+  return "";
+}
+
+function skillFieldFromEnhancementLabel(label: string): keyof ResumeFields | null {
+  const normalized = label.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  if (/\b(language|languages|programming|scripting|querying)\b/.test(normalized)) {
+    return "skillsLanguages";
+  }
+  if (/\b(framework|frameworks|libraries|library|big data|data engineering|orchestration)\b/.test(normalized)) {
+    return "skillsFrameworks";
+  }
+  if (/\b(database|databases|warehouse|warehousing|query engine|storage|cloud platform)\b/.test(normalized)) {
+    return "skillsDatabases";
+  }
+  if (/\b(tool|tools|platform|platforms|cloud|devops|infrastructure|visualization|bi|governance|monitoring)\b/.test(normalized)) {
+    return "skillsTools";
+  }
+  return null;
+}
+
+function parseMarkdownSkillsFields(rawEnhancedText: string): Partial<ResumeFields> | null {
+  const fields: Partial<ResumeFields> = {};
+  const lines = stripResumeSectionHeadings(rawEnhancedText)
+    .split("\n")
+    .map((line) => stripMarkdownEmphasis(line).replace(/^\s*[-*•]\s*/, "").trim())
+    .filter(Boolean);
+
+  for (const line of lines) {
+    const separatorIndex = line.indexOf(":");
+    if (separatorIndex === -1) continue;
+    const label = line.slice(0, separatorIndex);
+    const field = skillFieldFromEnhancementLabel(label);
+    const value = cleanEnhancedFieldValue(line.slice(separatorIndex + 1));
+    if (!field || !value) continue;
+    fields[field] = fields[field] ? `${fields[field]}, ${value}` : value;
+  }
+
+  return Object.keys(fields).length > 0 ? fields : null;
+}
+
+function parseEnhancedSkillsFields(rawEnhancedText: string): Partial<ResumeFields> | null {
+  const parsed = extractJsonObject(rawEnhancedText);
+  if (!parsed) return parseMarkdownSkillsFields(rawEnhancedText);
+
+  const fields: Partial<ResumeFields> = {
+    skillsLanguages: getFirstStringValue(parsed, [
+      "skillsLanguages",
+      "languages",
+      "programmingLanguages",
+      "programmingAndQueryLanguages",
+    ]),
+    skillsFrameworks: getFirstStringValue(parsed, [
+      "skillsFrameworks",
+      "frameworks",
+      "frameworksAndLibraries",
+      "dataEngineeringAndOrchestration",
+    ]),
+    skillsDatabases: getFirstStringValue(parsed, [
+      "skillsDatabases",
+      "databases",
+      "cloudPlatformsAndDataWarehousing",
+      "dataWarehousing",
+    ]),
+    skillsTools: getFirstStringValue(parsed, [
+      "skillsTools",
+      "tools",
+      "toolsAndPlatforms",
+      "devOpsAndInfrastructure",
+      "dataVisualization",
+    ]),
+  };
+
+  const nonEmptyFields = Object.fromEntries(
+    Object.entries(fields).filter(([, value]) => typeof value === "string" && value.trim().length > 0),
+  ) as Partial<ResumeFields>;
+
+  return Object.keys(nonEmptyFields).length > 0 ? nonEmptyFields : null;
+}
+
+function buildEnhancedTextFromFields(sectionId: string, fields: Partial<ResumeFields> | null): string {
+  if (sectionId !== "skills" || !fields) return "";
+  return [
+    fields.skillsLanguages ? `Languages: ${fields.skillsLanguages}` : "",
+    fields.skillsFrameworks ? `Frameworks & Libraries: ${fields.skillsFrameworks}` : "",
+    fields.skillsDatabases ? `Databases: ${fields.skillsDatabases}` : "",
+    fields.skillsTools ? `Tools & Platforms: ${fields.skillsTools}` : "",
+  ].filter(Boolean).join("\n");
+}
+
+function sanitizeEnhancedSectionText(sectionId: string, enhancedText: string): string {
+  const withoutHeadings = stripResumeSectionHeadings(enhancedText);
+  if (sectionId !== "skills") {
+    return withoutHeadings;
+  }
+
+  return withoutHeadings
+    .split("\n")
+    .map((line) => stripMarkdownEmphasis(line))
+    .filter((line) => line.trim().length > 0)
+    .join("\n")
+    .trim();
+}
+
 // ── Feature keys (single source of truth — also used by Plan.md sync seed) ────
 export const RESUME_FEATURE_KEYS = {
   GENERATE: "resume_generate",
@@ -654,6 +846,7 @@ ${templateCode}
 export async function enhanceSection(input: EnhanceSectionInput): Promise<{
   sectionId: string;
   enhancedText: string;
+  enhancedFields?: Partial<ResumeFields>;
   creditsUsed: number;
   creditsRemaining: number;
   cached: boolean;
@@ -680,6 +873,7 @@ export async function enhanceSection(input: EnhanceSectionInput): Promise<{
       // (name/email are locked and must not be altered)
       const isPersonalInfo = sectionId === "personalInfo";
 
+      const outputInstructions = buildEnhanceOutputInstructions(sectionId);
       const prompt = isPersonalInfo
         ? `
 You are an expert resume writer. The candidate's professional title / role line needs to be more specific, impactful, and ATS-friendly.
@@ -712,11 +906,8 @@ SUGGESTED IMPROVEMENTS (apply all of these):
 ${qualitySuggestions.map((s, i) => `${i + 1}. ${s}`).join("\n")}` : ""}
 
 Instructions:
-- Use strong action verbs.
-- Add quantified impact where possible (e.g. "reduced load time by 40%").
-- Keep the same format (plain text, not HTML).
+${outputInstructions}
 ${(qualityIssues && qualityIssues.length > 0) ? "- The QUALITY ISSUES above are the most important things to fix — prioritise them above all else." : ""}
-- Return ONLY the rewritten section text with no explanation.
         `.trim();
 
       const response = await ai.chat.send({
@@ -726,7 +917,10 @@ ${(qualityIssues && qualityIssues.length > 0) ? "- The QUALITY ISSUES above are 
         },
       });
 
-      const enhancedText = response.choices[0]?.message?.content?.trim() ?? "";
+      const rawEnhancedText = response.choices[0]?.message?.content?.trim() ?? "";
+      const enhancedFields = sectionId === "skills" ? parseEnhancedSkillsFields(rawEnhancedText) : null;
+      const enhancedTextFromFields = buildEnhancedTextFromFields(sectionId, enhancedFields);
+      const enhancedText = enhancedTextFromFields || sanitizeEnhancedSectionText(sectionId, rawEnhancedText);
       if (!enhancedText) {
         throw new AppError(502, "AI returned an empty enhancement");
       }
@@ -734,6 +928,7 @@ ${(qualityIssues && qualityIssues.length > 0) ? "- The QUALITY ISSUES above are 
       return {
         sectionId,
         enhancedText,
+        ...(enhancedFields ? { enhancedFields } : {}),
         _aiUsage: { aiModel: OPENROUTER_MODEL },
       };
     },
@@ -742,6 +937,7 @@ ${(qualityIssues && qualityIssues.length > 0) ? "- The QUALITY ISSUES above are 
   return {
     sectionId: result.sectionId,
     enhancedText: result.enhancedText,
+    ...(result.enhancedFields ? { enhancedFields: result.enhancedFields } : {}),
     creditsUsed,
     creditsRemaining,
     cached,
@@ -1605,7 +1801,7 @@ async function _exportResumeHtmlInner(
   // ── Phase 1: resolve & preprocess HTML ─────────────────────────────────────
   const tHtmlStart = Date.now();
   let html: string;
-  let suggestedName = "resume";
+  let suggestedName = input.suggestedFilename?.trim() || "resume";
   log("phase1_start");
 
   if (input.populatedHtml) {
@@ -1615,7 +1811,7 @@ async function _exportResumeHtmlInner(
     if (!resume) {
       throw new AppError(404, "Resume not found");
     }
-    suggestedName = resume.title || suggestedName;
+    suggestedName = input.suggestedFilename?.trim() || resume.title || suggestedName;
     html = `<html><body><pre>${JSON.stringify(resume.fields, null, 2)}</pre></body></html>`;
   } else {
     throw new AppError(400, "resumeId or populatedHtml is required");
