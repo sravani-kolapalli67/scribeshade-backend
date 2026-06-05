@@ -111,6 +111,16 @@ function formatTurnMemory(turnMemory: TurnMemoryEntry[]): string {
     .join("\n\n");
 }
 
+function formatNormalizedTranscriptContext(
+  blocks: NormalizedTranscriptBlock[],
+): string {
+  if (blocks.length === 0) return "No recent speaker transcript context.";
+  return blocks
+    .slice(-12)
+    .map((block) => `- ${block.speakerType}: ${block.correctedText}`)
+    .join("\n");
+}
+
 function collectCorrections(blocks: NormalizedTranscriptBlock[]): QuestionMetaCorrection[] {
   return blocks.flatMap((block) => block.corrections).slice(0, 12);
 }
@@ -123,6 +133,7 @@ function questionSource(metadata?: AIAnswerLiveContextMetadata): string {
 function buildContextPacket(input: {
   reconstructedQuestion: ReconstructedQuestion;
   decision: AnswerDecision;
+  normalizedBlocks: NormalizedTranscriptBlock[];
   candidateDigest: CandidateContextDigestValue;
   activeTopic: ActiveTopicMemory | null;
   turnMemory: TurnMemoryEntry[];
@@ -136,6 +147,10 @@ function buildContextPacket(input: {
     "QUESTION EVIDENCE:",
     input.reconstructedQuestion.rawEvidence.map((line) => `- ${line}`).join("\n") || "- none",
     "",
+    "RECENT SPEAKER TRANSCRIPT CONTEXT:",
+    "Use these lines only as nearby conversation context. INTERVIEWER lines are question evidence; CANDIDATE lines are candidate/user context, not a separate question unless CURRENT QUESTION explicitly depends on them.",
+    formatNormalizedTranscriptContext(input.normalizedBlocks),
+    "",
     "CANDIDATE CONTEXT:",
     formatCandidateDigest(input.candidateDigest),
     "",
@@ -144,8 +159,6 @@ function buildContextPacket(input: {
     "",
     "RECENT TURN MEMORY:",
     formatTurnMemory(input.turnMemory),
-    "",
-    "HARD RULE: Answer only the CURRENT QUESTION above. Do not invent or merge another question.",
   ].join("\n");
 }
 
@@ -220,6 +233,7 @@ export async function orchestrateAIContext(
     contextPacket: buildContextPacket({
       reconstructedQuestion,
       decision,
+      normalizedBlocks,
       candidateDigest,
       activeTopic,
       turnMemory,

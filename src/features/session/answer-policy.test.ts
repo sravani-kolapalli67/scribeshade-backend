@@ -17,7 +17,8 @@ test("classifies concept explanation and suppresses experience", () => {
   });
   assert.equal(policy.answerIntent, "concept_explanation");
   assert.equal(policy.experienceSuppressed, true);
-  assert.ok(policy.policyBlock.includes("output_format: markdown_only_under_answer_marker"));
+  assert.equal(policy.policyBlock.includes("output_format: markdown_only_under_answer_marker"), false);
+  assert.equal(policy.policyBlock.includes("candidate_voice_rule"), false);
   assert.ok(policy.policyBlock.includes("**Core idea:**"));
 });
 
@@ -90,8 +91,9 @@ test("classifies project overview as experience, not concept explanation", () =>
   assert.equal(policy.experienceSuppressed, false);
   assert.ok(policy.policyBlock.includes("project_coverage: include_all_selected_projects"));
   assert.ok(policy.policyBlock.includes("project_source_precedence: selected_projects_first"));
-  assert.ok(policy.policyBlock.includes("candidate_voice_rule"));
-  assert.ok(policy.policyBlock.includes("project names, exact numbers"));
+  assert.equal(policy.policyBlock.includes("candidate_voice_rule"), false);
+  assert.equal(policy.policyBlock.includes("project names, exact numbers"), false);
+  assert.ok(policy.policyBlock.includes("project_depth_per_item"));
 });
 
 test("emits scenario markdown answer shape", () => {

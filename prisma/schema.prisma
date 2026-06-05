@@ -783,7 +783,16 @@ model AnswerGenerationSnapshot {
   ragContext                 Json?    @default("[]") // string[]
   generatedAnswer            String   @db.Text
   modelUsed                  String
+  fromTranscriptChunkId      String?
+  toTranscriptChunkId        String?
+  detectedIntent             String?
+  resolvedIntentIds          String[] @default([])
+  questionGenerated          String?  @db.Text
+  sessionStateSummary        String?  @db.Text
+  confidence                 Float?
+  decisionMetadata           Json?    @default("{}")
   createdAt                  DateTime @default(now())
 
   @@index([sessionId])
+  @@index([sessionId, createdAt])
 }

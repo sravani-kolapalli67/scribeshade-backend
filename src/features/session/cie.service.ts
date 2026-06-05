@@ -77,6 +77,14 @@ export function isProjectExperienceQuestion(query: string | undefined): boolean 
   );
 }
 
+export function isExplicitProjectDetailQuestion(query: string | undefined): boolean {
+  if (!query || !query.trim()) return false;
+  const normalized = normalizeTranscriptForQuestionDetection(query).toLowerCase().trim();
+  return /\b(projects?|portfolio|what (did|have) you build|tell me about (your|the) project|problem statement|project work|things you built|tech stack|architecture|design choices?|impact|metrics|kpis?|challenges?|my role in|your role in|implemented|worked on|built|developed)\b/i.test(
+    normalized,
+  );
+}
+
 export function isProjectOverviewQuestion(query: string | undefined): boolean {
   if (!query || !query.trim()) return false;
   const normalized = normalizeTranscriptForQuestionDetection(query).toLowerCase().trim();
@@ -798,15 +806,16 @@ export async function buildOptimizedContext(
       ? (session as any).primaryProjectId.trim()
       : (selectedProjectIds[0] ?? null);
   const isProjectQuestion = isProjectExperienceQuestion(query);
+  const isProjectDetailQuestion = isExplicitProjectDetailQuestion(query);
   const isMixedExperienceProject = isMixedExperienceProjectQuestion(query);
   const isProjectOverview = isProjectOverviewQuestion(query);
   const resumeProjectFallbackActive =
     !hasSelectedProjects &&
-    isProjectQuestion &&
+    isProjectDetailQuestion &&
     !!session.resumeId;
   const projectPriorityActive =
     hasSelectedProjects &&
-    isProjectQuestion &&
+    isProjectDetailQuestion &&
     !options?.disableProjectPriority;
   const budgets = projectPriorityActive
     ? {
@@ -844,7 +853,9 @@ export async function buildOptimizedContext(
       resumeProjectFallbackActive ||
       (projectPriorityActive && isMixedExperienceProject)) &&
     (!projectPriorityActive || isMixedExperienceProject);
-  const includeProjects = shouldIncludeProjects(complexity);
+  const includeProjects =
+    shouldIncludeProjects(complexity) &&
+    (projectPriorityActive || isProjectDetailQuestion);
   const includeDocuments = shouldIncludeDocuments(complexity);
   const includeHistory = shouldIncludeHistory(complexity);
   const includeVector = contextMode !== "live" && shouldIncludeVectorRAG(complexity);
@@ -1034,7 +1045,7 @@ export async function buildOptimizedContext(
     complexity,
     hasSelectedProjects,
     projectPriorityMode: "project_questions_only",
-    isProjectQuestion,
+    isProjectQuestion: isProjectDetailQuestion,
   };
 }
 
@@ -1123,8 +1134,18 @@ export async function createGenerationSnapshot(params: {
   generatedAnswer: string;
   modelUsed: string;
   context: any;
+  segmenter?: {
+    fromTranscriptChunkId?: string;
+    toTranscriptChunkId?: string;
+    detectedIntent: string;
+    resolvedIntentIds: string[];
+    questionForDisplay: string;
+    sessionStateSummary: string;
+    confidence: number;
+    decisionMetadata: any;
+  };
 }) {
-  const { id, sessionId, originalQuestionTranscript, generatedAnswer, modelUsed, context } = params;
+  const { id, sessionId, originalQuestionTranscript, generatedAnswer, modelUsed, context, segmenter } = params;
 
   // Retrieve transcript window
   const windowData = await captureTranscriptWindow(sessionId, originalQuestionTranscript);
@@ -1151,6 +1172,14 @@ export async function createGenerationSnapshot(params: {
       ragContext: context.vectorContext ? [context.vectorContext] : [],
       generatedAnswer,
       modelUsed,
+      fromTranscriptChunkId: segmenter?.fromTranscriptChunkId,
+      toTranscriptChunkId: segmenter?.toTranscriptChunkId,
+      detectedIntent: segmenter?.detectedIntent,
+      resolvedIntentIds: segmenter?.resolvedIntentIds || [],
+      questionGenerated: segmenter?.questionForDisplay,
+      sessionStateSummary: segmenter?.sessionStateSummary,
+      confidence: segmenter?.confidence,
+      decisionMetadata: segmenter?.decisionMetadata,
     },
   });
 }

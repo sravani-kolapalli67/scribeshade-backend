@@ -4,6 +4,7 @@ import type { ActiveTopicMemory } from "./topic-memory.service";
 import {
   classifyConversationIntent,
   deriveTopicFromAnyText,
+  stripLeadingConjunctionsAndFillers,
   type ConversationIntent,
 } from "./answer-quality";
 
@@ -51,8 +52,9 @@ function isQuestionLike(text: string): boolean {
   const cleaned = text.trim();
   if (!cleaned) return false;
   if (cleaned.includes("?")) return true;
-  return /^(what|why|how|when|where|which|who|can|could|would|should|is|are|do|does|did|explain|define|write|implement|design|debug|optimi[sz]e)\b/i.test(
-    cleaned,
+  const stripped = stripLeadingConjunctionsAndFillers(cleaned);
+  return /^(what|why|how|when|where|which|who|can|could|would|should|is|are|do|does|did|explain|define|describe|tell me|introduce|walk me|write|implement|design|debug|optimi[sz]e)\b/i.test(
+    stripped,
   );
 }
 
@@ -62,6 +64,60 @@ function isNoise(text: string): boolean {
   return /^(hi|hello|hey|okay|ok|yes|no|right|fine|thank you|thanks|can you hear me|am i audible)$/.test(
     cleaned,
   );
+}
+
+function hasFollowupAnchor(input: {
+  detection?: AIAnswerLiveContextMetadata["activeQuestionDetection"];
+  metadata?: AIAnswerLiveContextMetadata;
+  activeTopic: ActiveTopicMemory | null;
+}): boolean {
+  return Boolean(
+    input.activeTopic ||
+      input.detection?.referencedHistoryTurnId ||
+      input.metadata?.selectedAnswerId ||
+      input.metadata?.selectedAnswerText ||
+      input.metadata?.previousAiAnswer ||
+      (input.metadata?.previousAiAnswers && input.metadata.previousAiAnswers.length > 0),
+  );
+}
+
+function answerabilityReason(input: {
+  displayQuestion: string;
+  intent: ReconstructedQuestionIntent;
+  confidence: number;
+  isFollowUp: boolean;
+  hasAnchor: boolean;
+  detectionIgnoredNoise: boolean;
+}): string | undefined {
+  if (input.detectionIgnoredNoise || input.intent === "noise" || isNoise(input.displayQuestion)) {
+    return "low_confidence_noise";
+  }
+  const wordCount = input.displayQuestion.split(/\s+/).filter(Boolean).length;
+  const hasQuestionSignal = isQuestionLike(input.displayQuestion) || wordCount >= 4;
+  if (!hasQuestionSignal || input.confidence < 0.25) {
+    return "unclear_transcript";
+  }
+  if (input.isFollowUp && !input.hasAnchor && wordCount <= 4) {
+    return "missing_followup_target";
+  }
+  return undefined;
+}
+
+function shouldUseEvidenceOverDetection(input: {
+  detectionQuestion: string;
+  evidenceQuestion: string;
+}): boolean {
+  const detection = normalizeSpaces(input.detectionQuestion);
+  const evidence = normalizeSpaces(input.evidenceQuestion);
+  if (!detection || !evidence) return false;
+  if (isQuestionLike(detection)) return false;
+  const wordCount = detection.split(/\s+/).filter(Boolean).length;
+  const weakTail =
+    wordCount <= 4 &&
+    /^(?:and|or|then|also|plus|because|so|where|for|to|of|in|on|with|about)\b/i.test(
+      detection,
+    );
+  return weakTail || (wordCount <= 3 && evidence.length > detection.length + 20);
 }
 
 function chooseEvidence(blocks: NormalizedTranscriptBlock[], fallbackQuestion: string): string[] {
@@ -95,6 +151,13 @@ function mapIntent(intent: ConversationIntent, question: string): ReconstructedQ
       ? "project_explanation"
       : "behavioral";
   }
+  if (
+    /\b(experience|background|current role|your role|responsibilit(?:y|ies)|company|project|tech stack)\b/i.test(
+      question,
+    )
+  ) {
+    return "behavioral";
+  }
   if (intent === "UNKNOWN") return "noise";
   return "technical_concept";
 }
@@ -122,7 +185,10 @@ export function reconstructQuestion(
   const evidenceQuestion = normalizeSpaces(evidence.join(" "));
   const detectionQuestion = normalizeSpaces(detection?.cleanedQuestion || "");
   const fallback = normalizeSpaces(input.fallbackQuestion);
-  const displayQuestion = detectionQuestion || evidenceQuestion || fallback;
+  const displayQuestion =
+    shouldUseEvidenceOverDetection({ detectionQuestion, evidenceQuestion })
+      ? evidenceQuestion
+      : detectionQuestion || evidenceQuestion || fallback;
   const conversationIntent = classifyConversationIntent(displayQuestion);
   const isFollowUp =
     !!detection?.isFollowUp ||
@@ -144,12 +210,18 @@ export function reconstructQuestion(
         : 0.55),
   );
   const topicTitle = deriveTopicFromAnyText(`${displayQuestion} ${input.activeTopic?.topicTitle || ""}`);
-  const hasQuestionSignal = isQuestionLike(displayQuestion) || isFollowUp;
-  const shouldAnswer =
-    !detection?.ignoredNoise &&
-    intent !== "noise" &&
-    hasQuestionSignal &&
-    confidence >= 0.45;
+  const reason = answerabilityReason({
+    displayQuestion,
+    intent,
+    confidence,
+    isFollowUp,
+    hasAnchor: hasFollowupAnchor({
+      detection,
+      metadata: input.metadata,
+      activeTopic: input.activeTopic,
+    }),
+    detectionIgnoredNoise: !!detection?.ignoredNoise,
+  });
 
   return {
     displayQuestion,
@@ -161,7 +233,7 @@ export function reconstructQuestion(
     topicChanged: !!detection?.topicChanged,
     intent,
     confidence,
-    shouldAnswer,
-    reason: shouldAnswer ? undefined : "unclear_transcript",
+    shouldAnswer: !reason,
+    reason,
   };
 }

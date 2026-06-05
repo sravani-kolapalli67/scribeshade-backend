@@ -1,4 +1,6 @@
 import { z } from "zod";
+import type { AnswerClickMode } from "./question-composer.service";
+import type { QuestionQualityResult } from "./question-quality.service";
 
 export const AI_ANSWER_LIMITS = {
   recentTranscriptWindowMax: 60,
@@ -29,6 +31,14 @@ const answerModeSchema = z.enum([
 ]);
 
 const sourcePlatformSchema = z.enum(["web", "tauri"]);
+
+const answerClickModeSchema = z.enum([
+  "answer_latest_unanswered",
+  "answer_selected_intent",
+  "reanswer_previous",
+  "regenerate_answer",
+  "answer_followup",
+]);
 
 const speakerEntrySchema = z.object({
   speakerType: speakerTypeSchema,
@@ -63,7 +73,7 @@ const activeQuestionDetectionSchema = z.object({
 });
 
 export const aiAnswerRequestSchema = z.object({
-  transcript: z.string().trim().min(1),
+  transcript: z.string().trim().min(1).optional(),
   requestId: z.string().trim().min(1).max(120).optional(),
   sessionId: z.string().trim().min(1).max(120).optional(),
   currentQuestion: z.string().trim().optional(),
@@ -105,8 +115,12 @@ export const aiAnswerRequestSchema = z.object({
     .string()
     .max(AI_ANSWER_LIMITS.selectedAnswerTopicMaxChars)
     .optional(),
+  selectedIntentId: z.string().trim().min(1).max(120).optional(),
+  selectedAnswerIntentId: z.string().trim().min(1).max(120).optional(),
+  answerClickMode: answerClickModeSchema.optional(),
   answerMode: answerModeSchema.optional(),
   sourcePlatform: sourcePlatformSchema.optional(),
+  isCustomQuery: z.boolean().optional(),
   isRegenerate: z.boolean().optional(),
   regenerate: z.boolean().optional(),
   regenerateTargetAnswerId: z.string().trim().min(1).max(120).optional(),
@@ -119,18 +133,28 @@ export type AIAnswerRequestDTO = z.infer<typeof aiAnswerRequestSchema>;
 export type AIAnswerLiveContextMetadata = Omit<
   AIAnswerRequestDTO,
   "transcript" | "currentQuestion" | "patchedTranscript"
->;
+> & {
+  rawTranscriptForBackend?: string;
+  currentQuestionForBackend?: string;
+  backendQuestionQuality?: QuestionQualityResult;
+  backendQuestionCorrections?: string[];
+  frontendConfidenceDowngraded?: boolean;
+};
 
 export interface NormalizedAIAnswerRequest {
   resolvedQuestion: string;
-  resolvedFrom?: "patchedTranscript" | "currentQuestion" | "transcript" | "none";
+  resolvedFrom?:
+    | "patchedTranscript"
+    | "currentQuestion"
+    | "transcript"
+    | "none";
   liveContextMetadata?: AIAnswerLiveContextMetadata;
 }
 
 export function normalizeAIAnswerRequestBody(
   body: any,
 ): NormalizedAIAnswerRequest {
-  if (typeof body?.transcript !== "string") {
+  if (!body || typeof body !== "object") {
     return { resolvedQuestion: "", resolvedFrom: "none" };
   }
 
@@ -214,22 +238,54 @@ export function normalizeAIAnswerRequestBody(
   }
 
   const dto = parsed.data;
-  const resolvedFrom = dto.patchedTranscript?.trim()
-    ? "patchedTranscript"
-    : dto.currentQuestion?.trim()
-      ? "currentQuestion"
-      : "transcript";
-  const resolvedQuestion = resolvedFrom === "patchedTranscript"
-    ? dto.patchedTranscript!.trim()
-    : resolvedFrom === "currentQuestion"
-      ? dto.currentQuestion!.trim()
-      : dto.transcript.trim();
+  const patchedTranscript = dto.patchedTranscript?.trim() || "";
+  const currentQuestion = dto.currentQuestion?.trim() || "";
+  const transcriptText = dto.transcript?.trim() || "";
+  const resolvedQuestion =
+    patchedTranscript ||
+    (!!dto.isCustomQuery ? currentQuestion : "") ||
+    transcriptText ||
+    currentQuestion;
+  const resolvedFrom: NormalizedAIAnswerRequest["resolvedFrom"] =
+    patchedTranscript
+      ? "patchedTranscript"
+      : !!dto.isCustomQuery && currentQuestion
+        ? "currentQuestion"
+        : transcriptText
+          ? "transcript"
+          : currentQuestion
+            ? "currentQuestion"
+            : "none";
 
-  const { transcript, currentQuestion, patchedTranscript, ...liveContextMetadata } = dto;
+  const {
+    transcript: rawTranscript,
+    currentQuestion: currentQuestionHint,
+    patchedTranscript: _patchedTranscript,
+    ...liveContextMetadata
+  } = dto;
+  const enrichedLiveContextMetadata: AIAnswerLiveContextMetadata = {
+    ...liveContextMetadata,
+    rawTranscriptForBackend: rawTranscript,
+    currentQuestionForBackend: currentQuestionHint,
+  };
   return {
     resolvedQuestion,
     resolvedFrom,
     liveContextMetadata:
-      Object.keys(liveContextMetadata).length > 0 ? liveContextMetadata : undefined,
+      Object.keys(enrichedLiveContextMetadata).length > 0
+        ? enrichedLiveContextMetadata
+        : undefined,
   };
+}
+
+export function resolveAnswerClickMode(input: {
+  metadata?: AIAnswerLiveContextMetadata;
+  isRegenerate: boolean;
+}): AnswerClickMode {
+  if (input.metadata?.answerClickMode) return input.metadata.answerClickMode;
+  if (input.isRegenerate) return "regenerate_answer";
+  if (input.metadata?.selectedIntentId || input.metadata?.selectedAnswerIntentId) {
+    return "answer_selected_intent";
+  }
+  return "answer_latest_unanswered";
 }

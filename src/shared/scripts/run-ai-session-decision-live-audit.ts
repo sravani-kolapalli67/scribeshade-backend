@@ -17,7 +17,12 @@ import {
   toAnswerHistory,
 } from "../../features/session/answer-quality";
 import { buildRequestScopedPolicy } from "../../features/session/answer-policy";
-import { buildSystemMessage, buildUserMessage } from "../lib/prompt";
+import {
+  buildAnswerTaskMessage,
+  buildRuntimeContextMessage,
+  buildSystemMessage,
+  type AnswerPlan,
+} from "../lib/prompt";
 
 type SpeakerEntry = {
   speakerType: "interviewer" | "candidate" | "assistant" | "system";
@@ -280,12 +285,33 @@ async function generateAnswer(params: {
     aiDecision: params.decision,
   });
   const systemPrompt = buildSystemMessage(context);
-  const baseUserMessage = buildUserMessage(params.question, false, false, context);
-  const codeFollowupConstraint =
-    params.decision.requiresPreviousCode && codeContext.codeBlocks.length > 0
-      ? "\n- Answer ONLY using the selected prior answer/code as the follow-up target. Do not substitute resume/project context unless user explicitly asks for experience."
-      : "";
-  const userMessage = `${policy.policyBlock}${codeFollowupConstraint}\n${policy.codeContextBlock}\n\n${baseUserMessage}`;
+  const runtimeContextMessage = buildRuntimeContextMessage(context);
+  const answerPlan: AnswerPlan = {
+    mode: "live_ai_answer",
+    questions: [params.question],
+    intent: policy.answerIntent,
+    transcriptExcerpt: params.recentTranscriptWindow.slice(-4).join("\n"),
+    ...(target
+      ? {
+          followupAnchor: {
+            topic: target.topic || "general",
+            priorQuestion: target.question,
+            priorAnswerSummary: target.answer.replace(/```[\s\S]*?```/g, "[code omitted]").slice(0, 360),
+            ...(codeContext.preview
+              ? { codeSummary: `${codeContext.language || "code"}: ${codeContext.preview}`.slice(0, 360) }
+              : {}),
+          },
+        }
+      : {}),
+    requestDeltas: [
+      "Answer only the question listed above.",
+      params.decision.requiresPreviousCode && codeContext.codeBlocks.length > 0
+        ? "Use the follow-up anchor for prior code continuity."
+        : "",
+      "If the active input explicitly asks for code, provide a working implementation.",
+    ].filter(Boolean),
+  };
+  const userMessage = buildAnswerTaskMessage(answerPlan);
   const result = ai.callModel({
     model,
     maxOutputTokens: 1600,
@@ -293,6 +319,7 @@ async function generateAnswer(params: {
     store: false,
     input: [
       { role: "system", type: "message", content: systemPrompt },
+      { role: "user", type: "message", content: runtimeContextMessage },
       { role: "user", type: "message", content: userMessage },
     ],
   });
@@ -300,7 +327,7 @@ async function generateAnswer(params: {
   return {
     answer,
     targetAnswerId: target?.id || null,
-    codeContextInjected: policy.codeContextBlock.includes("FOLLOW-UP CODE CONTEXT"),
+    codeContextInjected: params.decision.requiresPreviousCode && codeContext.codeBlocks.length > 0,
     answerIntent: policy.answerIntent,
     answerMode: policy.effectiveAnswerMode,
   };

@@ -9,7 +9,14 @@ import path from "path";
 import { AppError } from "../../shared/middleware/error.middleware";
 import * as creditsService from "../credits/credits.service";
 import { creditDeductionQueue } from "../jobs/queue";
-import { buildSystemMessage, buildUserMessage, buildScreenAnalysisMessage, buildScreenSystemMessage } from "../../shared/lib/prompt";
+import {
+  buildActiveTaskV3,
+  buildAnswerRuntimeContext,
+  buildRuntimeContextMessage,
+  buildSystemMessage,
+  buildScreenAnalysisMessage,
+  buildScreenSystemMessage,
+} from "../../shared/lib/prompt";
 import {
   buildOptimizedContext,
   isProjectOverviewQuestion,
@@ -21,7 +28,9 @@ import {
   ANALYTICS_SYSTEM_PROMPT,
   buildAnalyticsUserPrompt,
 } from "../../shared/prompts/analytics";
-import type { AIAnswerLiveContextMetadata } from "./ai-answer.dto";
+import {
+  type AIAnswerLiveContextMetadata,
+} from "./ai-answer.dto";
 import { buildRequestScopedPolicy } from "./answer-policy";
 import {
   decideAISessionState,
@@ -51,6 +60,25 @@ import {
 } from "./context-orchestrator.service";
 import { writeTopicMemory } from "./topic-memory.service";
 import { writeTurnMemory } from "./turn-memory.service";
+import {
+  appendSegmenterTranscriptMemory,
+  writeSegmenterAnswerMemory,
+  type AIAnswerSegmenterResult,
+} from "./ai-answer-segmenter.service";
+import {
+  readAnswerLedger,
+  readIntentLedger,
+  rebuildLedgersFromDurableState,
+  recordAnswerInLedgers,
+  scheduleQuestionComposer,
+  type AnswerLedger,
+  type IntentLedger,
+} from "./question-composer.service";
+import {
+  filterPersistableAnswerPairs,
+  shouldScheduleBackgroundComposer,
+  type ExtractedAnswerPair,
+} from "./ai-answer-safeguards";
 
 const ai = new OpenRouter({
   apiKey: process.env.OPENROUTER_API_KEY || "",
@@ -64,6 +92,30 @@ const AI_DECISION_CONFIDENCE_THRESHOLD = 0.62;
 const LIVE_TRANSCRIPT_GROUP_ID = "live-transcript";
 const LEGACY_TRANSCRIPT_FLUSH_DELAY_MS = Number(process.env.LEGACY_TRANSCRIPT_FLUSH_DELAY_MS || 7000);
 const liveTranscriptFlushTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const KNOWN_TECH_TERMS = [
+  "Node.js",
+  "NestJS",
+  "MongoDB",
+  "Redis",
+  "React",
+  "PostgreSQL",
+  "TypeScript",
+  "JavaScript",
+  "Express",
+  "AWS",
+  "Docker",
+  "Kubernetes",
+  "Prisma",
+  "BullMQ",
+  "OpenRouter",
+  "Python",
+  "PySpark",
+  "Databricks",
+  "Azure Data Factory",
+  "SQL",
+  "MySQL",
+  "GraphQL",
+] as const;
 
 type LiveMessageRole = "INTERVIEWER" | "AI_ASSISTANT" | "USER";
 
@@ -81,6 +133,23 @@ type AppendMessageResult = {
   messageId?: string;
   transcriptChunkId?: string;
   saved: boolean;
+};
+
+type TranscriptEvidenceSpeaker = "interviewer" | "candidate";
+
+type TranscriptEvidenceLine = {
+  speaker: TranscriptEvidenceSpeaker;
+  text: string;
+  chunkId?: string;
+  timestamp?: number;
+  source: "db" | "payload" | "window" | "raw";
+};
+
+type TranscriptEvidenceV3 = {
+  lines: TranscriptEvidenceLine[];
+  text: string;
+  compactQuery: string;
+  currentQuestionHint?: string;
 };
 
 const SESSION_LIST_SELECT = {
@@ -495,6 +564,379 @@ function synthesizeArchitectureFlowFromProjectContext(
   }
 
   return "Source Data -> Processing/Orchestration -> Storage/Serving -> Output";
+}
+
+function normalizePromptSpaces(text: string): string {
+  return (text || "").replace(/\s+/g, " ").trim();
+}
+
+function clipPromptText(text: string, maxChars: number): string {
+  const normalized = normalizePromptSpaces(text);
+  if (normalized.length <= maxChars) return normalized;
+  return `${normalized.slice(0, Math.max(0, maxChars - 16)).trim()}...`;
+}
+
+function maybeScheduleQuestionComposer(input: Parameters<typeof scheduleQuestionComposer>[0]): boolean {
+  if (!shouldScheduleBackgroundComposer(process.env.AI_BACKGROUND_COMPOSER_ENABLED)) {
+    return false;
+  }
+  scheduleQuestionComposer(input);
+  return true;
+}
+
+function stripAnswerPromptNoise(text: string): string {
+  return normalizePromptSpaces(
+    (text || "")
+      .replace(/={3}QUESTION_META=[\s\S]*?={3}/g, "")
+      .replace(/```[\s\S]*?```/g, "[code omitted]"),
+  );
+}
+
+function formatTranscriptSpeaker(value: unknown): string {
+  if (value === "interviewer" || value === SpeakerType.INTERVIEWER) return "Interviewer";
+  if (value === "candidate" || value === SpeakerType.CANDIDATE || value === "user") return "Candidate";
+  if (value === "assistant") return "Assistant";
+  return "Speaker";
+}
+
+function mapTranscriptEvidenceSpeaker(value: unknown): TranscriptEvidenceSpeaker | null {
+  if (value === "interviewer" || value === SpeakerType.INTERVIEWER || value === "Interviewer") {
+    return "interviewer";
+  }
+  if (
+    value === "candidate" ||
+    value === SpeakerType.CANDIDATE ||
+    value === "user" ||
+    value === "User" ||
+    value === "USER"
+  ) {
+    return "candidate";
+  }
+  return null;
+}
+
+function normalizeEvidenceKeyText(text: string): string {
+  return normalizePromptSpaces(text)
+    .toLowerCase()
+    .replace(/[^a-z0-9\s?]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function isTranscriptEvidenceFiller(text: string): boolean {
+  const normalized = normalizeEvidenceKeyText(text).replace(/\?/g, "");
+  if (!normalized) return true;
+  return /^(hi|hello|hey|okay|ok|yeah|yes|no|right|fine|hmm|um|uh|thanks|thank you|lets start|let s start|can you hear me|am i audible)$/.test(normalized);
+}
+
+function isUnavailableProfileText(text: string): boolean {
+  const normalized = normalizePromptSpaces(text).toLowerCase();
+  return !normalized ||
+    normalized === "no resume provided." ||
+    normalized === "no resume provided" ||
+    normalized === "no resume digest available." ||
+    normalized === "minimal candidate context only.";
+}
+
+function extractCandidateNameFromContext(text: string): string | undefined {
+  const match = text.match(/\bname\s*:\s*([^\n|,]+)/i);
+  const candidate = normalizePromptSpaces(match?.[1] || "");
+  if (!candidate || /\bcandidate full name\b/i.test(candidate)) return undefined;
+  if (/[\[\]<>]/.test(candidate)) return undefined;
+  return candidate.slice(0, 80);
+}
+
+function deriveKnownSkillsFromContext(text: string): string[] {
+  const normalized = text.toLowerCase();
+  const found = KNOWN_TECH_TERMS.filter((term) =>
+    normalized.includes(term.toLowerCase()),
+  );
+  return [...new Set(found)].slice(0, 10);
+}
+
+function buildCandidateProfileDigest(input: {
+  resumeDigest: string;
+  projectDigest: string;
+  sessionUserName?: string | null;
+}): string {
+  const resumeDigest = isUnavailableProfileText(input.resumeDigest) ? "" : input.resumeDigest;
+  const projectDigest = isUnavailableProfileText(input.projectDigest) ? "" : input.projectDigest;
+  const configuredFallbackName = normalizePromptSpaces(process.env.AI_CANDIDATE_NAME_FALLBACK || "");
+  const name =
+    extractCandidateNameFromContext(resumeDigest) ||
+    normalizePromptSpaces(input.sessionUserName || "") ||
+    (configuredFallbackName && process.env.NODE_ENV !== "production" ? configuredFallbackName : "");
+  const skills = deriveKnownSkillsFromContext(`${resumeDigest}\n${projectDigest}`);
+  const lines = [
+    name ? `Name: ${name}` : "",
+    resumeDigest ? clipPromptText(resumeDigest, 700) : "Candidate facts: Not provided.",
+    `Known skills: ${skills.length > 0 ? skills.join(", ") : "Not provided."}`,
+  ].filter(Boolean);
+  return lines.join("\n");
+}
+
+function parseWindowEvidenceLine(line: string, index: number): TranscriptEvidenceLine | null {
+  const normalized = normalizePromptSpaces(line);
+  if (!normalized || isTranscriptEvidenceFiller(normalized)) return null;
+
+  const speakerMatch = normalized.match(/^\[?(interviewer|candidate|user|assistant|system)\]?\s*:\s*(.+)$/i);
+  if (speakerMatch?.[1] && speakerMatch[2]) {
+    const speaker = mapTranscriptEvidenceSpeaker(speakerMatch[1].toLowerCase());
+    if (!speaker) return null;
+    return {
+      speaker,
+      text: speakerMatch[2].trim(),
+      timestamp: Date.now() + index,
+      source: "window",
+    };
+  }
+
+  return {
+    speaker: "candidate",
+    text: normalized,
+    timestamp: Date.now() + index,
+    source: "window",
+  };
+}
+
+function dedupeTranscriptEvidence(lines: TranscriptEvidenceLine[]): TranscriptEvidenceLine[] {
+  const byKey = new Map<string, TranscriptEvidenceLine>();
+  for (const line of lines) {
+    const text = normalizePromptSpaces(line.text);
+    if (!text || isTranscriptEvidenceFiller(text)) continue;
+    const timestampWindow =
+      typeof line.timestamp === "number" && Number.isFinite(line.timestamp)
+        ? Math.floor(line.timestamp / 2000)
+        : "no-ts";
+    const key = `${line.speaker}:${normalizeEvidenceKeyText(text)}:${timestampWindow}`;
+    const existing = byKey.get(key);
+    if (!existing || (line.source === "db" && existing.source !== "db")) {
+      byKey.set(key, { ...line, text });
+    }
+  }
+  return [...byKey.values()]
+    .sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0))
+    .slice(-12);
+}
+
+async function loadDbTranscriptEvidenceLines(sessionId: string): Promise<TranscriptEvidenceLine[]> {
+  const chunks = await prisma.transcriptChunk.findMany({
+    where: { sessionId },
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    take: 24,
+    select: {
+      id: true,
+      speakerType: true,
+      question: true,
+      content: true,
+      startTime: true,
+      createdAt: true,
+    },
+  });
+
+  return chunks
+    .reverse()
+    .map((chunk): TranscriptEvidenceLine | null => {
+      const speaker = mapTranscriptEvidenceSpeaker(chunk.speakerType);
+      const text = normalizePromptSpaces(chunk.question || chunk.content || "");
+      if (!speaker || !text || isTranscriptEvidenceFiller(text)) return null;
+      return {
+        speaker,
+        text,
+        chunkId: chunk.id,
+        timestamp: typeof chunk.startTime === "number" ? chunk.startTime : chunk.createdAt.getTime(),
+        source: "db",
+      };
+    })
+    .filter((line): line is TranscriptEvidenceLine => Boolean(line));
+}
+
+function buildPayloadTranscriptEvidenceLines(
+  metadata: AIAnswerLiveContextMetadata | undefined,
+): TranscriptEvidenceLine[] {
+  const speakerLines =
+    metadata?.speakerSeparatedTranscript?.map((entry, index): TranscriptEvidenceLine | null => {
+      const speaker = mapTranscriptEvidenceSpeaker(entry.speakerType);
+      const text = normalizePromptSpaces(entry.content || "");
+      if (!speaker || !text || isTranscriptEvidenceFiller(text)) return null;
+      return {
+        speaker,
+        text,
+        timestamp: typeof entry.timestamp === "number" ? entry.timestamp : Date.now() + index,
+        source: "payload",
+      };
+    }) || [];
+
+  const windowLines =
+    metadata?.recentTranscriptWindow
+      ?.map((line, index) => parseWindowEvidenceLine(line, index))
+      .filter((line): line is TranscriptEvidenceLine => Boolean(line)) || [];
+
+  return [...speakerLines.filter((line): line is TranscriptEvidenceLine => Boolean(line)), ...windowLines];
+}
+
+async function buildTranscriptEvidenceV3(input: {
+  sessionId: string;
+  transcript: string;
+  metadata?: AIAnswerLiveContextMetadata;
+}): Promise<TranscriptEvidenceV3> {
+  const [dbLines, payloadLines] = await Promise.all([
+    loadDbTranscriptEvidenceLines(input.sessionId).catch((error) => {
+      console.warn("[AI Answer] transcript evidence db load failed", {
+        sessionId: input.sessionId,
+        error,
+      });
+      return [] as TranscriptEvidenceLine[];
+    }),
+    Promise.resolve(buildPayloadTranscriptEvidenceLines(input.metadata)),
+  ]);
+  const rawText = normalizePromptSpaces(
+    input.metadata?.rawTranscriptForBackend || input.transcript || "",
+  );
+  const rawLine: TranscriptEvidenceLine[] =
+    rawText && !isTranscriptEvidenceFiller(rawText)
+      ? [{ speaker: "candidate", text: rawText, timestamp: Date.now(), source: "raw" }]
+      : [];
+  const lines = dedupeTranscriptEvidence([...dbLines, ...payloadLines, ...rawLine]);
+  const text = lines
+    .map((line) => `- ${line.speaker}: ${clipPromptText(line.text, 220)}`)
+    .join("\n");
+  const compactQuery = lines
+    .map((line) => line.text)
+    .join(" ")
+    .trim();
+  const currentQuestionHint = normalizePromptSpaces(input.metadata?.currentQuestionForBackend || "");
+
+  return {
+    lines,
+    text,
+    compactQuery: compactQuery || currentQuestionHint || rawText,
+    ...(currentQuestionHint ? { currentQuestionHint } : {}),
+  };
+}
+
+function compactTranscriptExcerpt(input: {
+  segmenterResult?: AIAnswerSegmenterResult;
+  metadata?: AIAnswerLiveContextMetadata;
+  fallbackQuestion: string;
+  includeCandidate: boolean;
+}): string {
+  const segmenterLines =
+    input.segmenterResult?.boundedTranscript
+      .filter(
+        (chunk) =>
+          chunk.speaker === "interviewer" ||
+          (input.includeCandidate && chunk.speaker === "candidate"),
+      )
+      .map((chunk) => `${formatTranscriptSpeaker(chunk.speaker)}: ${chunk.text}`) || [];
+  const metadataLines =
+    input.metadata?.speakerSeparatedTranscript
+      ?.filter(
+        (entry) =>
+          entry.speakerType === "interviewer" ||
+          (input.includeCandidate && entry.speakerType === "candidate"),
+      )
+      .map((entry) => `${formatTranscriptSpeaker(entry.speakerType)}: ${entry.content}`) || [];
+  const rawLines = segmenterLines.length > 0 ? segmenterLines : metadataLines;
+  const seen = new Set<string>();
+  const uniqueLines = rawLines
+    .map((line) => normalizePromptSpaces(line))
+    .filter((line) => {
+      const key = line.toLowerCase();
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .slice(-8);
+  if (uniqueLines.length > 0) return uniqueLines.join("\n");
+  return input.fallbackQuestion ? `Interviewer: ${input.fallbackQuestion}` : "";
+}
+
+function compactTurnMemorySummary(input: {
+  activeTopic?: string;
+  turnMemory?: Array<{
+    questionClean?: string;
+    answerSummary?: string;
+    answerType?: string;
+    keyClaims?: string[];
+    codeBlocks?: string[];
+  }>;
+  segmenterSummary?: string;
+}): string {
+  const turnLines =
+    input.turnMemory?.slice(0, 3).map((entry, index) => {
+      const codeNote = entry.codeBlocks?.length ? " code: present" : "";
+      const claims = entry.keyClaims?.slice(0, 2).join("; ");
+      return [
+        `Turn ${index + 1}: ${clipPromptText(entry.questionClean || "", 120)}`,
+        `type=${entry.answerType || "prose"}${codeNote}`,
+        `summary=${clipPromptText(entry.answerSummary || claims || "", 220)}`,
+      ].join(" | ");
+    }) || [];
+  return [
+    input.activeTopic ? `Current topic: ${input.activeTopic}` : "",
+    input.segmenterSummary ? `Session state: ${clipPromptText(input.segmenterSummary, 260)}` : "",
+    ...turnLines,
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+function compactComposerMemorySummary(input: {
+  intentLedger?: IntentLedger;
+  answerLedger?: AnswerLedger;
+}): string {
+  const intentLines =
+    input.intentLedger?.intents
+      .slice(-8)
+      .map((intent, index) => {
+        const parent = intent.parentIntentId ? ` parent=${intent.parentIntentId}` : "";
+        return [
+          `Intent ${index + 1}: [${intent.status}] ${clipPromptText(intent.question, 140)}`,
+          `kind=${intent.intent}`,
+          `topic=${intent.topic || "general"}${parent}`,
+        ].join(" | ");
+      }) || [];
+  const answerLines =
+    input.answerLedger?.answers
+      .slice(-5)
+      .map((answer, index) => {
+        const code = answer.codeBlocks?.length ? " code=present" : "";
+        return [
+          `Answer ${index + 1}: ${clipPromptText(answer.question, 120)}`,
+          `topic=${answer.topic || "general"}${code}`,
+          `summary=${clipPromptText(answer.answerSummary, 220)}`,
+        ].join(" | ");
+      }) || [];
+  return [...intentLines, ...answerLines].filter(Boolean).join("\n");
+}
+
+function compactFollowupAnchor(input: {
+  selectedTarget: any;
+  selectedCodeContext: { language: string | null; preview: string | null; codeBlocks: string[] };
+  fallbackTopic: string;
+}): { priorTopic?: string; priorAnswerSummary?: string; codeMemory?: string } | undefined {
+  if (!input.selectedTarget) return undefined;
+  const codeSummary =
+    input.selectedCodeContext.preview || input.selectedCodeContext.codeBlocks[0] || "";
+  return {
+    priorTopic: input.selectedTarget.topic || input.fallbackTopic || "general",
+    priorAnswerSummary: clipPromptText(
+      [
+        input.selectedTarget.question ? `Question: ${input.selectedTarget.question}` : "",
+        input.selectedTarget.answer ? `Answer: ${stripAnswerPromptNoise(input.selectedTarget.answer)}` : "",
+      ].filter(Boolean).join(" "),
+      420,
+    ),
+    ...(codeSummary
+      ? {
+          codeMemory: clipPromptText(
+            `${input.selectedCodeContext.language || "code"}: ${codeSummary}`,
+            520,
+          ),
+        }
+      : {}),
+  };
 }
 
 async function loadLiveAnswerHistoryMessages(sessionId: string): Promise<
@@ -1387,9 +1829,12 @@ function processAIStream(
   authoritativeQuestion?: string,
   questionMeta?: QuestionMeta,
   orchestration?: ContextOrchestrationResult,
+  segmenterResult?: AIAnswerSegmenterResult,
+  transcriptEvidenceForValidation?: string,
 ) {
   const segmentMarker = /\n?={3,}NEXT_QUESTION={3,}\n?/i;
   const rewriteFirstQuestionBlock = (text: string): string => {
+    if (segmenterResult && segmenterResult.intentsToAnswer.length > 1) return text;
     if (!authoritativeQuestion?.trim()) return text;
     const questionLine = authoritativeQuestion.replace(/\s+/g, " ").trim();
     if (!questionLine) return text;
@@ -1469,13 +1914,26 @@ function processAIStream(
     // Post-processing: extract Q&A and persist (fire-and-forget)
     (async () => {
       try {
-        const extractedPairs = extractPairs(finalResponse);
+        const rawExtractedPairs = extractPairs(finalResponse);
+        const extractedPairs = segmentMarker.test(finalResponse)
+          ? rawExtractedPairs
+          : filterPersistableAnswerPairs({
+              pairs: rawExtractedPairs,
+              evidenceText: transcriptEvidenceForValidation || fallbackQuestion,
+              sessionId,
+            });
 
         if (extractedPairs.length > 0 && session) {
           // Ephemeral sessions — skip all persistence (QA table + messages).
           // The user opted out of transcript saving; no data should outlive the session.
           if (session.saveTranscription !== false) {
-            for (const { question, answer } of extractedPairs) {
+            for (const [pairIndex, { question, answer }] of extractedPairs.entries()) {
+              const pairSnapshotId =
+                snapshotId && pairIndex === 0
+                  ? snapshotId
+                  : snapshotId
+                    ? crypto.randomUUID()
+                    : undefined;
               await qaService
                 .createQA({
                   userId: session.userId,
@@ -1488,15 +1946,16 @@ function processAIStream(
                 })
                 .catch((e) => console.error("Auto-save QA Error:", e));
 
-              if (snapshotId && contextForCall && targetModel && !isRegenerate) {
+              if (pairSnapshotId && contextForCall && targetModel && !isRegenerate) {
                 const { createGenerationSnapshot } = require("./cie.service");
                 await createGenerationSnapshot({
-                  id: snapshotId,
+                  id: pairSnapshotId,
                   sessionId,
                   originalQuestionTranscript: question,
                   generatedAnswer: answer,
                   modelUsed: targetModel,
                   context: contextForCall,
+                  segmenter: segmenterResult,
                 }).catch((e: any) => console.error("createGenerationSnapshot Error:", e));
               }
 
@@ -1514,7 +1973,7 @@ function processAIStream(
                   question,
                   answer,
                   undefined,
-                  snapshotId,
+                  pairSnapshotId,
                 ).catch((e) => console.error("appendMessage Error:", e));
                 if (appendResult && orchestration) {
                   const topicTitle =
@@ -1547,6 +2006,23 @@ function processAIStream(
                   }).catch((e) => console.error("writeTopicMemory Error:", e));
                 }
               }
+              await recordAnswerInLedgers({
+                sessionId,
+                answerId: pairSnapshotId || snapshotId || crypto.randomUUID(),
+                question,
+                answer,
+                topic:
+                  orchestration?.questionMeta.topic ||
+                  deriveTopicFromAnyText(question),
+              }).catch((e) => console.error("recordAnswerInLedgers Error:", e));
+            }
+            if (snapshotId && segmenterResult) {
+              await writeSegmenterAnswerMemory({
+                sessionId,
+                snapshotId,
+                result: segmenterResult,
+                answer: finalResponse,
+              }).catch((e) => console.error("writeSegmenterAnswerMemory Error:", e));
             }
           }
         }
@@ -1556,6 +2032,12 @@ function processAIStream(
     })();
   }
   return streamGenerator();
+}
+
+function noNewQuestionStream() {
+  return (async function* () {
+    yield { text: "===NO_NEW_QUESTION===" };
+  })();
 }
 
 /**
@@ -1582,8 +2064,7 @@ export async function analyzeScreen(
   const screenQuestionRaw =
     liveContextMetadata?.activeQuestionDetection?.cleanedQuestion?.trim() ||
     liveContextMetadata?.activeQuestionDetection?.activeQuestion?.trim() ||
-    (liveContextMetadata?.recentTranscriptWindow || []).join(" ").trim() ||
-    "screen visible interview question";
+    (liveContextMetadata?.recentTranscriptWindow || []).join(" ").trim();
   const guardedScreenQuestion = guardCurrentQuestion({
     resolvedQuestion: screenQuestionRaw,
     recentTranscriptWindow: liveContextMetadata?.recentTranscriptWindow,
@@ -1619,24 +2100,26 @@ export async function analyzeScreen(
     const targetModel = resolveModelId(aiModel) || model;
     // ── Full Prompt Budget Accounting (screen analysis) ──────────────────
     const screenSystemPrompt = buildScreenSystemMessage(context);
+    const screenRuntimeContext = buildRuntimeContextMessage(context);
     const priorAnswersBlock =
       Array.isArray(liveContextMetadata?.previousAiAnswers) &&
       liveContextMetadata.previousAiAnswers.length > 0
-        ? `\n\nRecent AI context:\n${liveContextMetadata.previousAiAnswers
+        ? `\n\nRecent AI memory summary:\n${liveContextMetadata.previousAiAnswers
             .slice(-2)
             .map((entry, index) => {
               const question = (entry.question || "").trim();
-              const answer = (entry.answer || "").trim().slice(0, 700);
+              const answer = clipPromptText(stripAnswerPromptNoise(entry.answer || ""), 260);
               return question
-                ? `- Prior ${index + 1} Q: ${question}\n  A: ${answer}`
+                ? `- Prior ${index + 1}: ${clipPromptText(question, 120)} -> ${answer}`
                 : `- Prior ${index + 1} A: ${answer}`;
             })
             .join("\n")}`
         : "";
     const transcriptContextBlock =
       liveContextMetadata?.recentTranscriptWindow?.length
-        ? `\n\nRecent transcript context:\n${liveContextMetadata.recentTranscriptWindow
-            .slice(-20)
+        ? `\n\nRecent transcript excerpt:\n${liveContextMetadata.recentTranscriptWindow
+            .slice(-8)
+            .map((line) => clipPromptText(line, 180))
             .join("\n")}`
         : "";
     const questionContextBlock = screenContextQuestion
@@ -1644,8 +2127,9 @@ export async function analyzeScreen(
       : "";
     const screenUserText = `${buildScreenAnalysisMessage(context)}${questionContextBlock}${transcriptContextBlock}${priorAnswersBlock}`;
     const screenSystemTokens = estimatePromptTokensForLog(screenSystemPrompt);
+    const screenRuntimeTokens = estimatePromptTokensForLog(screenRuntimeContext);
     const screenUserTokens = estimatePromptTokensForLog(screenUserText);
-    console.log(`[CIE] Screen analysis prompt | system: ${screenSystemTokens}t | user: ${screenUserTokens}t | total: ${screenSystemTokens + screenUserTokens}t | complexity: ${context?.complexity || 'unknown'}`);
+    console.log(`[CIE] Screen analysis prompt | system: ${screenSystemTokens}t | runtime: ${screenRuntimeTokens}t | user: ${screenUserTokens}t | total: ${screenSystemTokens + screenRuntimeTokens + screenUserTokens}t | complexity: ${context?.complexity || 'unknown'}`);
     console.log("[Analyze Screen][Timing][BE]", {
       sessionId: id,
       contextBuildMs,
@@ -1668,6 +2152,11 @@ export async function analyzeScreen(
           type: "message",
           content: screenSystemPrompt,
         } as any,
+        {
+          role: "user",
+          type: "message",
+          content: screenRuntimeContext,
+        },
         {
           role: "user",
           type: "message",
@@ -1730,6 +2219,11 @@ export async function getAIAnswer(
       projectIds: true,
       primaryProjectId: true,
       userId: true,
+      user: {
+        select: {
+          name: true,
+        },
+      },
       saveTranscription: true,
     },
   });
@@ -1743,6 +2237,10 @@ export async function getAIAnswer(
   let finalTranscript = transcript;
   let finalSnapshotId = snapshotId;
   let orchestration: ContextOrchestrationResult | undefined;
+  let segmenterResult: AIAnswerSegmenterResult | undefined;
+  let transcriptEvidence: TranscriptEvidenceV3 | undefined;
+  let intentLedger: IntentLedger = { intents: [] };
+  let answerLedger: AnswerLedger = { answers: [] };
   const contextBuildStartedAt = Date.now();
   const detection =
     !isRegenerate && liveContextMetadata?.activeQuestionDetection
@@ -1750,20 +2248,36 @@ export async function getAIAnswer(
       : undefined;
 
   if (!isRegenerate) {
+    const [initialIntentLedger, initialAnswerLedger] = await Promise.all([
+      readIntentLedger(id),
+      readAnswerLedger(id),
+    ]);
+    intentLedger = initialIntentLedger;
+    answerLedger = initialAnswerLedger;
+    if (intentLedger.intents.length === 0 && answerLedger.answers.length === 0) {
+      const rebuiltLedgers = await rebuildLedgersFromDurableState(id).catch((error) => {
+        console.warn("[AI Answer] durable ledger rebuild failed", { sessionId: id, error });
+        return null;
+      });
+      if (rebuiltLedgers) {
+        intentLedger = rebuiltLedgers.intentLedger;
+        answerLedger = rebuiltLedgers.answerLedger;
+      }
+    }
+    transcriptEvidence = await buildTranscriptEvidenceV3({
+      sessionId: id,
+      transcript,
+      metadata: liveContextMetadata,
+    });
+    if (!isCustomQuery && transcriptEvidence.lines.length === 0 && !transcriptEvidence.currentQuestionHint) {
+      return noNewQuestionStream();
+    }
+    finalTranscript = isCustomQuery ? transcript : transcriptEvidence.compactQuery;
     orchestration = await orchestrateAIContext({
       sessionId: id,
       resolvedQuestion: finalTranscript,
       metadata: liveContextMetadata,
     });
-    finalTranscript = orchestration.decision.questionForLLM;
-    if (!orchestration.decision.shouldAnswer) {
-      return (async function* () {
-        yield {
-          text: `===QUESTION_META=${JSON.stringify(orchestration!.questionMeta)}===\n`,
-        };
-        yield { text: "===NO_NEW_QUESTION===" };
-      })();
-    }
   }
 
   finalTranscript = normalizeTranscriptForQuestionDetection(finalTranscript);
@@ -1824,12 +2338,6 @@ export async function getAIAnswer(
     if (!contextForCall) {
       throw new Error("Failed to build context");
     }
-    if (orchestration) {
-      contextForCall = {
-        ...contextForCall,
-        history: `${orchestration.contextPacket}\n\n${contextForCall.history || ""}`,
-      };
-    }
     if (!finalSnapshotId) {
       finalSnapshotId = crypto.randomUUID();
     }
@@ -1849,10 +2357,14 @@ export async function getAIAnswer(
     }
     // ── Full Prompt Budget Accounting ──────────────────────────────────────
     const originalResolvedQuestion = finalTranscript;
-    const guard = guardCurrentQuestion({
-      resolvedQuestion: originalResolvedQuestion,
-      recentTranscriptWindow: liveContextMetadata?.recentTranscriptWindow,
-    });
+    const effectiveQuestionForPolicy = originalResolvedQuestion;
+    const questionForAnswerModel = effectiveQuestionForPolicy;
+    const guard = {
+      originalResolvedQuestion,
+      reconstructedResolvedQuestion: false,
+      weakQuestionReconstructedBackend: false,
+      questionPollutionDetected: false,
+    };
     const liveHistoryMessages = await loadLiveAnswerHistoryMessages(id).catch((error) => {
       console.warn("[AI Answer Debug] failed loading live transcript chunk history", {
         sessionId: id,
@@ -1863,9 +2375,9 @@ export async function getAIAnswer(
     const history = toAnswerHistory(
       liveHistoryMessages.length > 0 ? liveHistoryMessages : (session as any).messages,
     );
-    const conversationIntent = classifyConversationIntent(guard.resolvedCurrentQuestion);
+    const conversationIntent = classifyConversationIntent(effectiveQuestionForPolicy);
     const followup = resolveFollowupTarget({
-      question: guard.resolvedCurrentQuestion,
+      question: effectiveQuestionForPolicy,
       history,
       selectedAnswerId: liveContextMetadata?.selectedAnswerId,
       selectedAnswerQuestion: liveContextMetadata?.selectedAnswerQuestion,
@@ -1874,7 +2386,7 @@ export async function getAIAnswer(
       selectedAnswerTopic: liveContextMetadata?.selectedAnswerTopic,
     });
     const fallbackDecision = fallbackAISessionDecision({
-      currentQuestion: guard.resolvedCurrentQuestion,
+      currentQuestion: effectiveQuestionForPolicy,
       conversationIntent,
       followup,
     });
@@ -1885,19 +2397,19 @@ export async function getAIAnswer(
       !!followup.target ||
       !!detection?.isFollowUp;
     const aiDecisionResult = shouldUseDeterministicDecision
-      ? {
+        ? {
           decision: fallbackDecision,
           fallbackDecisionUsed: true,
           error: "deterministic_live_decision",
         }
-      : await decideAISessionState({
+        : await decideAISessionState({
           ai,
           model: targetModel,
           provider: latencyOptimizedProvider as any,
           fallback: fallbackDecision,
           timeoutMs: 450,
           input: {
-            currentQuestion: guard.resolvedCurrentQuestion,
+            currentQuestion: effectiveQuestionForPolicy,
             recentTranscriptWindow: liveContextMetadata?.recentTranscriptWindow,
             speakerSeparatedTranscript: liveContextMetadata?.speakerSeparatedTranscript,
             activeQuestionDetection: detection,
@@ -1983,7 +2495,7 @@ export async function getAIAnswer(
           selectedAnswerCodeBlocks: undefined,
           selectedAnswerTopic: undefined,
         };
-    const questionTopic = deriveTopicFromAnyText(guard.resolvedCurrentQuestion);
+    const questionTopic = deriveTopicFromAnyText(effectiveQuestionForPolicy);
     const selectedAnswerTopicForLog =
       liveContextMetadata?.selectedAnswerTopic ||
       deriveTopicFromAnyText(
@@ -2049,62 +2561,40 @@ export async function getAIAnswer(
       : null;
     const effectiveMetadata = buildEffectiveLiveContextMetadata({
       metadata: metadataAfterPreviousAnswerGuard,
-      question: guard.resolvedCurrentQuestion,
+      question: effectiveQuestionForPolicy,
       selectedTarget: selectedTargetForRequest,
     });
     const selectedCodeContext = selectTargetCodeContext(selectedTargetForRequest);
     const hasAnyRecentCodeHistory = history.some((entry) => entry.codeBlocks.length > 0);
 
-    const systemPrompt = buildSystemMessage(contextForCall);
-    const baseUserMessage = buildUserMessage(
-      guard.resolvedCurrentQuestion,
-      isCustomQuery,
-      isRegenerate,
-      contextForCall,
-    );
     const policy = buildRequestScopedPolicy({
-      question: guard.resolvedCurrentQuestion,
+      question: effectiveQuestionForPolicy,
       metadata: effectiveMetadata,
       cieComplexity: contextForCall?.complexity,
       aiDecision,
     });
-    const codeFollowupConstraint =
+    const hasCodeFollowupAnchor =
       (followup.isExplicitFollowupReference ||
         (aiDecisionAuthoritative && aiDecision.requiresPreviousCode)) &&
-      (isCodeFollowupQuestion(guard.resolvedCurrentQuestion) || aiDecision.requiresPreviousCode) &&
-      selectedCodeContext.codeBlocks.length > 0
-        ? "\n- Answer ONLY using the selected prior answer/code as the follow-up target. Do not substitute resume/project context unless user explicitly asks for experience."
-        : "";
-    const selectedAnswerExcerptBlock =
-      (followup.isExplicitFollowupReference ||
-        (aiDecisionAuthoritative && aiDecision.isFollowUp) ||
-        isRegenerate) &&
-      !(isCodeFollowupQuestion(guard.resolvedCurrentQuestion) || aiDecision.requiresPreviousCode) &&
-      selectedTargetForRequest?.answer?.trim() &&
-      ((followup.targetConfidence ?? 0) >= 0.6 || aiDecisionAuthoritative)
-        ? `\nFOLLOW-UP ANSWER CONTEXT (for this request only):\nSelected prior answer excerpt:\n${selectedTargetForRequest.answer
-            .trim()
-            .slice(0, 800)}`
-        : "";
-    const noCodeFollowupGuidance =
+      (isCodeFollowupQuestion(effectiveQuestionForPolicy) || aiDecision.requiresPreviousCode) &&
+      selectedCodeContext.codeBlocks.length > 0;
+    const noCodeFollowupGuidanceApplies =
       (followup.isExplicitFollowupReference ||
         (aiDecisionAuthoritative && aiDecision.requiresPreviousCode) ||
         isRegenerate) &&
-      (isCodeFollowupQuestion(guard.resolvedCurrentQuestion) || aiDecision.requiresPreviousCode) &&
+      (isCodeFollowupQuestion(effectiveQuestionForPolicy) || aiDecision.requiresPreviousCode) &&
       selectedCodeContext.codeBlocks.length === 0 &&
-      !hasAnyRecentCodeHistory
-        ? "\nFOLLOW-UP CONTEXT: I do not have a previous code/query in this session to explain. State this briefly, then provide generic guidance."
-        : "";
+      !hasAnyRecentCodeHistory;
     const strictFollowupBindingApplied = Boolean(
       selectedTargetForRequest &&
-      (codeFollowupConstraint || selectedAnswerExcerptBlock),
+      (hasCodeFollowupAnchor || followup.isExplicitFollowupReference || aiDecision.isFollowUp),
     );
-    const regenerateInstructionBlock =
+    const regenerateInstruction =
       isRegenerate && (liveContextMetadata as any)?.regenerateInstruction
-        ? `\nREGENERATE INSTRUCTION:\n${String((liveContextMetadata as any).regenerateInstruction).slice(0, 500)}`
-        : "";
+        ? String((liveContextMetadata as any).regenerateInstruction).slice(0, 500)
+        : undefined;
     const regenerateUsedOriginalQuestion = Boolean(
-      isRegenerate && guard.resolvedCurrentQuestion?.trim(),
+      isRegenerate && effectiveQuestionForPolicy?.trim(),
     );
     const regenerateUsedOriginalTranscript = Boolean(
       isRegenerate && transcript?.trim(),
@@ -2117,7 +2607,7 @@ export async function getAIAnswer(
       isRegenerate &&
       (liveContextMetadata as any)?.regenerateInstruction,
     );
-    const shouldForceDiagram = isProjectExplainQuestion(guard.resolvedCurrentQuestion);
+    const shouldForceDiagram = isProjectExplainQuestion(effectiveQuestionForPolicy);
     const selectedArchitectureDiagram = shouldForceDiagram
       ? extractArchitectureDiagramBlock(contextForCall?.projects)
       : null;
@@ -2126,21 +2616,94 @@ export async function getAIAnswer(
       : null;
     const architectureFlowForPrompt =
       selectedArchitectureDiagram || synthesizedArchitectureDiagram;
-    const projectDiagramConstraint =
-      shouldForceDiagram && architectureFlowForPrompt
-        ? `\nPROJECT-EXPLAIN DIAGRAM REQUIREMENT (HARD):\n- The user asked to explain project(s).\n- You MUST include one markdown architecture flow block under **ANSWER:** using fenced \`\`\`text.\n- Use the architecture flow context below as your structure; stay conservative and do not invent unrelated systems.\nArchitecture flow source:\n\`\`\`text\n${architectureFlowForPrompt}\n\`\`\``
-        : "";
-    const authoritativeQuestionConstraint = `\nCURRENT QUESTION (AUTHORITATIVE):\n${guard.resolvedCurrentQuestion}\n\nOUTPUT QUESTION RULE (HARD):\n- In the first **QUESTION:** block, repeat ONLY the CURRENT QUESTION above as one clean line.\n- Do NOT prepend previous questions, transcript lines, or earlier turn text.\n- Do NOT merge prior turns unless the CURRENT QUESTION itself explicitly contains multiple independent questions.`;
-    const orchestratorPacketBlock = orchestration
-      ? `\n${orchestration.contextPacket}\n`
-      : "";
-    const userMessage = `${policy.policyBlock}${orchestratorPacketBlock}${codeFollowupConstraint}\n${policy.codeContextBlock}${selectedAnswerExcerptBlock}${noCodeFollowupGuidance}${regenerateInstructionBlock}${projectDiagramConstraint}${authoritativeQuestionConstraint}\n\n${baseUserMessage}`;
+    const memorySummary = compactTurnMemorySummary({
+      activeTopic: orchestration?.activeTopic?.topicTitle,
+      turnMemory: orchestration?.turnMemory,
+      segmenterSummary: segmenterResult?.sessionStateSummary,
+    });
+    const composerMemorySummary = compactComposerMemorySummary({
+      intentLedger,
+      answerLedger,
+    });
+    const candidateProfileDigest = buildCandidateProfileDigest({
+      resumeDigest: contextForCall?.resume || "",
+      projectDigest: contextForCall?.projects || "",
+      sessionUserName: session.user?.name,
+    });
+    const systemPrompt = buildSystemMessage(contextForCall);
+    const runtimeContextMessage = buildAnswerRuntimeContext({
+      company: contextForCall?.company,
+      role: contextForCall?.role,
+      language: contextForCall?.language,
+      simpleLanguage: !!contextForCall?.simpleLanguage,
+      projectMode: contextForCall?.hasSelectedProjects
+        ? "selected_projects_present"
+        : contextForCall?.projects && !String(contextForCall.projects).startsWith("No projects provided.")
+          ? "resume_backed_projects_present"
+          : "no_selected_projects",
+      projectPriority: contextForCall?.projectPriorityMode || "project_questions_only",
+      resumeDigest: candidateProfileDigest,
+      projectDigest: contextForCall?.projects || "",
+      documentSummary:
+        contextForCall?.document && contextForCall.document !== "None provided."
+          ? contextForCall.document
+          : "",
+      historySummary:
+        contextForCall?.history &&
+        contextForCall.history !== "No previous interactions in this session."
+          ? contextForCall.history
+          : "",
+      memorySummary: [composerMemorySummary, memorySummary].filter(Boolean).join("\n"),
+      instructions:
+        contextForCall?.instructions && contextForCall.instructions !== "None."
+          ? contextForCall.instructions
+          : "",
+      isProjectQuestion: !!contextForCall?.isProjectQuestion,
+    });
+    const memoryAnchor = compactFollowupAnchor({
+        selectedTarget: selectedTargetForRequest,
+        selectedCodeContext,
+        fallbackTopic: questionTopic,
+      });
+    const previousAnswerSummary =
+      liveContextMetadata?.selectedAnswerText ||
+      liveContextMetadata?.previousAiAnswer ||
+      answerLedger.answers.at(-1)?.answerSummary ||
+      "none";
+    const userMessage = buildActiveTaskV3({
+      mode: isRegenerate ? "regenerate_answer" : isCustomQuery ? "manual_query" : "live_ai_answer",
+      transcriptEvidence:
+        transcriptEvidence?.text ||
+        compactTranscriptExcerpt({
+          segmenterResult,
+          metadata: liveContextMetadata,
+          fallbackQuestion: effectiveQuestionForPolicy,
+          includeCandidate: true,
+        }),
+      currentQuestionHint: transcriptEvidence?.currentQuestionHint,
+      manualRequest: isCustomQuery ? transcript : undefined,
+      originalQuestion: isRegenerate ? effectiveQuestionForPolicy : undefined,
+      previousAnswerSummary: isRegenerate ? previousAnswerSummary : undefined,
+      memoryAnchor,
+      ...(shouldForceDiagram && architectureFlowForPrompt
+        ? { projectDiagram: architectureFlowForPrompt }
+        : {}),
+      regenerateInstruction,
+      answerClickMode: liveContextMetadata?.answerClickMode,
+      language: contextForCall?.language || "the relevant language",
+      hasCodeFollowupAnchor,
+      noCodeFollowupGuidance: noCodeFollowupGuidanceApplies,
+    });
+    const questionMetaForStream: QuestionMeta | undefined = isRegenerate
+      ? orchestration?.questionMeta
+      : undefined;
     const systemTokens = estimatePromptTokensForLog(systemPrompt);
+    const runtimeTokens = estimatePromptTokensForLog(runtimeContextMessage);
     const userTokens = estimatePromptTokensForLog(userMessage);
-    console.log(`[CIE] Prompt breakdown | system: ${systemTokens}t | user: ${userTokens}t | total: ${systemTokens + userTokens}t | complexity: ${contextForCall?.complexity || 'unknown'}`);
+    console.log(`[CIE] Prompt breakdown | system: ${systemTokens}t | runtime: ${runtimeTokens}t | user: ${userTokens}t | total: ${systemTokens + runtimeTokens + userTokens}t | complexity: ${contextForCall?.complexity || 'unknown'}`);
     if (process.env.NODE_ENV !== "production") {
       console.log("[AI Answer Policy][BE]", {
-        resolvedCurrentQuestion: guard.resolvedCurrentQuestion,
+        resolvedCurrentQuestion: effectiveQuestionForPolicy,
         originalResolvedQuestion: guard.originalResolvedQuestion,
         reconstructedResolvedQuestion: guard.reconstructedResolvedQuestion,
         weakQuestionReconstructedBackend: guard.weakQuestionReconstructedBackend,
@@ -2185,8 +2748,8 @@ export async function getAIAnswer(
         regenerateUsedOriginalTranscript,
         regeneratePreservedSelectedTarget,
         regenerateInstructionApplied,
-        diagramConstraintApplied: Boolean(projectDiagramConstraint),
-        questionTopic: deriveTopic(guard.resolvedCurrentQuestion, effectiveMetadata.previousAiAnswer),
+        diagramConstraintApplied: Boolean(shouldForceDiagram && architectureFlowForPrompt),
+        questionTopic: deriveTopic(effectiveQuestionForPolicy, effectiveMetadata.previousAiAnswer),
         answerIntent: policy.answerIntent,
         effectiveAnswerMode: policy.effectiveAnswerMode,
         isCodeFollowup: policy.isCodeFollowup,
@@ -2194,6 +2757,18 @@ export async function getAIAnswer(
         previousAiAnswerExcerptLength: policy.previousAiAnswerExcerptLength,
         experienceSuppressed: policy.experienceSuppressed,
         cieTierSelected: contextForCall?.complexity || "unknown",
+        backendQuestionResolvedFrom: isCustomQuery
+          ? "manual_query"
+          : isRegenerate
+            ? "regenerate_answer"
+            : "main_ai_infer",
+        backendQuestionScore: null,
+        frontendConfidenceDowngraded:
+          liveContextMetadata?.frontendConfidenceDowngraded ||
+          false,
+        reconstructionCorrections:
+          liveContextMetadata?.backendQuestionCorrections ||
+          [],
       });
     }
 
@@ -2201,7 +2776,7 @@ export async function getAIAnswer(
       model: targetModel,
       maxOutputTokens: resolveAnswerMaxOutputTokens({
         complexity: contextForCall?.complexity,
-        question: guard.resolvedCurrentQuestion,
+        question: effectiveQuestionForPolicy,
         isRegenerate,
         hasProjects: !!contextForCall?.hasSelectedProjects,
       }),
@@ -2214,6 +2789,11 @@ export async function getAIAnswer(
           type: "message",
           content: systemPrompt,
         } as any,
+        {
+          role: "user",
+          type: "message",
+          content: runtimeContextMessage,
+        },
         {
           role: "user",
           type: "message",
@@ -2231,9 +2811,11 @@ export async function getAIAnswer(
       targetModel,
       finalSnapshotId,
       isRegenerate,
-      guard.resolvedCurrentQuestion,
-      orchestration?.questionMeta,
+      isCustomQuery || isRegenerate ? effectiveQuestionForPolicy : undefined,
+      questionMetaForStream,
       orchestration,
+      segmenterResult,
+      transcriptEvidence?.compactQuery || finalTranscript,
     );
   } catch (err: any) {
     console.error("OpenRouter Streaming Error (getAIAnswer):", err);
@@ -2300,6 +2882,31 @@ export async function appendMessage(
       isQuestion: role === "INTERVIEWER",
     },
   });
+  await appendSegmenterTranscriptMemory({
+    sessionId,
+    chunk: {
+      id: `db:${chunk.id}`,
+      transcriptChunkId: chunk.id,
+      messageId: resolvedMessageId,
+      speaker:
+        role === "INTERVIEWER"
+          ? "interviewer"
+          : role === "AI_ASSISTANT"
+            ? "assistant"
+            : "candidate",
+      text: buildTranscriptContent(question, answer || ""),
+      timestamp,
+      source: "db",
+    },
+  });
+  if (role !== "AI_ASSISTANT") {
+    maybeScheduleQuestionComposer({
+      sessionId,
+      ai,
+      model,
+      provider: latencyOptimizedProvider as any,
+    });
+  }
 
   scheduleLegacyTranscriptFlush(sessionId, LEGACY_TRANSCRIPT_FLUSH_DELAY_MS);
   const totalMs = Date.now() - startedAt;
@@ -2360,6 +2967,13 @@ export async function patchTranscriptMessage(
   });
 
   if (chunkPatch.count > 0) {
+    maybeScheduleQuestionComposer({
+      sessionId,
+      currentQuestionHint: patchedText,
+      ai,
+      model,
+      provider: latencyOptimizedProvider as any,
+    });
     scheduleLegacyTranscriptFlush(sessionId, 250);
     return { id: sessionId, patchedChunks: chunkPatch.count };
   }
@@ -2475,6 +3089,13 @@ export async function patchTranscriptMessage(
     }
   }
 
+  maybeScheduleQuestionComposer({
+    sessionId,
+    currentQuestionHint: patchedText,
+    ai,
+    model,
+    provider: latencyOptimizedProvider as any,
+  });
   return prisma.session.update({
     where: { id: sessionId },
     data: {

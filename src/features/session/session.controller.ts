@@ -423,8 +423,12 @@ export async function getAIAnswer(req: Request, res: Response) {
       });
     }
 
-    if (!resolvedQuestion && !snapshotId) {
-      return res.status(400).json({ error: "No transcript or snapshotId provided" });
+    const hasEvidence =
+      !!resolvedQuestion ||
+      Array.isArray(req.body?.recentTranscriptWindow) && req.body.recentTranscriptWindow.length > 0 ||
+      Array.isArray(req.body?.speakerSeparatedTranscript) && req.body.speakerSeparatedTranscript.length > 0;
+    if (!hasEvidence && !snapshotId) {
+      return res.status(400).json({ error: "No transcript evidence or snapshotId provided" });
     }
 
     if (process.env.NODE_ENV !== "production") {
@@ -460,8 +464,8 @@ export async function getAIAnswer(req: Request, res: Response) {
       });
       console.log("[AI Answer Debug][BE] Processing pipeline:", {
         step1: "normalizeAIAnswerRequestBody",
-        step2: "resolvedQuestion priority: patchedTranscript > currentQuestion > transcript",
-        step3: "sessionService.getAIAnswer(sessionId, resolvedQuestion, ...flags)",
+        step2: "backend question composer selects clean answerable intent from evidence",
+        step3: "sessionService.getAIAnswer(sessionId, evidenceOrManualQuery, ...flags)",
       });
     }
 

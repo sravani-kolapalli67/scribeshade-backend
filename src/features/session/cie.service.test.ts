@@ -5,6 +5,7 @@ import {
   detectFollowupIntent,
   extractResumeProjectContext,
   extractRelevantProjectContext,
+  isExplicitProjectDetailQuestion,
   isProjectExperienceQuestion,
 } from "./cie.service";
 
@@ -19,6 +20,17 @@ test("CIE treats code and scenario continuations as followups", () => {
 test("CIE treats experience years and responsibilities as context questions", () => {
   assert.equal(isProjectExperienceQuestion("How many years of experience do you have?"), true);
   assert.equal(isProjectExperienceQuestion("What were your responsibilities in that project?"), true);
+});
+
+test("CIE separates intro background from explicit project detail", () => {
+  assert.equal(
+    isExplicitProjectDetailQuestion("Introduce yourself and explain the progress/work you have done."),
+    false,
+  );
+  assert.equal(
+    isExplicitProjectDetailQuestion("Explain your project architecture and tech stack."),
+    true,
+  );
 });
 
 test("CIE project context places PRIMARY project first for overview asks", () => {

@@ -234,7 +234,7 @@ export async function enqueueCandidateDigestWarmup(sessionId: string): Promise<v
   await candidateDigestQueue.add(
     "candidate-digest",
     { sessionId },
-    { jobId: `candidate-digest:${sessionId}` },
+    { jobId: `candidate-digest-${sessionId}` },
   );
 }
 

@@ -48,7 +48,7 @@ export type ConversationIntent =
 
 const FILLER_ONLY_RE = /^(hi|hello|hey|can you hear me|am i audible|okay|ok|hmm|huh|right|fine)$/i;
 const EXPLICIT_EXPERIENCE_RE =
-  /\b(your experience|your project|your company|tell me about your project|from your project|in your company|in your project|where have you used|how have you used|years? of experience|how many years|professional experience|work experience|project details?|your role|responsibilit(?:y|ies)|measurable impact|impact metrics?|numbers?|tech stack)\b/i;
+  /\b(introduce yourself|tell me about yourself|your background|your experience|overall experience|relevant experience|total experience|current experience|experience in|experience with|experience at|your project|your company|tell me about your project|from your project|in your company|in your project|where have you used|how have you used|years? of experience|how many years|professional experience|work experience|project details?|your role|responsibilit(?:y|ies)|measurable impact|impact metrics?|numbers?|tech stack)\b/i;
 const CODE_REF_RE =
   /\b(this code|the code|your code|the code you wrote|above code|previous code|first line|that query|the query|same query|the same query|same code|the same code|same logic|same script|same approach|query you wrote|query you wrote before|that code|what does this code do|explain (?:it|the code again)|explain (?:this|that|the|your|previous|above)\s+(?:code|query|snippet|function|logic)|why (?:is|was) this used|why did you use this|optimi[sz]e (?:this|it|the code|the query)?|debug (?:this|it|the code|the query)?|fix (?:this|it|the code|the query)?|previous answer|above answer)\b/i;
 const FOLLOWUP_RE =
@@ -155,23 +155,35 @@ function isWeakDeicticQuestion(text: string): boolean {
   );
 }
 
+export function stripLeadingConjunctionsAndFillers(text: string): string {
+  let cleaned = text.trim();
+  const regex = /^(?:and|or|then|also|but|so|now|plus|because|okay|ok|great|right|perfect|well|yes|no|wait|hey|hi|hello)\b\s*,?\s*/i;
+  let previous;
+  do {
+    previous = cleaned;
+    cleaned = cleaned.replace(regex, "");
+  } while (cleaned !== previous);
+  return cleaned;
+}
+
 export function classifyConversationIntent(question: string): ConversationIntent {
   const q = normalizeTranscriptForQuestionDetection(question);
-  const n = normLoose(q);
+  const strippedQ = stripLeadingConjunctionsAndFillers(q);
+  const n = normLoose(strippedQ);
   if (!n) return "UNKNOWN";
-  if (FILLER_ONLY_RE.test(q)) return "UNKNOWN";
-  if (CODE_REF_RE.test(q)) {
-    if (DEBUG_FOLLOWUP_RE.test(q)) return "DEBUG_CODE";
-    if (OPTIMIZE_FOLLOWUP_RE.test(q)) return "OPTIMIZE_CODE";
+  if (FILLER_ONLY_RE.test(strippedQ)) return "UNKNOWN";
+  if (CODE_REF_RE.test(strippedQ)) {
+    if (DEBUG_FOLLOWUP_RE.test(strippedQ)) return "DEBUG_CODE";
+    if (OPTIMIZE_FOLLOWUP_RE.test(strippedQ)) return "OPTIMIZE_CODE";
     return "EXPLAIN_CODE";
   }
-  if (/^continue\b/i.test(q) || VAGUE_DEICTIC_RE.test(q)) return "CONTINUE_PREVIOUS";
-  if (EXPLICIT_EXPERIENCE_RE.test(q)) return "EXPERIENCE_QUESTION";
-  if (SCENARIO_FOLLOWUP_RE.test(q)) return "SCENARIO_QUESTION";
-  if (EXAMPLE_FOLLOWUP_RE.test(q)) return "FOLLOW_UP";
-  if (FOLLOWUP_RE.test(q)) return "FOLLOW_UP";
-  if (INTERVIEW_INSTRUCTION_RE.test(q)) return "INTERVIEW_INSTRUCTION";
-  if (/^(what|why|how|when|where|which|who|can|could|would|should|is|are|do|does|did|explain|define|write|implement|design)\b/i.test(q)) {
+  if (/^continue\b/i.test(strippedQ) || VAGUE_DEICTIC_RE.test(strippedQ)) return "CONTINUE_PREVIOUS";
+  if (EXPLICIT_EXPERIENCE_RE.test(strippedQ)) return "EXPERIENCE_QUESTION";
+  if (SCENARIO_FOLLOWUP_RE.test(strippedQ)) return "SCENARIO_QUESTION";
+  if (EXAMPLE_FOLLOWUP_RE.test(strippedQ)) return "FOLLOW_UP";
+  if (FOLLOWUP_RE.test(strippedQ)) return "FOLLOW_UP";
+  if (INTERVIEW_INSTRUCTION_RE.test(strippedQ)) return "INTERVIEW_INSTRUCTION";
+  if (/^(what|why|how|when|where|which|who|can|could|would|should|is|are|do|does|did|explain|define|describe|tell me|introduce|walk me|write|implement|design)\b/i.test(strippedQ)) {
     return "NEW_QUESTION";
   }
   return "UNKNOWN";

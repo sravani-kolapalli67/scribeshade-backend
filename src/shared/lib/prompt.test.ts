@@ -1,10 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  buildActiveTaskV3,
+  buildAnswerRuntimeContext,
+  buildAnswerTaskMessage,
+  buildRuntimeContextMessage,
   buildScreenAnalysisMessage,
   buildScreenSystemMessage,
   buildSystemMessage,
   buildUserMessage,
+  type AnswerPlan,
 } from "./prompt";
 
 const baseContext = {
@@ -12,131 +17,171 @@ const baseContext = {
   role: "Data Engineer",
   language: "Python",
   resume: "5.9 years of data engineering experience with Spark and Databricks.",
-  document: "None provided.",
-  history: "No previous interactions in this session.",
-  instructions: "None.",
-  projects: "No projects provided.",
+  document: "Architecture notes for a banking data platform.",
+  history:
+    "STRICT CONTEXT PACKET:\nCURRENT QUESTION: Tell me about yourself.\nQUESTION EVIDENCE:\n- noisy evidence\n\n1. Q: Introduce yourself. A: I am a data engineer.",
+  instructions: "Keep answers concise.",
+  projects:
+    "━━━ PRIMARY PROJECT: Banking Gateway ━━━\nBuilt Databricks pipelines with Azure Data Factory.",
   simpleLanguage: false,
+  hasSelectedProjects: true,
+  isProjectQuestion: true,
+  projectPriorityMode: "project_questions_only",
+  vectorContext: "Recent transcript chunk about Delta Lake.",
 };
 
-test("system prompt requires markdown answer body and allows answer-body bold labels", () => {
-  const prompt = buildSystemMessage({
-    ...baseContext,
-    complexity: "scenario_based",
-  });
+function approxTokens(text: string): number {
+  return Math.ceil(text.length / 4);
+}
+
+test("system prompt remains behavior-only and keeps parser contract", () => {
+  const prompt = buildSystemMessage(baseContext);
 
   assert.ok(prompt.includes("MANDATORY MARKDOWN ANSWER FORMAT"));
-  assert.ok(prompt.includes("The answer body under **ANSWER:** must be Markdown"));
-  assert.ok(prompt.includes("**Direct answer:**"));
-  assert.ok(prompt.includes("Inside the answer body, markdown bold is allowed"));
-  assert.equal(prompt.includes("Never put '**' anywhere except"), false);
+  assert.ok(prompt.includes("CONTEXT PRIORITY"));
+  assert.ok(prompt.includes("Candidate speech may contain the question they want help answering"));
+  assert.ok(prompt.includes("**QUESTION:**"));
+  assert.ok(prompt.includes("**ANSWER:**"));
+  assert.equal(prompt.includes(baseContext.resume), false);
+  assert.equal(prompt.includes("Banking Gateway"), false);
+  assert.equal(prompt.includes("STRICT CONTEXT PACKET"), false);
 });
 
-test("markdown contract requires spacing, keyword highlighting, and candidate voice", () => {
-  const prompt = buildSystemMessage({
-    ...baseContext,
-    complexity: "simple_contextual",
-  });
+test("runtime context is compressed stable evidence without request artifacts", () => {
+  const runtime = buildRuntimeContextMessage(baseContext);
 
-  assert.ok(prompt.includes("Put one blank line between top-level project bullets"));
-  assert.ok(prompt.includes("Highlight exact numbers and measurable values with bold"));
-  assert.ok(prompt.includes("Use inline code for explicit tools"));
-  assert.ok(prompt.includes("Do not explain like a tutor"));
+  assert.ok(runtime.startsWith("RUNTIME_CONTEXT v3"));
+  assert.ok(runtime.includes("CANDIDATE_PROFILE"));
+  assert.ok(runtime.includes("PROJECT_CONTEXT"));
+  assert.ok(runtime.includes("Banking Gateway"));
+  assert.equal(runtime.includes("MANDATORY MARKDOWN ANSWER FORMAT"), false);
+  assert.equal(runtime.includes("STRICT CONTEXT PACKET"), false);
+  assert.equal(runtime.includes("CURRENT QUESTION"), false);
+  assert.equal(runtime.includes("QUESTION EVIDENCE"), false);
+  assert.equal(runtime.includes("AI SEGMENTER DECISION"), false);
+  assert.equal(runtime.includes("BOUNDED RAW TRANSCRIPT"), false);
 });
 
-test("compact and follow-up prompts include the same markdown contract", () => {
-  const compact = buildSystemMessage({
-    ...baseContext,
-    complexity: "simple_contextual",
-  });
-  const followup = buildSystemMessage({
-    ...baseContext,
-    complexity: "followup",
+test("answer runtime context respects compact token budget for heavy evidence", () => {
+  const runtime = buildAnswerRuntimeContext({
+    company: "Acme",
+    role: "Data Engineer",
+    language: "Python",
+    simpleLanguage: false,
+    projectMode: "selected_projects_present",
+    projectPriority: "project_questions_only",
+    resumeDigest: `${baseContext.resume} `.repeat(80),
+    projectDigest: `${baseContext.projects} `.repeat(80),
+    historySummary: "Previous generated answer with lots of details. ".repeat(80),
+    memorySummary: "Current topic is notification system design. ".repeat(80),
+    documentSummary: "Supporting document summary. ".repeat(80),
+    isProjectQuestion: false,
   });
 
-  assert.ok(compact.includes("MANDATORY MARKDOWN ANSWER FORMAT"));
-  assert.ok(compact.includes("raw HTML"));
-  assert.ok(followup.includes("MANDATORY MARKDOWN ANSWER FORMAT"));
-  assert.ok(followup.includes("'- ' bullets"));
+  assert.ok(approxTokens(runtime) <= 1100);
+  assert.equal(runtime.includes("CURRENT QUESTION"), false);
 });
 
-test("project-explain rules include architecture diagram exception and required flow guidance", () => {
-  const prompt = buildSystemMessage({
-    ...baseContext,
-    complexity: "scenario_based",
-    projects:
-      "━━━ PRIMARY PROJECT: Banking Gateway ━━━\n[Architecture Diagram]:\n```text\nA -> B -> C\n```",
-    hasSelectedProjects: true,
-    isProjectQuestion: true,
-    projectPriorityMode: "project_questions_only",
+test("answer runtime context uses candidate profile fallback without fake resume", () => {
+  const runtime = buildAnswerRuntimeContext({
+    company: "Acme",
+    role: "Backend Engineer",
+    language: "TypeScript",
+    simpleLanguage: false,
+    resumeDigest: "No resume provided.",
+    projectDigest: "",
   });
 
-  assert.ok(
-    prompt.includes(
-      "Exception: for project-explanation questions, if selected project context includes an Architecture Diagram block",
-    ),
-  );
-  assert.ok(
-    prompt.includes(
-      "This is required for project-explain asks when diagram context is available.",
-    ),
-  );
+  assert.ok(runtime.includes("CANDIDATE_PROFILE"));
+  assert.ok(runtime.includes("Candidate facts: Not provided."));
+  assert.ok(runtime.includes("Known skills: Not provided."));
+  assert.equal(runtime.includes("CANDIDATE_PROFILE\nNo resume provided."), false);
+  assert.equal(runtime.includes("[Candidate Name]"), false);
 });
 
-test("compact resume-backed project prompts require in-depth per-project structure", () => {
-  const prompt = buildSystemMessage({
-    ...baseContext,
-    complexity: "simple_contextual",
-    projects:
-      "RESUME-BACKED PROJECT/WORK CONTEXT (selected resume only; do not invent beyond this):\nPROJECTS\nHilton Grand Vacations\n- Migrated legacy data pipelines using Databricks and Azure.",
-    hasSelectedProjects: false,
-    isProjectQuestion: true,
+test("live active task keeps transcript evidence multiline and forbids invented questions", () => {
+  const task = buildActiveTaskV3({
+    mode: "live_ai_answer",
+    transcriptEvidence: [
+      "- candidate: Can you please introduce yourself?",
+      "- candidate: while you introduce yourself, explain the projects you have done.",
+    ].join("\n"),
+    currentQuestionHint: "Can you please introduce yourself and explain your projects?",
+    language: "TypeScript",
+    hasCodeFollowupAnchor: false,
+    noCodeFollowupGuidance: false,
   });
 
-  assert.ok(prompt.includes("PROJECT EXPLANATION FORMAT"));
-  assert.ok(prompt.includes("CANDIDATE'S RESUME PROJECT/WORK CONTEXT"));
-  assert.ok(prompt.includes("Do not start with a generic overview paragraph"));
-  assert.ok(prompt.includes("**Business problem:**"));
-  assert.ok(prompt.includes("**Architecture/approach:**"));
-  assert.ok(prompt.includes("Keep each nested point interview-spoken"));
-  assert.ok(prompt.includes("you MAY infer the business problem and architecture flow"));
-  assert.ok(prompt.includes("Do not invent company names, tools, exact metrics"));
+  assert.ok(task.includes("- candidate: Can you please introduce yourself?\n- candidate: while you introduce yourself"));
+  assert.ok(task.includes("Output exactly one Q&A block unless Transcript Evidence contains two or more explicit independent interview questions."));
+  assert.ok(task.includes("Do not invent follow-up questions"));
+  assert.ok(task.includes("Treat compound asks like 'introduce yourself and explain your projects' as one Q&A block."));
+  assert.ok(task.includes("Do not use placeholders like [Candidate Name]"));
 });
 
-test("simple language keeps project headings but requires easy wording", () => {
-  const prompt = buildSystemMessage({
-    ...baseContext,
-    complexity: "simple_contextual",
-    simpleLanguage: true,
-    projects:
-      "RESUME-BACKED PROJECT/WORK CONTEXT (selected resume only; do not invent beyond this):\nPROJECTS\nINFY\n- Developed a scalable Data Lake.",
-    hasSelectedProjects: false,
-    isProjectQuestion: true,
+test("answer task contains one authoritative single-question location", () => {
+  const plan: AnswerPlan = {
+    mode: "live_ai_answer",
+    intent: "system_design_followup",
+    questions: ["Continue from the database part and justify indexing choices."],
+    transcriptExcerpt:
+      "Interviewer: Continue from the database part and justify indexing choices.",
+    followupAnchor: {
+      topic: "notification system",
+      priorQuestion: "Design a notification system.",
+      priorAnswerSummary: "Queue-based design with workers, retries, DLQ, and metadata database.",
+    },
+    requestDeltas: ["Answer only the question listed above."],
+  };
+  const task = buildAnswerTaskMessage(plan);
+
+  assert.ok(task.includes("ACTIVE TASK"));
+  assert.ok(task.includes("Question: Continue from the database part"));
+  assert.ok(task.includes("Relevant transcript excerpt"));
+  assert.ok(task.includes("Follow-up anchor"));
+  assert.equal(task.includes("STRICT CONTEXT PACKET"), false);
+  assert.equal(task.includes("AI SEGMENTER DECISION"), false);
+  assert.equal(task.includes("confidence"), false);
+  assert.equal(task.includes("resolvedIntentIds"), false);
+});
+
+test("answer task supports multi-intent without segmenter internals", () => {
+  const task = buildAnswerTaskMessage({
+    mode: "live_ai_answer",
+    intent: "multi_intent",
+    questions: ["Introduce yourself.", "What tech stack do you use?"],
+    transcriptExcerpt:
+      "Interviewer: Introduce yourself.\nInterviewer: What tech stack do you use?",
+    requestDeltas: [
+      "Produce one Q&A block per question in listed order and separate blocks with ===NEXT_QUESTION===.",
+    ],
   });
 
-  assert.ok(prompt.includes("If simple language mode is on, keep the same headings"));
-  assert.ok(prompt.includes("SIMPLE LANGUAGE MODE: use plain easy English"));
+  assert.ok(task.includes("Questions:"));
+  assert.ok(task.includes("1. Introduce yourself."));
+  assert.ok(task.includes("2. What tech stack do you use?"));
+  assert.equal(task.includes("latestIntentId"), false);
+  assert.equal(task.includes("BOUNDED RAW TRANSCRIPT"), false);
 });
 
-test("user prompts include markdown contract across answer entrypoints", () => {
-  const normal = buildUserMessage("How many years of experience do you have?", false, false, {
-    ...baseContext,
-    complexity: "simple_contextual",
-  });
-  const custom = buildUserMessage("Explain Spark", true, false, baseContext);
-  const regenerate = buildUserMessage("Explain Spark", false, true, baseContext);
+test("legacy user wrapper still produces compact active task", () => {
+  const prompt = buildUserMessage("Explain Spark", true, false, baseContext);
 
-  assert.ok(normal.includes("MANDATORY MARKDOWN ANSWER FORMAT"));
-  assert.ok(custom.includes("MANDATORY MARKDOWN ANSWER FORMAT"));
-  assert.ok(regenerate.includes("MANDATORY MARKDOWN ANSWER FORMAT"));
+  assert.ok(prompt.includes("Mode: manual_query"));
+  assert.ok(prompt.includes("Question: Explain Spark"));
+  assert.equal(prompt.includes("ACTIVE INPUT BLOCK"), false);
+  assert.equal(prompt.includes("MANDATORY MARKDOWN ANSWER FORMAT"), false);
+  assert.equal(prompt.includes("Banking Gateway"), false);
 });
 
-test("screen prompts require markdown bullets without changing sentinel behavior", () => {
+test("screen prompts keep markdown contract only in screen system prompt", () => {
   const system = buildScreenSystemMessage(baseContext);
   const user = buildScreenAnalysisMessage(baseContext);
 
   assert.ok(system.includes("MANDATORY MARKDOWN ANSWER FORMAT"));
-  assert.ok(user.includes("MANDATORY MARKDOWN ANSWER FORMAT"));
+  assert.ok(system.includes("===NO_NEW_QUESTION==="));
   assert.ok(user.includes("===NO_NEW_QUESTION==="));
   assert.ok(user.includes("===NEXT_QUESTION==="));
+  assert.equal(user.includes("MANDATORY MARKDOWN ANSWER FORMAT"), false);
+  assert.equal(user.includes("Banking Gateway"), false);
 });

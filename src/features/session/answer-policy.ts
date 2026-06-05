@@ -13,7 +13,7 @@ export type AnswerIntent =
   | "general_followup";
 
 const PREV_ANSWER_EXCERPT_MAX = 700;
-const POLICY_BLOCK_MAX_CHARS = 1800;
+const POLICY_BLOCK_MAX_CHARS = 1400;
 const CODE_BLOCK_CHARS_MAX = 1200;
 const CROSS_INTENT_CONCEPT_RE =
   /\b(what is|what are|explain|define|difference between|how does)\b/i;
@@ -155,12 +155,6 @@ export function buildRequestScopedPolicy(input: {
     input.aiDecision
       ? `- ai_decision: ${input.aiDecision.intent} confidence=${input.aiDecision.confidence.toFixed(2)} context=${input.aiDecision.contextToUse}`
       : "",
-    "- style: direct, interview-ready, procedural, concise",
-    "- output_format: markdown_only_under_answer_marker",
-    "- no_dense_paragraphs: true",
-    "- bullet_rule: use '- ' bullets with short **Bold labels:** whenever the answer has more than 2 short sentences",
-    "- markdown_highlight_rule: use **bold** for short labels, project names, exact numbers, and major outcomes; use inline code for explicit tools/APIs/commands; never use raw HTML/color tags",
-    "- candidate_voice_rule: answer like the candidate speaking in an interview, not like a tutor or theoretical explainer",
   ].filter(Boolean);
 
   if (experienceSuppressed) {

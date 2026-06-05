@@ -160,6 +160,19 @@ function blockFromText(input: {
   };
 }
 
+function isRawTextAlreadyRepresented(
+  rawText: string,
+  blocks: NormalizedTranscriptBlock[],
+): boolean {
+  const rawKey = normalizedKey(rawText);
+  if (!rawKey) return true;
+  const blockKey = normalizedKey(
+    blocks.map((block) => block.rawText).join(" "),
+  );
+  if (!blockKey) return false;
+  return blockKey.includes(rawKey) || rawKey.includes(blockKey);
+}
+
 export function normalizeTranscriptForAI(
   input: TranscriptNormalizationInput,
 ): NormalizedTranscriptBlock[] {
@@ -183,7 +196,10 @@ export function normalizeTranscriptForAI(
     );
   }
 
-  if (blocks.length === 0) {
+  if (
+    blocks.length === 0 ||
+    !isRawTextAlreadyRepresented(input.rawText, blocks)
+  ) {
     blocks.push(
       blockFromText({
         rawText: input.rawText,

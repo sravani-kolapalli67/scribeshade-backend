@@ -5,7 +5,6 @@ export type AnswerDecisionReason =
   | "valid_new_question"
   | "valid_followup"
   | "low_confidence_noise"
-  | "duplicate_question"
   | "missing_followup_target"
   | "unclear_transcript";
 
@@ -22,62 +21,35 @@ type DecideAnswerInput = {
   selectedAnswerPresent: boolean;
 };
 
-function normalizeKey(text: string): string {
-  return (text || "")
-    .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function tokenOverlap(a: string, b: string): number {
-  const left = new Set(normalizeKey(a).split(" ").filter(Boolean));
-  const right = new Set(normalizeKey(b).split(" ").filter(Boolean));
-  if (!left.size || !right.size) return 0;
-  let overlap = 0;
-  for (const token of left) {
-    if (right.has(token)) overlap += 1;
-  }
-  return overlap / Math.max(left.size, right.size);
-}
-
 export function decideAnswer(input: DecideAnswerInput): AnswerDecision {
   const question = input.reconstructedQuestion;
-
   if (!question.shouldAnswer || question.intent === "noise") {
     return {
       shouldAnswer: false,
       reason:
-        question.confidence < 0.45 || question.intent === "noise"
-          ? "low_confidence_noise"
-          : "unclear_transcript",
+        question.reason === "missing_followup_target" ||
+        question.reason === "unclear_transcript" ||
+        question.reason === "low_confidence_noise"
+          ? question.reason
+          : "low_confidence_noise",
       questionForDisplay: question.displayQuestion,
       questionForLLM: question.llmQuestion,
     };
   }
 
-  if (
-    !question.isFollowUp &&
-    input.activeTopic?.lastQuestion &&
-    tokenOverlap(question.displayQuestion, input.activeTopic.lastQuestion) >= 0.92
-  ) {
-    return {
-      shouldAnswer: false,
-      reason: "duplicate_question",
-      questionForDisplay: question.displayQuestion,
-      questionForLLM: question.llmQuestion,
-    };
-  }
-
-  if (
-    question.isFollowUp &&
-    !input.activeTopic &&
-    !input.selectedAnswerPresent &&
-    !question.followupTargetId
-  ) {
+  if (question.isFollowUp && !input.activeTopic && !input.selectedAnswerPresent && !question.followupTargetId) {
     return {
       shouldAnswer: false,
       reason: "missing_followup_target",
+      questionForDisplay: question.displayQuestion,
+      questionForLLM: question.llmQuestion,
+    };
+  }
+
+  if (!question.displayQuestion.trim() || question.confidence < 0.25) {
+    return {
+      shouldAnswer: false,
+      reason: "unclear_transcript",
       questionForDisplay: question.displayQuestion,
       questionForLLM: question.llmQuestion,
     };
