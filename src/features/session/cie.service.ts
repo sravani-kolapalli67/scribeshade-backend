@@ -46,18 +46,21 @@ export function detectFollowupIntent(query: string): boolean {
   const signals = [
     "explain more", "why", "how exactly", "elaborate", "give an example",
     "in that context", "you mentioned", "previous answer", "expand on",
-    "tell me more", "clarify", "go deeper", "what about", "and what", "how so",
+    "tell me more", "clarify", "go deeper", "what about", "how so",
     "explain the code", "explain this code", "explain that code", "explain the code again",
     "why this is used", "optimize this", "optimise this", "debug this", "fix this",
     "continue", "continue from", "database part", "architecture part", "backend part",
     "frontend part", "api part", "the code", "the query", "that query", "that code"
   ];
   const pronouns = [/\bit\b/, /\bthat\b/, /\bthis\b/, /\bthem\b/, /\bthey\b/, /\bthe previous\b/];
+  const wordCount = normalized.split(/\s+/).filter(Boolean).length;
   
-  const hasSignal = signals.some(sig => normalized.includes(sig));
+  const hasSignal =
+    signals.some(sig => normalized.includes(sig)) ||
+    normalized.startsWith("and what");
   const hasPronoun = pronouns.some(regex => regex.test(normalized));
   
-  return hasSignal || hasPronoun;
+  return hasSignal || (hasPronoun && wordCount <= 8);
 }
 
 // ── Adaptive Context Complexity Routing ─────────────────────────────────────
@@ -72,7 +75,7 @@ export type QuestionComplexity =
 export function isProjectExperienceQuestion(query: string | undefined): boolean {
   if (!query || !query.trim()) return false;
   const normalized = normalizeTranscriptForQuestionDetection(query).toLowerCase().trim();
-  return /\b(projects?|portfolio|what (did|have) you build|tell me about (your|the) project|problem statement|tech stack|architecture|design choices?|impact|metrics|kpis?|challenges?|my role|your role|implemented|worked on|years? of experience|how many years|professional experience|work experience|responsibilit(?:y|ies)|numbers?|measurable)\b/i.test(
+  return /\b(projects?|portfolio|what (did|have) you build|tell me about (your|the) project|problem statement|tech stack|project architecture|project design choices?|impact|metrics|kpis?|challenges?|critical situation|critical challenge|my role|your role|implemented|worked on|years? of experience|how many years|professional experience|work experience|responsibilit(?:y|ies)|measurable|rate yourself|services you worked on|included in your tasks)\b/i.test(
     normalized,
   );
 }
@@ -80,7 +83,7 @@ export function isProjectExperienceQuestion(query: string | undefined): boolean 
 export function isExplicitProjectDetailQuestion(query: string | undefined): boolean {
   if (!query || !query.trim()) return false;
   const normalized = normalizeTranscriptForQuestionDetection(query).toLowerCase().trim();
-  return /\b(projects?|portfolio|what (did|have) you build|tell me about (your|the) project|problem statement|project work|things you built|tech stack|architecture|design choices?|impact|metrics|kpis?|challenges?|my role in|your role in|implemented|worked on|built|developed)\b/i.test(
+  return /\b(projects?|portfolio|what (did|have) you build|tell me about (your|the) project|problem statement|project work|things you built|tech stack|project architecture|project design choices?|impact|metrics|kpis?|challenges?|critical situation|critical challenge|my role in|your role in|implemented|worked on|built|developed|services you worked on)\b/i.test(
     normalized,
   );
 }
@@ -107,6 +110,43 @@ function isMixedExperienceProjectQuestion(query: string | undefined): boolean {
   return asksIntroOrExperience && asksProject;
 }
 
+export function shouldUseResumeBackedProjectFallback(input: {
+  hasSelectedProjects: boolean;
+  isProjectQuestion: boolean;
+  isProjectDetailQuestion: boolean;
+  isProjectOverview: boolean;
+  isMixedExperienceProject: boolean;
+  hasResume: boolean;
+}): boolean {
+  return (
+    !input.hasSelectedProjects &&
+    input.hasResume &&
+    (
+      input.isProjectQuestion ||
+      input.isProjectDetailQuestion ||
+      input.isProjectOverview ||
+      input.isMixedExperienceProject
+    )
+  );
+}
+
+export function buildSelectedProjectsUnavailableContext(input: {
+  selectedProjectIds: string[];
+  resolvedProjectIds: string[];
+}): string {
+  if (input.selectedProjectIds.length === 0) return "";
+  const resolved = new Set(input.resolvedProjectIds);
+  const unresolvedIds = input.selectedProjectIds.filter((id) => !resolved.has(id));
+  if (unresolvedIds.length === 0) return "";
+  return [
+    "SELECTED_PROJECT_CONTEXT_UNAVAILABLE",
+    `Selected project IDs attached to this session: ${input.selectedProjectIds.join(", ")}`,
+    `Unresolved selected project IDs: ${unresolvedIds.join(", ")}`,
+    "Do not invent project names, companies, tools, metrics, or project details.",
+    "If the active question asks for projects, say that selected project details are not available in the provided context.",
+  ].join("\n");
+}
+
 /**
  * Per-source token budgets for each complexity tier.
  * Sources with budget 0 are skipped entirely (no DB fetch).
@@ -129,9 +169,14 @@ const PERSONAL_CONTEXT_KEYWORDS = [
   "my skills", "my role", "tell me about yourself", "introduce yourself",
   "your project", "your experience", "based on my", "from my",
   "tell me about a time", "describe a situation",
+  "critical situation", "critical challenge", "challenges did you face",
+  "situation you faced", "how did you handle it", "rate yourself",
+  "manage and secure sensitive credentials", "client id and client secret",
+  "where do you store", "key vault", "secrets manager",
   "years of experience", "year of experience", "how many years",
   "professional experience", "work experience", "responsibilities",
-  "tech stack", "impact", "metrics", "numbers",
+  "tech stack", "impact", "metrics", "worked on", "services you worked on",
+  "your tasks", "included in your tasks", "how confident", "your confidence",
   // Bare keywords that always need candidate context
   "project", "projects", "resume", "experience", "skills",
   "introduce", "background", "strength", "weakness",
@@ -141,11 +186,13 @@ const PERSONAL_CONTEXT_KEYWORDS = [
 const SCENARIO_TRIGGERS = [
   "suppose", "imagine", "if you had to", "in production", "build a system",
   "design a", "let's say", "consider a", "what would you do if",
-  "how would you handle", "walk me through", "what if",
+  "how would you handle", "what if",
   "a user reports", "the system is", "your team has deployed",
   "race condition", "deadlock", "outage", "continue from database part",
   "continue from architecture part", "database part", "architecture part",
-  "production issue", "incident",
+  "production issue", "incident", "scenario setup", "how will you tackle",
+  "how would you tackle", "inventory", "stock", "oversell", "oversold",
+  "multiple users", "concurrent", "high traffic", "negative orders",
 ];
 
 const SYSTEM_DESIGN_KEYWORDS = [
@@ -166,6 +213,29 @@ const SIMPLE_ATOMIC_PATTERNS = [
   /^when (?:do|should|would) (?:you|we) use /i,
 ];
 
+const TECH_CONCEPT_QUERY_RE =
+  /\b(spark\s*(?:session|context)?|sparkcontext|sparksession|databricks|pyspark|spark sql|data skew|repartition|coalesce|broadcast join|spark ui|executor|driver|numpy|pandas|generator|decorator|table statistics|column statistics|stats)\b/i;
+
+const SCENARIO_SCALE_RE =
+  /\b(1\s*tb|tb|gb\/hour|cluster size|nodes?|cores?|sla|throughput|daily basis|daily data|fixed time window|process(?:ing)? \d+)\b/i;
+
+const SQL_JOIN_COUNT_QUERY_RE =
+  /\b(inner join|left join|right join|full join|join count|output rows?|output records?|records? (?:will|would) (?:come|appear)|table1|table2)\b/i;
+
+function hasExplicitScenarioSetupQuery(normalized: string): boolean {
+  if (!normalized) return false;
+  if (normalized.includes("scenario setup:")) return true;
+  const hasProblemDomain =
+    /\b(e-?commerce|sale|inventory|stock|orders?|negative|oversell|oversold|multiple users?|concurrent|race condition|high traffic|same product|checkout|payment)\b/i.test(
+      normalized,
+    );
+  const hasScenarioAsk =
+    /\b(how (?:would|will|do) you (?:handle|tackle|solve|fix|prevent|approach|resolve)|what (?:would|will|do) you do)\b/i.test(
+      normalized,
+    );
+  return hasProblemDomain && hasScenarioAsk;
+}
+
 /**
  * Classifies a question's complexity tier using pure heuristics.
  * Zero AI calls — only pattern matching, word count, and keyword detection.
@@ -175,10 +245,12 @@ export function classifyComplexity(query: string | undefined): QuestionComplexit
 
   const normalized = normalizeTranscriptForQuestionDetection(query).toLowerCase().trim();
   const wordCount = normalized.split(/\s+/).filter(Boolean).length;
+  const hasScenarioSetup = hasExplicitScenarioSetupQuery(normalized);
 
-  // 1. Follow-up detection (highest priority — short questions that reference prior context)
-  if (detectFollowupIntent(query)) {
-    return "followup";
+  // 1. Scenario-based questions with explicit setup beat stale follow-up and long-question routing.
+  const hasScenarioTrigger = SCENARIO_TRIGGERS.some(t => normalized.includes(t));
+  if (hasScenarioSetup) {
+    return "scenario_based";
   }
 
   // 2. System design / architecture deep dive
@@ -187,8 +259,11 @@ export function classifyComplexity(query: string | undefined): QuestionComplexit
     return "system_design";
   }
 
-  // 3. Scenario-based questions
-  const hasScenarioTrigger = SCENARIO_TRIGGERS.some(t => normalized.includes(t));
+  // 3. Follow-up detection for short questions that reference prior context.
+  if (detectFollowupIntent(query)) {
+    return "followup";
+  }
+
   if (hasScenarioTrigger) {
     return "scenario_based";
   }
@@ -197,6 +272,13 @@ export function classifyComplexity(query: string | undefined): QuestionComplexit
   const hasPersonalContext = PERSONAL_CONTEXT_KEYWORDS.some(kw => normalized.includes(kw));
   if (hasPersonalContext) {
     return "simple_contextual";
+  }
+
+  if (
+    SQL_JOIN_COUNT_QUERY_RE.test(normalized) ||
+    (TECH_CONCEPT_QUERY_RE.test(normalized) && !SCENARIO_SCALE_RE.test(normalized))
+  ) {
+    return "simple_atomic";
   }
 
   // 5. Simple atomic — short, generic knowledge questions
@@ -287,6 +369,103 @@ function extractSectionByHeading(
     selected.push(line);
   }
   return selected.join("\n").trim();
+}
+
+function extractFirstResumeLine(lines: string[], pattern: RegExp): string {
+  const line = lines.find((candidate) => pattern.test(candidate));
+  if (!line) return "";
+  return line.replace(pattern, "$1").replace(/\s+/g, " ").trim();
+}
+
+function extractExplicitTotalExperience(resumeText: string): string {
+  const normalized = resumeText.replace(/\s+/g, " ").trim();
+  const labeled = normalized.match(
+    /\b(?:total\s+)?experience\s*[:\-]\s*([^.|;\n]{0,120}?\b\d+(?:\.\d+)?\+?\s*(?:years?|yrs?)\b[^.|;\n]{0,120})/i,
+  );
+  if (labeled?.[1]) return labeled[1].trim();
+  const sentence = normalized.match(
+    /\b\d+(?:\.\d+)?\+?\s*(?:years?|yrs?)\s+(?:of\s+)?(?:professional\s+|work\s+)?experience\b[^.|;\n]{0,120}/i,
+  );
+  return sentence?.[0]?.trim() || "";
+}
+
+function compactResumeSection(section: string, maxChars: number): string {
+  const normalized = section
+    .split(/\r?\n/)
+    .map((line) => line.replace(/\s+/g, " ").trim())
+    .filter(Boolean)
+    .join("\n");
+  if (normalized.length <= maxChars) return normalized;
+  return `${normalized.slice(0, Math.max(0, maxChars - 16)).trim()}...`;
+}
+
+export function extractCandidateProfileContext(input: {
+  resumeText: string;
+  targetBudget: number;
+  includeResumeProjects: boolean;
+}): string {
+  if (!input.resumeText.trim()) return "";
+  const lines = splitResumeLines(input.resumeText);
+  const stopAtMajorSection =
+    /^(summary|profile|objective|professional summary|work experience|professional experience|experience|employment history|internships?|skills?|technical skills?|projects?|project experience|academic projects|professional projects|education|certifications?|achievements?|awards?|languages?|publications?|contact|personal details)$/i;
+  const summary = extractSectionByHeading(
+    lines,
+    /^(summary|profile|objective|professional summary)$/i,
+    /^(work experience|professional experience|experience|employment history|internships?|skills?|technical skills?|projects?|project experience|academic projects|professional projects|education|certifications?|achievements?|awards?|languages?|publications?|contact|personal details)$/i,
+  );
+  const workExperience = extractSectionByHeading(
+    lines,
+    /^(work experience|professional experience|experience|employment history|internships?)$/i,
+    /^(skills?|technical skills?|projects?|project experience|academic projects|professional projects|education|certifications?|achievements?|awards?|languages?|publications?|contact|personal details)$/i,
+  );
+  const skills = extractSectionByHeading(
+    lines,
+    /^(skills?|technical skills?)$/i,
+    /^(work experience|professional experience|experience|employment history|internships?|projects?|project experience|academic projects|professional projects|education|certifications?|achievements?|awards?|languages?|publications?|contact|personal details)$/i,
+  );
+  const education = extractSectionByHeading(
+    lines,
+    /^(education)$/i,
+    /^(work experience|professional experience|experience|employment history|internships?|skills?|technical skills?|projects?|project experience|academic projects|professional projects|certifications?|achievements?|awards?|languages?|publications?|contact|personal details)$/i,
+  );
+  const certifications = extractSectionByHeading(
+    lines,
+    /^(certifications?)$/i,
+    /^(work experience|professional experience|experience|employment history|internships?|skills?|technical skills?|projects?|project experience|academic projects|professional projects|education|achievements?|awards?|languages?|publications?|contact|personal details)$/i,
+  );
+  const resumeProjects = input.includeResumeProjects
+    ? extractSectionByHeading(
+        lines,
+        /^(projects?|project experience|academic projects|professional projects)$/i,
+        /^(work experience|professional experience|experience|employment history|internships?|skills?|technical skills?|education|certifications?|achievements?|awards?|languages?|publications?|contact|personal details)$/i,
+      )
+    : "";
+  const name = extractFirstResumeLine(lines, /^name\s*:\s*(.+)$/i);
+  const role = extractFirstResumeLine(lines, /^(?:role|title|current role)\s*:\s*(.+)$/i);
+  const totalExperience = extractExplicitTotalExperience(input.resumeText);
+  const headerLines = lines
+    .slice(0, 12)
+    .filter((line) => !isResumeSectionHeading(line, stopAtMajorSection))
+    .filter((line) => !/^(email|phone|location|links?)\s*:/i.test(line))
+    .slice(0, 4)
+    .join("\n");
+
+  const sections = [
+    "VERIFIED_CANDIDATE_PROFILE",
+    name ? `Name: ${name}` : "",
+    role ? `Current/Recent Role: ${role}` : "",
+    totalExperience ? `Total Experience: ${totalExperience}` : "",
+    !name && !role && headerLines ? `Header/Profile lines:\n${compactResumeSection(headerLines, 280)}` : "",
+    summary ? `Resume Summary:\n${compactResumeSection(summary, 520)}` : "",
+    workExperience ? `Work History:\n${compactResumeSection(workExperience, 900)}` : "",
+    skills ? `Skills:\n${compactResumeSection(skills, 520)}` : "",
+    education ? `Education:\n${compactResumeSection(education, 420)}` : "",
+    certifications ? `Certifications:\n${compactResumeSection(certifications, 320)}` : "",
+    resumeProjects ? `Resume Project Summary:\n${compactResumeSection(resumeProjects, 700)}` : "",
+  ].filter(Boolean);
+
+  const profile = sections.join("\n\n");
+  return trimResume(profile, input.targetBudget);
 }
 
 function buildScoredResumeBlocks(resumeText: string, query: string): string[] {
@@ -809,10 +988,14 @@ export async function buildOptimizedContext(
   const isProjectDetailQuestion = isExplicitProjectDetailQuestion(query);
   const isMixedExperienceProject = isMixedExperienceProjectQuestion(query);
   const isProjectOverview = isProjectOverviewQuestion(query);
-  const resumeProjectFallbackActive =
-    !hasSelectedProjects &&
-    isProjectDetailQuestion &&
-    !!session.resumeId;
+  const resumeProjectFallbackActive = shouldUseResumeBackedProjectFallback({
+    hasSelectedProjects,
+    isProjectQuestion,
+    isProjectDetailQuestion,
+    isProjectOverview,
+    isMixedExperienceProject,
+    hasResume: !!session.resumeId,
+  });
   const projectPriorityActive =
     hasSelectedProjects &&
     isProjectDetailQuestion &&
@@ -855,7 +1038,7 @@ export async function buildOptimizedContext(
     (!projectPriorityActive || isMixedExperienceProject);
   const includeProjects =
     shouldIncludeProjects(complexity) &&
-    (projectPriorityActive || isProjectDetailQuestion);
+    (projectPriorityActive || isProjectDetailQuestion || resumeProjectFallbackActive);
   const includeDocuments = shouldIncludeDocuments(complexity);
   const includeHistory = shouldIncludeHistory(complexity);
   const includeVector = contextMode !== "live" && shouldIncludeVectorRAG(complexity);
@@ -889,6 +1072,14 @@ export async function buildOptimizedContext(
         return aIndex - bIndex;
       })
     : [];
+  const selectedProjectResolutionContext = includeProjects
+    ? buildSelectedProjectsUnavailableContext({
+        selectedProjectIds,
+        resolvedProjectIds: orderedProjectRecords
+          .map((record: any) => String(record?.id ?? "").trim())
+          .filter(Boolean),
+      })
+    : "";
 
   // Extract document text if fetched
   let documentRawText = "";
@@ -907,7 +1098,21 @@ export async function buildOptimizedContext(
   const resumeBudget = resumeProjectFallbackActive
     ? Math.max(budgets.resume, isProjectOverview ? 1800 : 1200)
     : budgets.resume;
-  const optimizedResume = includeResume ? trimResume(resumeRaw, resumeBudget) : "";
+  const shouldUseCandidateProfileDigest =
+    includeResume &&
+    (complexity === "simple_contextual" ||
+      isProjectQuestion ||
+      isMixedExperienceProject ||
+      isProjectOverview);
+  const optimizedResume = includeResume
+    ? shouldUseCandidateProfileDigest
+      ? extractCandidateProfileContext({
+          resumeText: resumeRaw,
+          targetBudget: resumeBudget,
+          includeResumeProjects: !hasSelectedProjects,
+        }) || trimResume(resumeRaw, resumeBudget)
+      : trimResume(resumeRaw, resumeBudget)
+    : "";
   const resumeProjectContext = resumeProjectFallbackActive
     ? extractResumeProjectContext(
         resumeRaw,
@@ -916,13 +1121,16 @@ export async function buildOptimizedContext(
       )
     : "";
 
-  const optimizedProjects = includeProjects
+  const optimizedProjects = includeProjects && orderedProjectRecords.length > 0
     ? extractRelevantProjectContext(orderedProjectRecords || [], query || "", budgets.projects, {
         primaryProjectId,
         selectedProjectIds,
       })
-    : resumeProjectContext;
-  const effectiveIncludeProjects = includeProjects || !!resumeProjectContext;
+    : selectedProjectResolutionContext || resumeProjectContext;
+  const effectiveIncludeProjects =
+    includeProjects ||
+    !!selectedProjectResolutionContext ||
+    !!resumeProjectContext;
 
   const optimizedDoc = includeDocuments
     ? extractRelevantDocumentContext(documentRawText, query || "", budgets.document)
@@ -979,12 +1187,26 @@ export async function buildOptimizedContext(
     console.log(`[CIE] Budget ${effectiveBudget} exceeded (${totalCalculated}). Scaling down.`);
     const scaleFactor = effectiveBudget / totalCalculated;
 
-    if (includeResume) finalResume = trimResume(resumeRaw, Math.floor(resumeTokens * scaleFactor));
-    if (includeProjects) {
+    if (includeResume) {
+      const scaledResumeBudget = Math.floor(resumeTokens * scaleFactor);
+      finalResume = shouldUseCandidateProfileDigest
+        ? extractCandidateProfileContext({
+            resumeText: resumeRaw,
+            targetBudget: scaledResumeBudget,
+            includeResumeProjects: !hasSelectedProjects,
+          }) || trimResume(resumeRaw, scaledResumeBudget)
+        : trimResume(resumeRaw, scaledResumeBudget);
+    }
+    if (includeProjects && orderedProjectRecords.length > 0) {
       finalProjects = extractRelevantProjectContext(orderedProjectRecords || [], query || "", Math.floor(projectsTokens * scaleFactor), {
         primaryProjectId,
         selectedProjectIds,
       });
+    } else if (selectedProjectResolutionContext) {
+      finalProjects = trimResume(
+        selectedProjectResolutionContext,
+        Math.max(180, Math.floor(projectsTokens * scaleFactor)),
+      );
     } else if (resumeProjectContext) {
       finalProjects = trimResume(resumeProjectContext, Math.max(700, Math.floor(projectsTokens * scaleFactor)));
     }

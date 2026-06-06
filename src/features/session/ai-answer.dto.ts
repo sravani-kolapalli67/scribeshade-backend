@@ -72,6 +72,12 @@ const activeQuestionDetectionSchema = z.object({
   referencedHistoryTurnId: z.string().trim().min(1).max(120).optional(),
 });
 
+const SYNTHETIC_CONTINUITY_SUFFIX_RE = /\s+\(in context of:\s*[^()]+\)\s*$/i;
+
+function normalizeManualQuestion(question: string): string {
+  return question.replace(SYNTHETIC_CONTINUITY_SUFFIX_RE, "").trim();
+}
+
 export const aiAnswerRequestSchema = z.object({
   transcript: z.string().trim().min(1).optional(),
   requestId: z.string().trim().min(1).max(120).optional(),
@@ -241,9 +247,10 @@ export function normalizeAIAnswerRequestBody(
   const patchedTranscript = dto.patchedTranscript?.trim() || "";
   const currentQuestion = dto.currentQuestion?.trim() || "";
   const transcriptText = dto.transcript?.trim() || "";
+  const manualQuestion = normalizeManualQuestion(currentQuestion || transcriptText);
   const resolvedQuestion =
     patchedTranscript ||
-    (!!dto.isCustomQuery ? currentQuestion : "") ||
+    (!!dto.isCustomQuery ? manualQuestion : "") ||
     transcriptText ||
     currentQuestion;
   const resolvedFrom: NormalizedAIAnswerRequest["resolvedFrom"] =

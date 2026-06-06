@@ -165,3 +165,60 @@ test("answers questions starting with conjunctions or fillers", () => {
   assert.equal(question.displayQuestion, "And what is difference between Redux? And context API?");
 });
 
+test("filler-only transcript is not answerable metadata", () => {
+  const question = reconstructQuestion({
+    normalizedBlocks: [
+      {
+        rawText: "Okay.",
+        cleanedText: "Okay.",
+        correctedText: "Okay.",
+        speakerType: "UNKNOWN",
+        confidence: 0.95,
+        corrections: [],
+      },
+    ],
+    fallbackQuestion: "Okay.",
+    activeTopic: null,
+  });
+
+  const decision = decideAnswer({
+    reconstructedQuestion: question,
+    activeTopic: null,
+    selectedAnswerPresent: false,
+  });
+
+  assert.equal(question.intent, "noise");
+  assert.equal(question.shouldAnswer, false);
+  assert.equal(question.reason, "low_confidence_noise");
+  assert.equal(decision.shouldAnswer, false);
+  assert.equal(decision.reason, "low_confidence_noise");
+});
+
+test("short unsupported followup without selected or history target is not answerable metadata", () => {
+  const question = reconstructQuestion({
+    normalizedBlocks: [
+      {
+        rawText: "that function?",
+        cleanedText: "that function?",
+        correctedText: "that function?",
+        speakerType: "UNKNOWN",
+        confidence: 0.9,
+        corrections: [],
+      },
+    ],
+    fallbackQuestion: "that function?",
+    activeTopic: null,
+  });
+
+  const decision = decideAnswer({
+    reconstructedQuestion: question,
+    activeTopic: null,
+    selectedAnswerPresent: false,
+  });
+
+  assert.equal(question.isFollowUp, true);
+  assert.equal(question.shouldAnswer, false);
+  assert.equal(question.reason, "missing_followup_target");
+  assert.equal(decision.shouldAnswer, false);
+  assert.equal(decision.reason, "missing_followup_target");
+});

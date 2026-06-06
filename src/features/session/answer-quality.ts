@@ -1,4 +1,5 @@
 import type { AIAnswerLiveContextMetadata } from "./ai-answer.dto";
+import { isFreshCodeGenerationRequest } from "./ai-answer-context-guards";
 
 type FollowupTargetSource =
   | "selected_answer"
@@ -48,21 +49,31 @@ export type ConversationIntent =
 
 const FILLER_ONLY_RE = /^(hi|hello|hey|can you hear me|am i audible|okay|ok|hmm|huh|right|fine)$/i;
 const EXPLICIT_EXPERIENCE_RE =
-  /\b(introduce yourself|tell me about yourself|your background|your experience|overall experience|relevant experience|total experience|current experience|experience in|experience with|experience at|your project|your company|tell me about your project|from your project|in your company|in your project|where have you used|how have you used|years? of experience|how many years|professional experience|work experience|project details?|your role|responsibilit(?:y|ies)|measurable impact|impact metrics?|numbers?|tech stack)\b/i;
+  /\b(introduce yourself|tell me about yourself|your background|your profile|walk me through (?:your )?profile|skill set|your skills|your experience|overall experience|relevant experience|total experience|current experience|experience in|experience with|experience at|your project|your company|tell me about your project|from your project|in your company|in your project|where have you used|how have you used|years? of experience|how many years|professional experience|work experience|project details?|your role|responsibilit(?:y|ies)|measurable impact|impact metrics?|tech stack|worked on|services you worked on|critical situation|critical challenge|situation you faced|how did you handle it|rate yourself|how confident|your confidence|your tasks|included in your tasks|manage and secure sensitive credentials|client id and client secret|where do you store|key vault|secrets manager)\b/i;
 const CODE_REF_RE =
-  /\b(this code|the code|your code|the code you wrote|above code|previous code|first line|that query|the query|same query|the same query|same code|the same code|same logic|same script|same approach|query you wrote|query you wrote before|that code|what does this code do|explain (?:it|the code again)|explain (?:this|that|the|your|previous|above)\s+(?:code|query|snippet|function|logic)|why (?:is|was) this used|why did you use this|optimi[sz]e (?:this|it|the code|the query)?|debug (?:this|it|the code|the query)?|fix (?:this|it|the code|the query)?|previous answer|above answer)\b/i;
+  /\b(this code|the code|your code|the code you wrote|above code|previous code|first line|that query|the query|that function|this function|your function|the function you wrote|function that you (?:have )?written|row_number|row number|year\s*-\s*row_number|lag\(|lag function|\blag\b|lead\(|lead function|\blead\b|window function|same query|the same query|same code|the same code|same logic|same script|same approach|query you wrote|query you wrote before|that code|what does this code do|how this works|explain (?:it|the code again)|explain (?:this|that|the|your|previous|above)\s+(?:code|query|snippet|function|logic)|why (?:is|was) this used|why did you use this|optimi[sz]e (?:this|it|the code|the query)|debug (?:this|it|the code|the query)|fix (?:this|it|the code|the query)|previous answer|above answer)\b/i;
 const FOLLOWUP_RE =
-  /\b(explain this|explain that|explain the code again|expand on that|can you expand|can you explain more|can you explain that|tell me more about that|tell me more|why did you use this|why this is used|why|how exactly|same thing|continue(?: from)?|continue from .{1,80}|what about that|what does this mean|previous answer|above answer|before|you wrote|you said|you mentioned|in your previous project|previously you said|the approach|that approach|repeat the answer|what did you say|database part|architecture part|from the (?:database|backend|frontend|api|architecture|deployment|security|scaling) part)\b/i;
+  /\b(explain this|explain that|explain the code again|expand on that|can you expand|can you explain more|can you explain that|tell me more about that|tell me more|why did you use this|why this is used|why|how exactly|how this works|how come|are you sure|is that correct|not correct|i think .* not (?:right|correct)|in context of|same thing|continue(?: from)?|continue from .{1,80}|what about (?:that|azure|aws|amazon web services|the other cloud)(?: then)?|what does this mean|previous answer|above answer|before|you wrote|you said|you mentioned|in your previous project|previously you said|the approach|that approach|repeat the answer|what did you say|database part|architecture part|from the (?:database|backend|frontend|api|architecture|deployment|security|scaling) part)\b/i;
 const EXAMPLE_FOLLOWUP_RE =
   /^(?:can|could|would)\s+you\s+(?:write|give|show|share|provide)\s+(?:some\s+)?(?:examples?|sample(?:s)?|snippet(?:s)?)(?:\s+(?:for|of|on|about).*)?\??$/i;
 const VAGUE_DEICTIC_RE =
   /^(?:that|this|it|that approach|this approach|explain it|explain that|explain this|explain the code|can you explain that|can you explain this|continue|continue from .{1,80}|tell me more|tell me more about that|why\??|why this is used\??|how so\??|how exactly did you do that\??|elaborate|expand|optimi[sz]e this|debug this)\s*$/i;
+const CORRECTION_FOLLOWUP_RE =
+  /\b(how come|are you sure|is that correct|not correct|i think .* not (?:right|correct)|how many times|how come only)\b/i;
 const DEBUG_FOLLOWUP_RE = /\b(debug|fix|bug|error|issue|failing|not working)\b/i;
 const OPTIMIZE_FOLLOWUP_RE = /\b(optimi[sz]e|improve performance|make (?:this|it) faster|refactor|what if (?:the|this|that|same)\b.*\b(?:query|code|logic)|slow(?:er)?|taking (?:more|too|long)|performance issue|hitting (?:all|every|maximum|max)|full (?:table )?scan)\b/i;
 const SCENARIO_FOLLOWUP_RE =
-  /\b(scenario|suppose|imagine|case where|incident|outage|production|architecture|system design|continue from (?:database|backend|frontend|api|architecture|deployment|security|scaling) part|database part|tradeoff|trade-off|next step)\b/i;
+  /\b(scenario|suppose|imagine|case where|incident|outage|production|continue from (?:database|backend|frontend|api|architecture|deployment|security|scaling) part|database part|architecture part|tradeoff|trade-off|next step)\b/i;
+const SCENARIO_SETUP_QUERY_RE =
+  /\b(scenario setup|e-?commerce|sale|inventory|stock|orders?|negative|oversell|oversold|multiple users?|concurrent|race condition|high traffic|same product|checkout|payment)\b[\s\S]*\b(how (?:would|will|do) you (?:handle|tackle|solve|fix|prevent|approach|resolve)|what (?:would|will|do) you do)\b/i;
+const DATA_PROCESSING_SCENARIO_RE =
+  /(?=.*\b(1\s*tb|tb|s3|cluster size|nodes?|cores?|monitor(?:ing)?|throughput|daily data|fixed time window|process(?:ing)?)\b)(?=.*\b(how (?:would|will|do) you (?:define|decide|monitor|process|handle|tackle|solve|approach)|what (?:should|would|will|do) (?:be|you|we)|number of nodes|cluster size)\b)/i;
+const SQL_JOIN_CONCEPT_RE =
+  /\b(inner join|left join|right join|full join|join count|output rows?|output records?|records? (?:will|would) (?:come|appear)|table1|table2)\b/i;
 const INTERVIEW_INSTRUCTION_RE =
   /\b(answer this|give me an answer|how should i answer|what should i say|interviewer is asking|define this|explain this for interview)\b/i;
+const TECH_CONCEPT_RE =
+  /\b(python\s+)?(generator|decorator)s?\b|\bspark\s*(session|context)\b|\bdata skew\b|\brepartition\b|\bcoalesce\b|\bbroadcast join\b|\bspark ui\b|\bexecutor\b|\bdriver\b|\btable statistics\b|\bcolumn statistics\b|\bstats\b|\bdatabricks\b|\bnumpy\b|\bpandas\b/i;
 const HIGH_CONFIDENCE_THRESHOLD = 1.5;
 const STRONG_TOPIC_TERMS = [
   "mongodb",
@@ -74,6 +85,15 @@ const STRONG_TOPIC_TERMS = [
   "query",
   "code",
   "function",
+  "pyspark",
+  "spark",
+  "row_number",
+  "row number",
+  "lag",
+  "lead",
+  "window function",
+  "collect_list",
+  "dataframe",
   "api",
   "backend",
   "frontend",
@@ -172,6 +192,8 @@ export function classifyConversationIntent(question: string): ConversationIntent
   const n = normLoose(strippedQ);
   if (!n) return "UNKNOWN";
   if (FILLER_ONLY_RE.test(strippedQ)) return "UNKNOWN";
+  if (SCENARIO_SETUP_QUERY_RE.test(strippedQ) || DATA_PROCESSING_SCENARIO_RE.test(strippedQ)) return "SCENARIO_QUESTION";
+  if (isFreshCodeGenerationRequest(strippedQ)) return "NEW_QUESTION";
   if (CODE_REF_RE.test(strippedQ)) {
     if (DEBUG_FOLLOWUP_RE.test(strippedQ)) return "DEBUG_CODE";
     if (OPTIMIZE_FOLLOWUP_RE.test(strippedQ)) return "OPTIMIZE_CODE";
@@ -183,6 +205,7 @@ export function classifyConversationIntent(question: string): ConversationIntent
   if (EXAMPLE_FOLLOWUP_RE.test(strippedQ)) return "FOLLOW_UP";
   if (FOLLOWUP_RE.test(strippedQ)) return "FOLLOW_UP";
   if (INTERVIEW_INSTRUCTION_RE.test(strippedQ)) return "INTERVIEW_INSTRUCTION";
+  if (TECH_CONCEPT_RE.test(strippedQ) || SQL_JOIN_CONCEPT_RE.test(strippedQ)) return "NEW_QUESTION";
   if (/^(what|why|how|when|where|which|who|can|could|would|should|is|are|do|does|did|explain|define|describe|tell me|introduce|walk me|write|implement|design)\b/i.test(strippedQ)) {
     return "NEW_QUESTION";
   }
@@ -378,6 +401,11 @@ function isLikelyPollutedJoin(question: string): boolean {
   const q = normalizeSpaces(question);
   if (!q) return false;
   const lower = q.toLowerCase();
+  const userMarkerCount = (q.match(/\[(?:user|candidate|interviewer)\]\s*:/gi) || []).length;
+  if (userMarkerCount >= 2) return true;
+  const questionMarkCount = (q.match(/\?/g) || []).length;
+  if (q.length > 400 && questionMarkCount >= 2) return true;
+  if (/\bmongo(?:db)?|mongoose\b/i.test(q) && /\breact|useeffect|hook|component\b/i.test(q)) return true;
   if (/\bplus\b/.test(lower) && /\bwhat is\b[\s\S]*\bwhat is\b/.test(lower)) return true;
   const starterCount = (lower.match(/\b(what is|what are|explain|define|how|why|when|where|which|who|implement|write|debug|optimi[sz]e)\b/g) || []).length;
   const hasJoiner = /\b(plus|and then|also|along with)\b/i.test(lower);
@@ -506,7 +534,7 @@ function deriveTopicFromText(text: string): string {
   if (/\b(mongoose|mongodb|mongo|aggregation|pipeline|nosql|collection|schema|event logs?|user events?)\b/.test(t)) return "mongodb";
   if (/\b(sql|postgres|postgresql|select|query|join|table|index)\b/.test(t)) return "sql";
   if (/\b(react|jsx|hooks|component)\b/.test(t)) return "react";
-  if (/\b(pyspark|spark|datalake|databricks)\b/.test(t)) return "pyspark";
+  if (/\b(pyspark|spark|datalake|databricks|dataframe|row_number|row number|lag|lead|window function|collect_list|withcolumn)\b/.test(t)) return "pyspark";
   if (/\b(node|express|api|backend)\b/.test(t)) return "backend";
   return "general";
 }
@@ -522,7 +550,6 @@ export function deriveTopic(question: string, previousAiAnswer?: string): string
 function scoreTarget(question: string, currentTopic: string, entry: AnswerHistoryEntry): number {
   let score = 0;
   const q = normLoose(question);
-  if (entry.codeBlocks.length > 0) score += 2;
   if (currentTopic !== "general" && entry.topic === currentTopic) score += 4;
   score += tokenOverlap(q, `${entry.question} ${entry.answer}`) * 5;
   if (CODE_REF_RE.test(q) && entry.codeBlocks.length > 0) score += 3;
@@ -566,15 +593,29 @@ export function resolveFollowupTarget(input: {
   selectedAnswerText?: string;
   selectedAnswerCodeBlocks?: string[];
   selectedAnswerTopic?: string;
+  strictSelectedAnswer?: boolean;
 }): FollowupTargetResult {
   const q = normalizeSpaces(normalizeTranscriptForQuestionDetection(input.question));
+  if (isFreshCodeGenerationRequest(q)) {
+    return {
+      target: null,
+      source: "none",
+      isExplicitFollowupReference: false,
+      reasonForNoTarget: "fresh_code_generation_no_followup_reference",
+      ...(input.selectedAnswerId
+        ? { selectedAnswerIgnoredReason: "fresh_code_generation_no_followup_reference" }
+        : {}),
+    };
+  }
   const isExplicitFollowupReference =
+    !!input.strictSelectedAnswer ||
     CODE_REF_RE.test(q) ||
     FOLLOWUP_RE.test(q) ||
     VAGUE_DEICTIC_RE.test(q) ||
     EXAMPLE_FOLLOWUP_RE.test(q);
   const isVagueDeictic = VAGUE_DEICTIC_RE.test(q);
   const isExampleFollowup = EXAMPLE_FOLLOWUP_RE.test(q);
+  const isCorrectionFollowup = CORRECTION_FOLLOWUP_RE.test(q);
   const history = input.history;
   const selectedAnswerId = input.selectedAnswerId?.trim();
   const selectedAnswerText = input.selectedAnswerText?.trim();
@@ -598,6 +639,14 @@ export function resolveFollowupTarget(input: {
 
   if (selectedAnswerId) {
     const exact = history.find((h) => h.id === selectedAnswerId);
+    if (input.strictSelectedAnswer && exact) {
+      return {
+        target: exact,
+        source: "selected_answer",
+        isExplicitFollowupReference: true,
+        targetConfidence: 1,
+      };
+    }
     const currentTopicForSelected = deriveTopicFromText(q);
     const selectedTopicExact = exact?.topic || selectedAnswerTopic || "";
     const selectedTextExact = `${exact?.question || selectedAnswerQuestion || ""} ${exact?.answer || selectedAnswerText || ""}`;
@@ -633,6 +682,14 @@ export function resolveFollowupTarget(input: {
           deriveTopicFromText(`${selectedAnswerQuestion || ""} ${selectedAnswerText || ""}`),
         orderIndex: Number.MAX_SAFE_INTEGER,
       };
+      if (input.strictSelectedAnswer) {
+        return {
+          target: synthetic,
+          source: "selected_answer",
+          isExplicitFollowupReference: true,
+          targetConfidence: 0.95,
+        };
+      }
       const selectedTextSynthetic = `${synthetic.question} ${synthetic.answer}`;
       const selectedOverlapSynthetic = tokenOverlap(q, selectedTextSynthetic);
       const selectedTopicCompatibleSynthetic =
@@ -712,7 +769,7 @@ export function resolveFollowupTarget(input: {
     };
   }
 
-  if (isVagueDeictic) {
+  if (isVagueDeictic || isCorrectionFollowup) {
     const immediate = history[history.length - 1];
     return {
       target: immediate,

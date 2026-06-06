@@ -32,12 +32,14 @@ export type AnswerRuntimeContext = {
   projectMode?: "selected_projects_present" | "resume_backed_projects_present" | "no_selected_projects";
   projectPriority?: string;
   resumeDigest?: string;
+  candidateProfileTokenBudget?: number;
   projectDigest?: string;
   documentSummary?: string;
   memorySummary?: string;
   historySummary?: string;
   instructions?: string;
   isProjectQuestion?: boolean;
+  projectDigestTokenBudget?: number;
 };
 
 export type AnswerPlan = {
@@ -58,6 +60,8 @@ export type AnswerPlan = {
 export type ActiveTaskV3 = {
   mode: "live_ai_answer" | "manual_query" | "regenerate_answer";
   transcriptEvidence?: string;
+  recentTranscriptContext?: string;
+  clickRawTranscript?: string;
   currentQuestionHint?: string;
   manualRequest?: string;
   originalQuestion?: string;
@@ -150,6 +154,38 @@ function summarizeEvidence(text: string, tokenBudget: number): string {
   return clipTokens(stripRuntimeArtifacts(text), tokenBudget);
 }
 
+function buildProjectContextSectionText(context: AnswerRuntimeContext): string {
+  const projectText = summarizeEvidence(
+    context.projectDigest || "",
+    resolveTokenBudget({
+      explicitBudget: context.projectDigestTokenBudget,
+      fallbackBudget: context.isProjectQuestion ? 700 : 250,
+    }),
+  );
+  if (!projectText.trim()) return "";
+  const sourceLine =
+    context.projectMode === "selected_projects_present"
+      ? "Project source: selected AI projects only. Do not replace with resume-backed or generic project examples."
+      : context.projectMode === "resume_backed_projects_present"
+        ? "Project source: resume-backed project/work context."
+        : "";
+  return [sourceLine, projectText].filter(Boolean).join("\n");
+}
+
+function resolveTokenBudget(input: {
+  explicitBudget?: number;
+  fallbackBudget: number;
+}): number {
+  if (
+    typeof input.explicitBudget === "number" &&
+    Number.isFinite(input.explicitBudget) &&
+    input.explicitBudget > 0
+  ) {
+    return Math.floor(input.explicitBudget);
+  }
+  return input.fallbackBudget;
+}
+
 function isUnavailableCandidateProfile(text: string): boolean {
   const normalized = normalizeSpaces(text).toLowerCase();
   return !normalized ||
@@ -161,7 +197,13 @@ function isUnavailableCandidateProfile(text: string): boolean {
 
 function buildCandidateProfileSectionText(context: AnswerRuntimeContext): string {
   if (!isUnavailableCandidateProfile(context.resumeDigest || "")) {
-    return summarizeEvidence(context.resumeDigest || "", 250);
+    return summarizeEvidence(
+      context.resumeDigest || "",
+      resolveTokenBudget({
+        explicitBudget: context.candidateProfileTokenBudget,
+        fallbackBudget: 250,
+      }),
+    );
   }
   return [
     "Candidate facts: Not provided.",
@@ -207,9 +249,14 @@ function buildProjectBehaviorRules(context: any): string[] {
 
   return [
     `- Runtime context may indicate PROJECT_PRIORITY: ${projectPriorityMode}. Follow that priority only when the active question is about projects, work experience, role ownership, tools, impact, or architecture.`,
-    "- If selected projects are present in runtime context and the active question is project/experience-related, treat selected projects as primary evidence. Resume-backed projects are fallback evidence when selected projects are absent.",
+    "- If selected projects are present in runtime context and the active question is project/experience-related, treat selected projects as the exclusive project evidence. Do not substitute resume-backed projects, prior-answer projects, or generic examples.",
+    "- Resume-backed projects are fallback evidence only when selected projects are absent.",
+    "- If PROJECT_CONTEXT says selected project details are unavailable, do not invent project names or details; state that selected project details are not available in the provided context.",
     "- For project/experience questions, use exact project/work item names and explicit tools from runtime context. Do not invent company names, tools, exact metrics, certifications, or frameworks that are not present.",
     "- For broad project asks, cover relevant selected projects with PRIMARY first. For a specific named project, answer that project only.",
+    "- For combined profile questions asking experience, skill set, and projects, answer in that order: Experience, Skill Set, Projects.",
+    "- In the Experience section, include total years and work experience only when available in runtime context. If exact years are not available, describe the level of experience without inventing a number.",
+    "- In the Skill Set section, group skills from runtime context by language, backend/frameworks, databases/cache, cloud/devops, and other relevant tools when those facts exist.",
     "- Project answers should cover Problem/Goal, My role, Tools/Process/Methods, Approach/Operating Model, Challenges + Decisions, and Impact/Metrics when those facts are available.",
   ];
 }
@@ -312,10 +359,7 @@ export function buildAnswerRuntimeContext(context: AnswerRuntimeContext): string
   return [
     ...sections,
     ...buildRuntimeSection("CANDIDATE_PROFILE", buildCandidateProfileSectionText(context)),
-    ...buildRuntimeSection(
-      "PROJECT_CONTEXT",
-      summarizeEvidence(context.projectDigest || "", context.isProjectQuestion ? 700 : 250),
-    ),
+    ...buildRuntimeSection("PROJECT_CONTEXT", buildProjectContextSectionText(context)),
     ...buildRuntimeSection(
       "MEMORY",
       summarizeEvidence([context.memorySummary, context.historySummary].filter(Boolean).join("\n"), 300),
@@ -353,23 +397,23 @@ export function buildRuntimeContextMessage(context: any): string {
  */
 export function buildScreenSystemMessage(context: any): string {
   return [
-    "You are ScribeShade AI, a real-time interview copilot embedded inside a live interview tool.",
-    "Answer visible interview questions as if the candidate is speaking directly to the interviewer.",
-    "Be concise, natural, context-aware, and interview-ready. Never ask clarifying questions.",
+    "You are ScribeShade AI, a fast real-time interview copilot.",
+    "Read the screenshot and answer the visible interview task as the candidate.",
     "",
-    "SCREEN RESPONSE RULES",
-    "- If no clear interview question, coding problem, system-design prompt, or explicit instruction is visible, output exactly ===NO_NEW_QUESTION===.",
-    "- Otherwise output only **QUESTION:** / **ANSWER:** blocks. The first non-whitespace characters must be **QUESTION:**.",
+    "RESPONSE CONTRACT",
+    "- Always return a useful answer for an explicit Analyze Screen request. Never return a no-question sentinel and never stay silent.",
+    "- The screenshot is the sole authority for the current question. Never reuse a previous transcript question or previous AI answer as the question.",
+    "- Prefer the clearest visible interview question, coding problem, system-design prompt, or instruction.",
+    "- If the wording is fragmented, reconstruct the best-supported complete question from visible screenshot content.",
+    "- If no explicit question is visible, explain the most interview-relevant visible topic, error, code, diagram, or instruction.",
+    "- Output only **QUESTION:** followed by **ANSWER:**. The first non-whitespace characters must be **QUESTION:**.",
     "- If multiple independent questions are visible, answer every one and separate blocks with exactly ===NEXT_QUESTION===.",
-    "- If visible sub-questions share one scenario or system-design setup, answer them as one unified question block.",
-    "- Use candidate voice for experience, project, behavioral, approach, and decision questions.",
-    "- Use proper markdown bullets on separate lines when listing points.",
-    ...buildSharedBehaviorRules(context),
-    ...buildProjectBehaviorRules(context),
-    "",
-    MARKDOWN_ANSWER_CONTRACT,
-    "",
-    "Do not invent resume/project facts. Use runtime context only when it helps answer the visible question.",
+    "- Keep one scenario with related sub-questions in one block.",
+    "- Answer directly in concise, natural first-person candidate voice when appropriate.",
+    "- Use short Markdown bullets for multiple points and fenced code only when code is requested.",
+    `- Simple language mode is ${context?.simpleLanguage ? "ON: use plain English and short sentences." : "OFF: normal technical vocabulary is allowed."}`,
+    "- Use runtime resume/project facts only when relevant. Never invent candidate facts, tools, or metrics.",
+    "- Do not ask for clarification, add meta-commentary, or end with an offer to help.",
   ].join("\n");
 }
 
@@ -474,7 +518,6 @@ function buildActiveTaskInstruction(input: ActiveTaskV3): string[] {
         ? "Generate a fresh improved answer for the original question."
         : "Infer the clean interview question(s) from Transcript Evidence. Then answer as the candidate.",
     "If multiple independent questions exist, separate with ===NEXT_QUESTION===.",
-    "If no answerable question exists, output exactly ===NO_NEW_QUESTION===.",
     "Output only **QUESTION:** / **ANSWER:** blocks.",
     "Do not use placeholders like [Candidate Name]. If a name is unavailable, omit the name.",
     `If the active input explicitly asks for code, syntax, query, implementation, debugging, or optimization, provide a working implementation in ${input.language}.`,
@@ -483,11 +526,26 @@ function buildActiveTaskInstruction(input: ActiveTaskV3): string[] {
 
   if (input.mode === "live_ai_answer") {
     lines.push(
+      "The backend has validated this AI Answer click as answerable. Never output ===NO_NEW_QUESTION===.",
+      "If the latest words are fragmented, reconstruct the best-supported complete question from Raw Click Transcript and Transcript Evidence, then answer it.",
       "Output exactly one Q&A block unless Transcript Evidence contains two or more explicit independent interview questions.",
       "Do not invent follow-up questions or generate additional questions to continue the interview.",
       "Treat compound asks like 'introduce yourself and explain your projects' as one Q&A block.",
       "Never create a new question such as 'Can you provide more details...' unless it appears in Transcript Evidence.",
       "Use ===NEXT_QUESTION=== only for explicit independent questions in Transcript Evidence.",
+      "For scenario/problem-solving questions, use the full scenario setup before the final ask.",
+      "Do not answer only the final sentence when it depends on earlier Transcript Evidence.",
+      "For scenario prompts, extract and preserve domain, actors, constraints, numbers, failure symptom, and final ask.",
+      "Treat one scenario with multiple details as one Q&A block unless there are independent explicit questions.",
+      "Use Raw Click Transcript as the highest priority evidence for the current ask.",
+      "Use Recent Transcript Context only to understand setup and continuity; do not let it override the latest explicit ask.",
+    );
+  }
+
+  if (input.answerClickMode === "answer_followup") {
+    lines.push(
+      "This is a follow-up to the selected answer card. Answer exactly one Q&A block about that selected answer only.",
+      "Do not use unrelated prior transcript/history/code, project architecture, system diagrams, or older topics unless they are present in the selected answer context.",
     );
   }
 
@@ -537,6 +595,20 @@ export function buildActiveTaskV3(input: ActiveTaskV3): string {
       "",
       "Transcript Evidence:",
       clipMultilineTokens(input.transcriptEvidence || "", 300),
+      ...(input.recentTranscriptContext?.trim()
+        ? [
+            "",
+            "Recent Transcript Context (~1-2 min, memory only):",
+            clipMultilineTokens(input.recentTranscriptContext, 220),
+          ]
+        : []),
+      ...(input.clickRawTranscript?.trim()
+        ? [
+            "",
+            "Raw Click Transcript (~15 sec, highest priority evidence):",
+            clipMultilineTokens(input.clickRawTranscript, 140),
+          ]
+        : []),
       "",
       "Current Question Hint:",
       input.currentQuestionHint?.trim()
@@ -588,20 +660,11 @@ export function buildScreenAnalysisMessage(context: any): string {
   return [
     "SCREEN ACTIVE TASK",
     `Simple Language Mode: ${context?.simpleLanguage ? "ON" : "OFF"}`,
-    "",
-    "Task: Identify every visible interview question, coding problem, system-design prompt, or explicit instruction on the screen and answer it.",
-    "",
-    "NO QUESTION FOUND:",
-    "- If there is no clearly visible interview question, coding problem, system-design prompt, or explicit instruction on the screen, output exactly ===NO_NEW_QUESTION===.",
-    "- Do not ask for clarification.",
-    "- Do not explain what is missing.",
-    "- Do not simulate or invent a question.",
-    "",
-    "SCREEN-SPECIFIC DELTAS:",
-    "- Count visible independent questions first. If there are N independent questions, output N **QUESTION:** / **ANSWER:** blocks separated by N-1 ===NEXT_QUESTION=== markers.",
+    "Identify and answer the active interview task visible in the screenshot.",
+    "Ignore questions from earlier conversation turns; copy or faithfully reconstruct the question currently visible on screen.",
+    "Use nearby visible content as setup when the final question depends on it.",
+    "When wording is incomplete, reconstruct the best-supported ask instead of refusing.",
     "- Answer order must match the on-screen order: top to bottom, left to right.",
-    "- A single scenario/system-design setup with multiple sub-parts counts as one unified question block.",
-    "- Only use ===NEXT_QUESTION=== when questions are truly independent and do not share the same setup.",
-    "- Never output meta-commentary. Just answer the visible active prompt.",
+    "- Use ===NEXT_QUESTION=== only between truly independent questions.",
   ].join("\n");
 }

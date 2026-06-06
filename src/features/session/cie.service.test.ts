@@ -1,12 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  buildSelectedProjectsUnavailableContext,
   classifyComplexity,
   detectFollowupIntent,
+  extractCandidateProfileContext,
   extractResumeProjectContext,
   extractRelevantProjectContext,
   isExplicitProjectDetailQuestion,
   isProjectExperienceQuestion,
+  shouldUseResumeBackedProjectFallback,
 } from "./cie.service";
 
 test("CIE treats code and scenario continuations as followups", () => {
@@ -17,9 +20,182 @@ test("CIE treats code and scenario continuations as followups", () => {
   assert.equal(classifyComplexity("optimize this"), "followup");
 });
 
+test("CIE treats ecommerce inventory scenario setup as scenario, not followup", () => {
+  assert.equal(
+    classifyComplexity(
+      "Scenario setup: ecommerce sale, multiple users buying same product, inventory left 5, orders are going negative. Question: How will you tackle this issue?",
+    ),
+    "scenario_based",
+  );
+});
+
+test("CIE keeps long explicit ecommerce scenario as scenario, not system design", () => {
+  assert.equal(
+    classifyComplexity(
+      [
+        "Scenario setup: suppose there is an ecommerce flash sale running in production with very high traffic.",
+        "Multiple users are trying to buy the same product at the same time from checkout and payment services.",
+        "Inventory left is 5, but due to concurrent requests and race conditions the system creates negative orders and oversells stock.",
+        "The interviewer asks how would you handle, fix, prevent, and monitor this issue end to end.",
+      ].join(" "),
+    ),
+    "scenario_based",
+  );
+});
+
+test("CIE routes Parakeet data-processing scenario and SQL join-count problem separately", () => {
+  assert.equal(
+    classifyComplexity("You have to process 1TB data daily from S3. What cluster size, nodes, and monitoring would you use?"),
+    "scenario_based",
+  );
+  assert.equal(
+    classifyComplexity("For given table1 and table2, count records for inner join, left join, right join, and full join on number column."),
+    "simple_atomic",
+  );
+});
+
 test("CIE treats experience years and responsibilities as context questions", () => {
   assert.equal(isProjectExperienceQuestion("How many years of experience do you have?"), true);
   assert.equal(isProjectExperienceQuestion("What were your responsibilities in that project?"), true);
+  assert.equal(isProjectExperienceQuestion("And what about your projects?"), true);
+});
+
+test("CIE routes Parakeet profile and cloud-service experience asks as contextual", () => {
+  assert.equal(
+    classifyComplexity("Can you walk me through your profile, explain your experience and skill set?"),
+    "simple_contextual",
+  );
+  assert.equal(
+    classifyComplexity("Azure and AWS services you worked on and how deep you used Data Factory?"),
+    "simple_contextual",
+  );
+  assert.equal(
+    classifyComplexity("Any critical situation you faced and how did you handle it?"),
+    "simple_contextual",
+  );
+  assert.equal(
+    classifyComplexity("How do you manage and secure sensitive credentials like client IDs and secrets in Azure and AWS?"),
+    "simple_contextual",
+  );
+  assert.equal(
+    classifyComplexity("How confident are you dealing with data using numpy and pandas?"),
+    "simple_contextual",
+  );
+});
+
+test("CIE does not treat Spark concepts and architecture as project/scenario by keyword alone", () => {
+  assert.equal(classifyComplexity("Can you explain Spark architecture?"), "system_design");
+  assert.equal(isProjectExperienceQuestion("Can you explain Spark architecture?"), false);
+  assert.equal(classifyComplexity("What is data skew and how do you overcome it in Spark?"), "simple_atomic");
+  assert.equal(detectFollowupIntent("What is data skew and how do you overcome it in Spark?"), false);
+  assert.equal(
+    classifyComplexity("Can we edit the broadcast join size limit in Spark and what are the challenges of increasing it to 250MB?"),
+    "simple_atomic",
+  );
+  assert.equal(
+    detectFollowupIntent("Can we edit the broadcast join size limit in Spark and what are the challenges of increasing it to 250MB?"),
+    false,
+  );
+});
+
+test("CIE enables resume-backed project fallback when no AI projects are selected", () => {
+  assert.equal(
+    shouldUseResumeBackedProjectFallback({
+      hasSelectedProjects: false,
+      isProjectQuestion: true,
+      isProjectDetailQuestion: false,
+      isProjectOverview: false,
+      isMixedExperienceProject: false,
+      hasResume: true,
+    }),
+    true,
+  );
+  assert.equal(
+    shouldUseResumeBackedProjectFallback({
+      hasSelectedProjects: true,
+      isProjectQuestion: true,
+      isProjectDetailQuestion: true,
+      isProjectOverview: true,
+      isMixedExperienceProject: true,
+      hasResume: true,
+    }),
+    false,
+  );
+});
+
+test("CIE selected-project unresolved guard prevents resume or generic project substitution", () => {
+  const context = buildSelectedProjectsUnavailableContext({
+    selectedProjectIds: ["selected-primary", "selected-secondary"],
+    resolvedProjectIds: ["selected-primary"],
+  });
+
+  assert.ok(context.includes("SELECTED_PROJECT_CONTEXT_UNAVAILABLE"));
+  assert.ok(context.includes("Unresolved selected project IDs: selected-secondary"));
+  assert.ok(context.includes("Do not invent project names"));
+  assert.equal(context.includes("RESUME-BACKED PROJECT/WORK CONTEXT"), false);
+});
+
+test("CIE extracts full candidate profile sections for profile walkthrough questions", () => {
+  const context = extractCandidateProfileContext({
+    resumeText: [
+      "Name: Tushar Vaghela",
+      "Role: Backend Engineer",
+      "Summary",
+      "Backend engineer with 2 years of experience building APIs and secure systems.",
+      "Work Experience",
+      "WebSenor | MERN Stack Developer | Nov 2024 - Feb 2025",
+      "- Built backend APIs and React dashboards.",
+      "MyPay Communication | React Developer | Mar 2025 - Present",
+      "- Worked on frontend integrations.",
+      "Skills",
+      "Languages: JavaScript, TypeScript",
+      "Frameworks: Node.js, NestJS, React",
+      "Databases: MongoDB, Redis",
+      "Projects",
+      "Resume-only Project",
+      "- This should be optional based on selected project mode.",
+      "Education",
+      "B.E. Computer Engineering",
+      "Mumbai University",
+      "Certifications",
+      "AWS Cloud Practitioner | AWS | 2025",
+    ].join("\n"),
+    targetBudget: 800,
+    includeResumeProjects: true,
+  });
+
+  assert.ok(context.includes("VERIFIED_CANDIDATE_PROFILE"));
+  assert.ok(context.includes("Name: Tushar Vaghela"));
+  assert.ok(context.includes("Total Experience: 2 years of experience"));
+  assert.ok(context.includes("WebSenor"));
+  assert.ok(context.includes("MyPay Communication"));
+  assert.ok(context.includes("B.E. Computer Engineering"));
+  assert.ok(context.includes("AWS Cloud Practitioner"));
+  assert.ok(context.includes("Resume Project Summary"));
+});
+
+test("CIE profile digest excludes resume project section when selected projects are active", () => {
+  const context = extractCandidateProfileContext({
+    resumeText: [
+      "Name: Tushar Vaghela",
+      "Role: Backend Engineer",
+      "Work Experience",
+      "WebSenor | MERN Stack Developer | Nov 2024 - Feb 2025",
+      "- Built backend APIs.",
+      "Projects",
+      "Resume-only Generic Banking Platform",
+      "- Should not appear when selected AI project context is active.",
+      "Education",
+      "B.E. Computer Engineering",
+    ].join("\n"),
+    targetBudget: 700,
+    includeResumeProjects: false,
+  });
+
+  assert.ok(context.includes("WebSenor"));
+  assert.ok(context.includes("B.E. Computer Engineering"));
+  assert.equal(context.includes("Resume-only Generic Banking Platform"), false);
+  assert.equal(context.includes("Resume Project Summary"), false);
 });
 
 test("CIE separates intro background from explicit project detail", () => {

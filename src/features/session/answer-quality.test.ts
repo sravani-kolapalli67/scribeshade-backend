@@ -134,7 +134,7 @@ test("sql followup beats unrelated resume-like pyspark context", () => {
   assert.doesNotMatch(codeCtx.preview || "", /pyspark|datalake/i);
 });
 
-test("selected answer id is ignored when topic mismatches reconstructed question", () => {
+test("selected answer id is ignored without binding unrelated fallback history", () => {
   const history = toAnswerHistory([
     {
       messageId: "react-1",
@@ -161,7 +161,42 @@ test("selected answer id is ignored when topic mismatches reconstructed question
 
   assert.notEqual(target.target?.id, "react-1");
   assert.equal(target.selectedAnswerIgnoredReason, "topic_mismatch");
-  assert.equal(target.source, "topic_match");
+  assert.equal(target.target, null);
+  assert.equal(target.source, "none");
+  assert.equal(target.isExplicitFollowupReference, true);
+});
+
+test("strict selected followup binds selected react answer despite polluted mongodb history", () => {
+  const history = toAnswerHistory([
+    {
+      messageId: "mongo-1",
+      role: "AI_ASSISTANT",
+      question: "How to implement MongoDB with Mongoose?",
+      answer: "Use this schema:\n```text\nNestJS Backend -> Mongoose Schema -> MongoDB\n```",
+      timestamp: new Date("2026-05-21T10:00:00Z").toISOString(),
+    },
+    {
+      messageId: "react-1",
+      role: "AI_ASSISTANT",
+      question: "Can you explain the function of the useEffect hook?",
+      answer: "useEffect runs side effects after render and depends on its dependency array.",
+      timestamp: new Date("2026-05-21T10:01:00Z").toISOString(),
+    },
+  ]);
+
+  const target = resolveFollowupTarget({
+    question: "Can you explain the use that function that you have written? (in context of: Can you explain the function)",
+    history,
+    selectedAnswerId: "react-1",
+    selectedAnswerQuestion: "Can you explain the function of the useEffect hook?",
+    selectedAnswerText: "useEffect runs side effects after render and depends on its dependency array.",
+    selectedAnswerTopic: "react",
+    strictSelectedAnswer: true,
+  });
+
+  assert.equal(target.target?.id, "react-1");
+  assert.equal(target.source, "selected_answer");
+  assert.equal(target.selectedAnswerIgnoredReason, undefined);
   assert.equal(target.isExplicitFollowupReference, true);
 });
 
@@ -191,6 +226,199 @@ test("selected answer id is used when explicitly referenced", () => {
   });
   assert.equal(target.target?.id, "react-1");
   assert.equal(target.source, "selected_answer");
+});
+
+test("function reference phrases are treated as code followups", () => {
+  assert.equal(classifyConversationIntent("Can you explain that function?"), "EXPLAIN_CODE");
+  assert.equal(classifyConversationIntent("Can you explain how this works?"), "EXPLAIN_CODE");
+});
+
+test("Parakeet replay intent keeps Spark/code concepts on the right branch", () => {
+  assert.equal(classifyConversationIntent("Can you explain Spark architecture?"), "NEW_QUESTION");
+  assert.equal(classifyConversationIntent("Can you create SparkSession in Spark version 1.1?"), "NEW_QUESTION");
+  assert.equal(classifyConversationIntent("Python generator and decorator"), "NEW_QUESTION");
+  assert.equal(classifyConversationIntent("What statistics do you use in Databricks/Spark SQL to optimize query performance?"), "NEW_QUESTION");
+  assert.equal(
+    classifyConversationIntent("For given table1 and table2, count records for inner join, left join, right join, and full join on number column."),
+    "NEW_QUESTION",
+  );
+  assert.equal(classifyConversationIntent("Can we use lag instead of row_number?"), "EXPLAIN_CODE");
+  assert.equal(classifyConversationIntent("Why year minus row_number?"), "EXPLAIN_CODE");
+});
+
+test("Parakeet replay data-processing setup is a scenario intent", () => {
+  assert.equal(
+    classifyConversationIntent("You have to process 1TB data daily from S3. What cluster size, nodes, and monitoring would you use?"),
+    "SCENARIO_QUESTION",
+  );
+  assert.equal(
+    classifyConversationIntent("How do you decide the number of nodes and cores required to process 1TB in 2 hours?"),
+    "SCENARIO_QUESTION",
+  );
+});
+
+test("Parakeet replay intent treats cloud and critical-situation asks as experience", () => {
+  assert.equal(
+    classifyConversationIntent("Can you walk me through your profile, experience, and skill set?"),
+    "EXPERIENCE_QUESTION",
+  );
+  assert.equal(
+    classifyConversationIntent("Azure and AWS services you worked on and how deep you used Data Factory?"),
+    "EXPERIENCE_QUESTION",
+  );
+  assert.equal(
+    classifyConversationIntent("Any critical situation you faced and how did you handle it?"),
+    "EXPERIENCE_QUESTION",
+  );
+  assert.equal(
+    classifyConversationIntent("How do you manage and secure sensitive credentials like client IDs and secrets in Azure and AWS?"),
+    "EXPERIENCE_QUESTION",
+  );
+  assert.equal(
+    classifyConversationIntent("How confident are you dealing with data using numpy and pandas?"),
+    "EXPERIENCE_QUESTION",
+  );
+});
+
+test("short cross-cloud topic continuation is a followup", () => {
+  assert.equal(
+    classifyConversationIntent("And, yeah. What about Azure then?"),
+    "FOLLOW_UP",
+  );
+});
+
+test("Parakeet replay Databricks statistics question does not bind previous code", () => {
+  const history = toAnswerHistory([
+    {
+      messageId: "ipl-pyspark",
+      role: "AI_ASSISTANT",
+      question: "Write PySpark code for consecutive IPL winners.",
+      answer: [
+        "**ANSWER:**",
+        "```python",
+        "df_ranked = df.withColumn(\"rn\", F.row_number().over(window_spec))",
+        "```",
+      ].join("\n"),
+      timestamp: new Date("2026-05-21T10:00:00Z").toISOString(),
+    },
+  ]);
+
+  const target = resolveFollowupTarget({
+    question: "What statistics do you use in Databricks/Spark SQL to optimize query performance?",
+    history,
+  });
+
+  assert.equal(target.target, null);
+  assert.equal(target.source, "none");
+  assert.equal(target.isExplicitFollowupReference, false);
+});
+
+test("fresh React code generation does not bind stale previous React history", () => {
+  const history = toAnswerHistory([
+    {
+      messageId: "old-react",
+      role: "AI_ASSISTANT",
+      question: "Can you explain how to use useEffect and Context API in React?",
+      answer: "useEffect runs side effects and Context API shares state.",
+      timestamp: new Date("2026-05-21T10:00:00Z").toISOString(),
+    },
+  ]);
+
+  const target = resolveFollowupTarget({
+    question: "Write a code in React.",
+    history,
+    selectedAnswerId: "old-react",
+  });
+
+  assert.equal(classifyConversationIntent("Write a code in React."), "NEW_QUESTION");
+  assert.equal(target.target, null);
+  assert.equal(target.source, "none");
+  assert.equal(target.isExplicitFollowupReference, false);
+  assert.equal(target.selectedAnswerIgnoredReason, "fresh_code_generation_no_followup_reference");
+});
+
+test("Parakeet replay code followups bind to PySpark window code, not unrelated code", () => {
+  const history = toAnswerHistory([
+    {
+      messageId: "sql-join",
+      role: "AI_ASSISTANT",
+      question: "Write SQL join count query",
+      answer: [
+        "**ANSWER:**",
+        "```sql",
+        "SELECT * FROM table1 JOIN table2 ON table1.number = table2.number;",
+        "```",
+      ].join("\n"),
+      timestamp: new Date("2026-05-21T10:00:00Z").toISOString(),
+    },
+    {
+      messageId: "ipl-pyspark",
+      role: "AI_ASSISTANT",
+      question: "Write PySpark code for consecutive IPL winners.",
+      answer: [
+        "**ANSWER:**",
+        "```python",
+        "df_ranked = df.withColumn(\"rn\", F.row_number().over(window_spec))",
+        "df_grouped = df_ranked.withColumn(\"grp\", F.col(\"year\") - F.col(\"rn\"))",
+        "```",
+      ].join("\n"),
+      timestamp: new Date("2026-05-21T10:01:00Z").toISOString(),
+    },
+    {
+      messageId: "react-latest",
+      role: "AI_ASSISTANT",
+      question: "Explain React useEffect.",
+      answer: "useEffect runs side effects after render.",
+      timestamp: new Date("2026-05-21T10:02:00Z").toISOString(),
+    },
+  ]);
+
+  const lagTarget = resolveFollowupTarget({
+    question: "Can we use lag instead of row_number?",
+    history,
+  });
+  const rowNumberTarget = resolveFollowupTarget({
+    question: "Why year minus row_number?",
+    history,
+  });
+
+  assert.equal(lagTarget.target?.id, "ipl-pyspark");
+  assert.equal(lagTarget.source, "topic_match");
+  assert.equal(rowNumberTarget.target?.id, "ipl-pyspark");
+  assert.equal(rowNumberTarget.source, "topic_match");
+});
+
+test("Parakeet replay correction challenges bind to immediate join-count answer", () => {
+  const history = toAnswerHistory([
+    {
+      messageId: "ipl-pyspark",
+      role: "AI_ASSISTANT",
+      question: "Write PySpark code for consecutive IPL winners.",
+      answer: [
+        "**ANSWER:**",
+        "```python",
+        "df_ranked = df.withColumn(\"rn\", F.row_number().over(window_spec))",
+        "```",
+      ].join("\n"),
+      timestamp: new Date("2026-05-21T10:00:00Z").toISOString(),
+    },
+    {
+      messageId: "join-count",
+      role: "AI_ASSISTANT",
+      question: "How many records for inner, left, right, and full joins?",
+      answer: "Inner join is seven rows, left join is eight rows, right join is eight rows, and full join is nine rows.",
+      timestamp: new Date("2026-05-21T10:01:00Z").toISOString(),
+    },
+  ]);
+
+  const target = resolveFollowupTarget({
+    question: "I think eight is not correct. How come only eight?",
+    history,
+  });
+
+  assert.equal(target.target?.id, "join-count");
+  assert.equal(target.source, "immediate_previous");
+  assert.equal(target.isExplicitFollowupReference, true);
 });
 
 test("code followup with no code target returns none", () => {
@@ -324,6 +552,15 @@ test("scenario continuation phrases are treated as followups", () => {
   assert.equal(target.target?.id, "mern-scenario");
   assert.equal(target.source, "immediate_previous");
   assert.equal(isFollowupConversationIntent(classifyConversationIntent("continue from database part")), true);
+});
+
+test("ecommerce inventory scenario setup is a scenario question", () => {
+  assert.equal(
+    classifyConversationIntent(
+      "Scenario setup: ecommerce sale, multiple users buying the same product, inventory left 5, orders are going negative. Question: How will you tackle this particular issue?",
+    ),
+    "SCENARIO_QUESTION",
+  );
 });
 
 test("example-only short followup binds to immediate previous answer", () => {
