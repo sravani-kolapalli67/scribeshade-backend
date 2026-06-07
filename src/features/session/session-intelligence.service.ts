@@ -3,84 +3,20 @@ import type {
   IntentLedger,
 } from "./question-composer.service";
 import type {
-  InterviewerTone,
-  LiveRequestKind,
-  ScenarioEvidencePacket,
-  SanitizedLiveRequest,
   TranscriptEvidenceV3,
 } from "./ai-answer-context-guards";
+import type {
+  CodeTaskMemory,
+  RoutedAnswerContext,
+  SanitizedLiveRequest,
+  SessionAskState,
+  SessionStateV3,
+} from "./session-intelligence.types";
 
-export type SessionAskState =
-  | "setup_in_progress"
-  | "answerable_question"
-  | "provisional_guidance"
-  | "true_followup"
-  | "challenge_or_correction"
-  | "topic_switch";
-
-export type CodeTaskMemory = {
-  answerId: string;
-  question: string;
-  language: string;
-  codeSummary: string;
-  codePreview: string;
-  codeHash: string;
-  keyFunctions: string[];
-  assumptions: string[];
-  complexity?: string;
-  edgeCases: string[];
-  topic: string;
-};
-
-export type SessionStateV3 = {
-  activeTopic?: string;
-  questionChain: string[];
-  latestQuestion?: string;
-  askState: SessionAskState;
-  interviewerTone: InterviewerTone;
-  answeredQuestions: Array<{
-    answerId: string;
-    question: string;
-    answerSummary: string;
-    topic: string;
-  }>;
-  codeTaskState?: {
-    language?: string;
-    problem?: string;
-    dataShape?: string;
-    latestCodeHash?: string;
-  };
-  scenarioState?: ScenarioEvidencePacket;
-};
-
-export type RoutedAnswerContext = {
-  resumeBudget: number;
-  projectBudget: number;
-  historyBudget: number;
-  codeBudget: number;
-  scenarioBudget: number;
-  documentBudget: number;
-  includeResume: boolean;
-  includeProjects: boolean;
-  includeHistory: boolean;
-  includeCodeMemory: boolean;
-  includeScenarioMemory: boolean;
-  includeDocument: boolean;
-};
-
-export type RuntimeContextForRouting = {
-  resume?: string | null;
-  projects?: string | null;
-  document?: string | null;
-  history?: string | null;
-};
-
-export type RoutedRuntimeContext = {
-  resume: string;
-  projects: string;
-  document: string;
-  history: string;
-};
+export type {
+  CodeTaskMemory,
+  SessionStateV3,
+} from "./session-intelligence.types";
 
 function normalizeSpaces(text: string): string {
   return (text || "").replace(/\s+/g, " ").trim();
@@ -90,11 +26,6 @@ function clip(text: string, maxChars: number): string {
   const normalized = normalizeSpaces(text);
   if (normalized.length <= maxChars) return normalized;
   return `${normalized.slice(0, Math.max(0, maxChars - 3)).trim()}...`;
-}
-
-function clipTokens(text: string | null | undefined, tokenBudget: number): string {
-  if (tokenBudget <= 0) return "";
-  return clip(text || "", tokenBudget * 4);
 }
 
 function languageFromCode(code: string): string {
@@ -118,20 +49,64 @@ function inferAskState(input: {
   sanitizedRequest: SanitizedLiveRequest;
   transcriptEvidence?: TranscriptEvidenceV3;
 }): SessionAskState {
-  if (input.sanitizedRequest.kind === "true_followup" || input.sanitizedRequest.kind === "code_followup") {
+  if (
+    input.sanitizedRequest.kind === "code_generation" ||
+    input.sanitizedRequest.kind === "code_followup"
+  ) {
+    return "code_task";
+  }
+  if (input.sanitizedRequest.kind === "provisional_guidance") {
+    return "provisional_guidance";
+  }
+  if (input.sanitizedRequest.kind === "true_followup") {
     return "true_followup";
   }
   if (
+    input.sanitizedRequest.kind === "challenge_or_correction" ||
     input.sanitizedRequest.interviewerTone === "challenge" ||
     input.sanitizedRequest.interviewerTone === "skeptical"
   ) {
     return "challenge_or_correction";
+  }
+  if (input.sanitizedRequest.metadata.activeQuestionDetection?.topicChanged) {
+    return "topic_switch";
   }
   if (input.transcriptEvidence?.scenarioDetected) {
     return input.transcriptEvidence.scenarioQuestion ? "answerable_question" : "setup_in_progress";
   }
   if (input.sanitizedRequest.kind === "noise") return "setup_in_progress";
   return "answerable_question";
+}
+
+export function applyLiveRequestToSessionStateV3(input: {
+  state: SessionStateV3;
+  sanitizedRequest: SanitizedLiveRequest;
+  transcriptEvidence?: TranscriptEvidenceV3;
+  fallbackTopic: string;
+}): SessionStateV3 {
+  const latestCleanQuestion =
+    input.sanitizedRequest.latestQuestionHint ||
+    input.transcriptEvidence?.scenarioQuestion ||
+    input.transcriptEvidence?.currentQuestionHint ||
+    input.state.latestCleanQuestion;
+  const activeTopic =
+    input.fallbackTopic && input.fallbackTopic !== "general"
+      ? input.fallbackTopic
+      : input.state.activeTopic;
+
+  return {
+    ...input.state,
+    ...(activeTopic ? { activeTopic } : {}),
+    ...(latestCleanQuestion ? { latestCleanQuestion } : {}),
+    askState: inferAskState({
+      sanitizedRequest: input.sanitizedRequest,
+      transcriptEvidence: input.transcriptEvidence,
+    }),
+    interviewerTone: input.sanitizedRequest.interviewerTone,
+    activeFollowupTargetId: input.sanitizedRequest.allowSelectedAnswer
+      ? input.sanitizedRequest.metadata.selectedAnswerId
+      : undefined,
+  };
 }
 
 function answerLedgerCodeMemory(answerLedger: AnswerLedger): CodeTaskMemory | undefined {
@@ -154,6 +129,7 @@ function answerLedgerCodeMemory(answerLedger: AnswerLedger): CodeTaskMemory | un
 }
 
 export function buildSessionStateV3(input: {
+  sessionId: string;
   sanitizedRequest: SanitizedLiveRequest;
   intentLedger: IntentLedger;
   answerLedger: AnswerLedger;
@@ -170,7 +146,7 @@ export function buildSessionStateV3(input: {
     .slice(-8)
     .map((intent) => intent.question)
     .filter(Boolean);
-  const latestQuestion =
+  const latestCleanQuestion =
     input.transcriptEvidence?.scenarioQuestion ||
     input.transcriptEvidence?.currentQuestionHint ||
     questionChain.at(-1);
@@ -180,14 +156,22 @@ export function buildSessionStateV3(input: {
     : input.fallbackTopic || answeredQuestions.at(-1)?.topic || undefined;
 
   return {
+    sessionId: input.sessionId,
     activeTopic,
     questionChain,
-    ...(latestQuestion ? { latestQuestion } : {}),
+    ...(latestCleanQuestion ? { latestCleanQuestion } : {}),
     askState: inferAskState({
       sanitizedRequest: input.sanitizedRequest,
       transcriptEvidence: input.transcriptEvidence,
     }),
     interviewerTone: input.sanitizedRequest.interviewerTone,
+    ...(input.sanitizedRequest.metadata.selectedAnswerId
+      ? {
+          activeFollowupTargetId:
+            input.sanitizedRequest.metadata.selectedAnswerId,
+        }
+      : {}),
+    updatedAt: new Date().toISOString(),
     answeredQuestions,
     ...(codeMemory
       ? {
@@ -205,80 +189,6 @@ export function buildSessionStateV3(input: {
   };
 }
 
-export function routeAnswerContextV3(input: {
-  sanitizedRequest: SanitizedLiveRequest;
-  sessionState: SessionStateV3;
-  cieComplexity?: string;
-  answerIntent?: string;
-  question?: string;
-  hasResume: boolean;
-  hasProjects: boolean;
-  hasDocument: boolean;
-}): RoutedAnswerContext {
-  const kind = input.sanitizedRequest.kind;
-  const coding = kind === "coding";
-  const regenerate = kind === "regenerate";
-  const scenario = !coding && (kind === "scenario" || input.cieComplexity === "scenario_based");
-  const systemDesign = !coding && input.cieComplexity === "system_design";
-  const followup = kind === "true_followup" || kind === "code_followup" || kind === "selected_card_followup";
-  const questionText = normalizeSpaces(
-    [
-      input.question || "",
-      input.sessionState.latestQuestion || "",
-    ].join(" "),
-  ).toLowerCase();
-  const asksProjectContext =
-    /\b(projects?|portfolio|project work|things you built|worked on|built|developed)\b/.test(questionText);
-  const asksProfileContext =
-    /\b(experience|skill set|skills|work experience|professional experience|years? of experience|profile|background|introduce yourself)\b/.test(questionText);
-  const asksExperienceContext =
-    /\b(experience|skill set|skills|work experience|professional experience|years? of experience|profile|background)\b/.test(questionText);
-  const profileProjectRequest =
-    kind === "project_question" ||
-    (input.answerIntent === "behavioral_project_experience" && (asksProjectContext || asksExperienceContext)) ||
-    (asksProfileContext && asksProjectContext);
-  const project = profileProjectRequest;
-  const profile = asksProfileContext || project;
-  const simpleAtomic = input.cieComplexity === "simple_atomic";
-  const simpleContextual = input.cieComplexity === "simple_contextual";
-  const simple = simpleAtomic || simpleContextual;
-
-  return {
-    resumeBudget: project || regenerate ? 650 : profile ? 550 : scenario || systemDesign ? 350 : coding ? 120 : simpleContextual ? 250 : simple ? 180 : 300,
-    projectBudget: project || regenerate ? 900 : scenario || systemDesign ? 550 : coding ? 0 : simple ? 120 : 250,
-    historyBudget: followup ? 450 : scenario || systemDesign ? 260 : 0,
-    codeBudget: kind === "code_followup" ? 650 : 0,
-    scenarioBudget: scenario ? 450 : 0,
-    documentBudget: scenario || systemDesign ? 180 : 0,
-    includeResume: input.hasResume && !coding && (project || profile || regenerate || scenario || systemDesign || simpleContextual || !simple),
-    includeProjects: input.hasProjects && !coding && (project || regenerate || scenario || systemDesign),
-    includeHistory: !coding && !regenerate && (followup || scenario || input.sessionState.askState === "challenge_or_correction"),
-    includeCodeMemory: kind === "code_followup" && !!input.sessionState.codeTaskState,
-    includeScenarioMemory: scenario && !!input.sessionState.scenarioState,
-    includeDocument: input.hasDocument && (scenario || systemDesign),
-  };
-}
-
-export function applyRoutedAnswerContext(input: {
-  context: RuntimeContextForRouting;
-  routedContext: RoutedAnswerContext;
-}): RoutedRuntimeContext {
-  return {
-    resume: input.routedContext.includeResume
-      ? clipTokens(input.context.resume, input.routedContext.resumeBudget)
-      : "",
-    projects: input.routedContext.includeProjects
-      ? clipTokens(input.context.projects, input.routedContext.projectBudget)
-      : "",
-    document: input.routedContext.includeDocument
-      ? clipTokens(input.context.document, input.routedContext.documentBudget)
-      : "",
-    history: input.routedContext.includeHistory
-      ? clipTokens(input.context.history, input.routedContext.historyBudget)
-      : "",
-  };
-}
-
 export function compactSessionStateForPrompt(input: {
   sessionState: SessionStateV3;
   routedContext: RoutedAnswerContext;
@@ -288,7 +198,9 @@ export function compactSessionStateForPrompt(input: {
     `Session state: ${state.askState}`,
     `Interviewer tone: ${state.interviewerTone}`,
     state.activeTopic ? `Active topic: ${state.activeTopic}` : "",
-    state.latestQuestion ? `Latest question: ${clip(state.latestQuestion, 180)}` : "",
+    state.latestCleanQuestion
+      ? `Latest question: ${clip(state.latestCleanQuestion, 180)}`
+      : "",
     state.questionChain.length
       ? `Question chain: ${state.questionChain.slice(-4).map((question) => clip(question, 90)).join(" -> ")}`
       : "",

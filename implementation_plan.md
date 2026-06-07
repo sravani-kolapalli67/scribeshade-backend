@@ -230,10 +230,10 @@ PR 3 (RAG + scale)
 9) Add replay benchmark tests + latency instrumentation
 
 task_progress Items:
-- [ ] Step 1 (PR1): Implement LiveRequestSanitizerV4 + integrate into `/ai-answer` click path
-- [ ] Step 2 (PR1): Apply ContextRouterV3 for real (no bypass before runtime prompt)
-- [ ] Step 3 (PR1): Frontend stale payload removal + card dedupe/persistence safety
-- [ ] Step 4 (PR2): Implement SessionStateV3 + ScenarioEvidenceBuilder + CodeTaskMemory + SessionMemoryV3
-- [ ] Step 5 (PR3): Implement Redis vector RAG async pipeline + retriever supporting-only
-- [ ] Step 6: Implement replay benchmark acceptance matrix + latency metrics
-- [ ] Step 7: Run full test + build validation commands
+- [x] Step 1 (PR1): Implement LiveRequestSanitizerV4 + integrate into `/ai-answer` click path
+- [x] Step 2 (PR1): Apply ContextRouterV3 for real (no bypass before runtime prompt)
+- [x] Step 3 (PR1): Frontend stale payload removal + card dedupe/persistence safety
+- [x] Step 4 (PR2): Implement SessionStateV3 + ScenarioEvidenceBuilder + CodeTaskMemory + SessionMemoryV3
+- [x] Step 5 (PR3): Implement Redis vector RAG async pipeline + retriever supporting-only
+- [x] Step 6: Implement replay benchmark acceptance matrix + latency metrics
+- [x] Step 7: Run full test + build validation commands

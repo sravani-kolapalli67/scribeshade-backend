@@ -38,3 +38,23 @@ export const candidateDigestQueue = new Queue("candidate-digest", {
     removeOnFail: { count: 200 },
   },
 });
+
+export const sessionMemoryQueue = new Queue("session-memory", {
+  connection: redisConnection,
+  defaultJobOptions: {
+    attempts: 3,
+    backoff: { type: "exponential", delay: 2000 },
+    removeOnComplete: { count: 500 },
+    removeOnFail: { count: 200 },
+  },
+});
+
+export const sessionRagQueue = new Queue("session-rag", {
+  connection: redisConnection,
+  defaultJobOptions: {
+    attempts: 3,
+    backoff: { type: "exponential", delay: 3000 },
+    removeOnComplete: { count: 1000 },
+    removeOnFail: { count: 300 },
+  },
+});

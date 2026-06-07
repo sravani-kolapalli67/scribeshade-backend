@@ -231,6 +231,28 @@ test("combined experience skill set and projects question gets structured profil
   assert.ok(policy.policyBlock.includes("combined_profile_answer_shape"));
 });
 
+test("profile introduction uses verified total experience when available", () => {
+  const policy = buildRequestScopedPolicy({
+    question: "Can you introduce yourself?",
+    metadata: { transcript: "Can you introduce yourself?" } as any,
+    cieComplexity: "simple_contextual",
+  });
+
+  assert.equal(policy.answerIntent, "behavioral_project_experience");
+  assert.ok(policy.policyBlock.includes("introduction_years_rule"));
+  assert.ok(policy.policyBlock.includes("omit unavailable facts"));
+});
+
+test("plural introduction STT still uses profile policy", () => {
+  assert.equal(
+    classifyAnswerIntent({
+      question: "Introduce yourselves and explain your projects and skill sets.",
+      cieComplexity: "simple_contextual",
+    }),
+    "behavioral_project_experience",
+  );
+});
+
 test("cloud credential security question stays scoped to secret management", () => {
   const policy = buildRequestScopedPolicy({
     question:

@@ -7,6 +7,8 @@ import { creditDeductionWorker } from "./features/jobs/credit-deduction.job";
 import { sessionWatchdogWorker, scheduleWatchdog } from "./features/jobs/session-watchdog.job";
 import { holdExpiryWorker } from "./features/jobs/hold-expiry.job";
 import { candidateDigestWorker } from "./features/jobs/candidate-digest.job";
+import { sessionMemoryWorker } from "./features/jobs/session-memory.job";
+import { sessionRagWorker } from "./features/jobs/session-rag.job";
 import { warmBrowser } from "./features/resume/resume.builder.service";
 import { validateAiConfig } from "./shared/utils/ai-validator";
 
@@ -33,6 +35,8 @@ const startServer = async () => {
     void sessionWatchdogWorker;
     void holdExpiryWorker;
     void candidateDigestWorker;
+    void sessionMemoryWorker;
+    void sessionRagWorker;
 
     // Schedule the recurring watchdog tick
     scheduleWatchdog().catch((err) =>
@@ -49,6 +53,27 @@ const startServer = async () => {
 
   });
 };
+
+async function closeWorkers(signal: string): Promise<void> {
+  console.info("[Process] closing workers", { signal });
+  await Promise.all([
+    creditDeductionWorker.close(),
+    sessionWatchdogWorker.close(),
+    holdExpiryWorker.close(),
+    candidateDigestWorker.close(),
+    sessionMemoryWorker.close(),
+    sessionRagWorker.close(),
+  ]);
+  process.exit(0);
+}
+
+process.once("SIGTERM", () => {
+  void closeWorkers("SIGTERM");
+});
+
+process.once("SIGINT", () => {
+  void closeWorkers("SIGINT");
+});
 
 startServer().catch((error) => {
   console.error("💥 Failed to start server:", error);

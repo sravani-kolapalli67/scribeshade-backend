@@ -1,25 +1,34 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  applyRoutedAnswerContext,
   buildSessionStateV3,
   compactSessionStateForPrompt,
-  routeAnswerContextV3,
 } from "./session-intelligence.service";
+import {
+  applyContextRouterV3,
+  routeAnswerContextV3,
+} from "./context/context-router-v3.service";
 import type { SanitizedLiveRequest } from "./ai-answer-context-guards";
 
 const latestRequest: SanitizedLiveRequest = {
   kind: "latest_question",
+  effectiveAnswerClickMode: "answer_latest_unanswered",
   metadata: { answerClickMode: "answer_latest_unanswered" },
   allowPreviousAnswer: false,
+  allowPreviousAnswers: false,
   allowSelectedAnswer: false,
   allowCodeMemory: false,
+  allowProjectContext: true,
+  allowHistory: false,
+  answerKind: "final",
+  answerTrust: "strong",
   interviewerTone: "neutral",
   scenarioDetected: false,
 };
 
 test("SessionStateV3 builds compact question chain and answered memory", () => {
   const state = buildSessionStateV3({
+    sessionId: "session-1",
     sanitizedRequest: latestRequest,
     fallbackTopic: "spark",
     intentLedger: {
@@ -67,7 +76,7 @@ test("SessionStateV3 builds compact question chain and answered memory", () => {
   assert.equal(state.activeTopic, "spark");
   assert.equal(state.askState, "answerable_question");
   assert.equal(state.questionChain.length, 2);
-  assert.equal(state.latestQuestion, "How many nodes and cores are needed?");
+  assert.equal(state.latestCleanQuestion, "How many nodes and cores are needed?");
   assert.equal(state.answeredQuestions[0].answerId, "a1");
 });
 
@@ -80,6 +89,7 @@ test("ContextRouterV3 includes scoped code memory only for code followups", () =
     interviewerTone: "clarification",
   };
   const state = buildSessionStateV3({
+    sessionId: "session-1",
     sanitizedRequest: codeRequest,
     fallbackTopic: "pyspark",
     intentLedger: { intents: [] },
@@ -123,10 +133,11 @@ test("ContextRouterV3 includes scoped code memory only for code followups", () =
 test("ContextRouterV3 excludes stale history for fresh coding requests", () => {
   const codingRequest: SanitizedLiveRequest = {
     ...latestRequest,
-    kind: "coding",
+    kind: "code_generation",
     clearReason: "latest_coding_context_cleared",
   };
   const state = buildSessionStateV3({
+    sessionId: "session-1",
     sanitizedRequest: codingRequest,
     fallbackTopic: "react",
     intentLedger: { intents: [] },
@@ -156,7 +167,7 @@ test("ContextRouterV3 excludes stale history for fresh coding requests", () => {
   assert.equal(routed.includeHistory, false);
   assert.equal(routed.includeCodeMemory, false);
   assert.equal(routed.includeProjects, false);
-  assert.equal(routed.includeDocument, false);
+  assert.equal(routed.includeDocuments, false);
 });
 
 test("SessionStateV3 marks skeptical requests as challenge or correction", () => {
@@ -165,6 +176,7 @@ test("SessionStateV3 marks skeptical requests as challenge or correction", () =>
     interviewerTone: "skeptical",
   };
   const state = buildSessionStateV3({
+    sessionId: "session-1",
     sanitizedRequest: challengeRequest,
     fallbackTopic: "sql",
     intentLedger: { intents: [] },
@@ -178,10 +190,12 @@ test("applyRoutedAnswerContext omits disallowed runtime sections", () => {
   const routed = routeAnswerContextV3({
     sanitizedRequest: latestRequest,
     sessionState: {
+      sessionId: "session-1",
       activeTopic: "redis",
       questionChain: [],
       askState: "answerable_question",
       interviewerTone: "neutral",
+      updatedAt: new Date(0).toISOString(),
       answeredQuestions: [],
     },
     cieComplexity: "simple_atomic",
@@ -189,7 +203,7 @@ test("applyRoutedAnswerContext omits disallowed runtime sections", () => {
     hasProjects: true,
     hasDocument: true,
   });
-  const runtime = applyRoutedAnswerContext({
+  const runtime = applyContextRouterV3({
     routedContext: routed,
     context: {
       resume: "Candidate has Node.js and Redis experience.",
@@ -202,7 +216,7 @@ test("applyRoutedAnswerContext omits disallowed runtime sections", () => {
   assert.equal(routed.includeResume, false);
   assert.equal(routed.includeProjects, false);
   assert.equal(routed.includeHistory, false);
-  assert.equal(routed.includeDocument, false);
+  assert.equal(routed.includeDocuments, false);
   assert.equal(runtime.resume, "");
   assert.equal(runtime.projects, "");
   assert.equal(runtime.document, "");
@@ -213,11 +227,13 @@ test("ContextRouterV3 keeps resume for simple contextual intro questions", () =>
   const routed = routeAnswerContextV3({
     sanitizedRequest: latestRequest,
     sessionState: {
+      sessionId: "session-1",
       activeTopic: "introduction",
-      latestQuestion: "Introduce yourself",
+      latestCleanQuestion: "Introduce yourself",
       questionChain: [],
       askState: "answerable_question",
       interviewerTone: "neutral",
+      updatedAt: new Date(0).toISOString(),
       answeredQuestions: [],
     },
     cieComplexity: "simple_contextual",
@@ -225,7 +241,7 @@ test("ContextRouterV3 keeps resume for simple contextual intro questions", () =>
     hasProjects: true,
     hasDocument: true,
   });
-  const runtime = applyRoutedAnswerContext({
+  const runtime = applyContextRouterV3({
     routedContext: routed,
     context: {
       resume: "Name: Tushar\nBackend engineer with Node.js, Redis, PostgreSQL, and AWS experience.",
@@ -236,10 +252,10 @@ test("ContextRouterV3 keeps resume for simple contextual intro questions", () =>
   });
 
   assert.equal(routed.includeResume, true);
-  assert.equal(routed.resumeBudget, 550);
+  assert.equal(routed.budgets.resume, 550);
   assert.equal(routed.includeProjects, false);
   assert.equal(routed.includeHistory, false);
-  assert.equal(routed.includeDocument, false);
+  assert.equal(routed.includeDocuments, false);
   assert.ok(runtime.resume.includes("Backend engineer"));
   assert.equal(runtime.projects, "");
   assert.equal(runtime.document, "");
@@ -250,11 +266,13 @@ test("ContextRouterV3 includes resume and projects for combined profile project 
   const routed = routeAnswerContextV3({
     sanitizedRequest: latestRequest,
     sessionState: {
+      sessionId: "session-1",
       activeTopic: "profile",
-      latestQuestion: "Can you please let me know your experience, your skill set, and your projects?",
+      latestCleanQuestion: "Can you please let me know your experience, your skill set, and your projects?",
       questionChain: [],
       askState: "answerable_question",
       interviewerTone: "neutral",
+      updatedAt: new Date(0).toISOString(),
       answeredQuestions: [],
     },
     cieComplexity: "simple_contextual",
@@ -264,7 +282,7 @@ test("ContextRouterV3 includes resume and projects for combined profile project 
     hasProjects: true,
     hasDocument: false,
   });
-  const runtime = applyRoutedAnswerContext({
+  const runtime = applyContextRouterV3({
     routedContext: routed,
     context: {
       resume: "Name: Tushar\nTotal Experience: 1 year\nCompany: WebSenor\nSkills: React, Node.js, MongoDB, Redis",
@@ -291,11 +309,13 @@ test("ContextRouterV3 keeps verified resume and project context for regenerate",
   const routed = routeAnswerContextV3({
     sanitizedRequest: regenerateRequest,
     sessionState: {
+      sessionId: "session-1",
       activeTopic: "projects",
-      latestQuestion: "Tell me about your projects.",
+      latestCleanQuestion: "Tell me about your projects.",
       questionChain: [],
       askState: "answerable_question",
       interviewerTone: "neutral",
+      updatedAt: new Date(0).toISOString(),
       answeredQuestions: [],
     },
     cieComplexity: "simple_contextual",
@@ -319,10 +339,12 @@ test("applyRoutedAnswerContext clips allowed runtime sections by route budgets",
   const routed = routeAnswerContextV3({
     sanitizedRequest: projectRequest,
     sessionState: {
+      sessionId: "session-1",
       activeTopic: "projects",
       questionChain: [],
       askState: "answerable_question",
       interviewerTone: "neutral",
+      updatedAt: new Date(0).toISOString(),
       answeredQuestions: [],
     },
     cieComplexity: "experience_context",
@@ -330,7 +352,7 @@ test("applyRoutedAnswerContext clips allowed runtime sections by route budgets",
     hasProjects: true,
     hasDocument: false,
   });
-  const runtime = applyRoutedAnswerContext({
+  const runtime = applyContextRouterV3({
     routedContext: routed,
     context: {
       resume: "resume ".repeat(1000),
@@ -342,7 +364,7 @@ test("applyRoutedAnswerContext clips allowed runtime sections by route budgets",
 
   assert.equal(routed.includeResume, true);
   assert.equal(routed.includeProjects, true);
-  assert.ok(runtime.resume.length <= routed.resumeBudget * 4);
-  assert.ok(runtime.projects.length <= routed.projectBudget * 4);
+  assert.ok(runtime.resume.length <= routed.budgets.resume * 4);
+  assert.ok(runtime.projects.length <= routed.budgets.projects * 4);
   assert.equal(runtime.document, "");
 });

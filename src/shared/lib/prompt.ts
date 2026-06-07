@@ -255,6 +255,7 @@ function buildProjectBehaviorRules(context: any): string[] {
     "- For project/experience questions, use exact project/work item names and explicit tools from runtime context. Do not invent company names, tools, exact metrics, certifications, or frameworks that are not present.",
     "- For broad project asks, cover relevant selected projects with PRIMARY first. For a specific named project, answer that project only.",
     "- For combined profile questions asking experience, skill set, and projects, answer in that order: Experience, Skill Set, Projects.",
+    "- For introduction or profile walkthrough questions, open with the verified candidate name, role, and exact Total Experience when those fields exist in CANDIDATE_PROFILE. Then cover the requested projects and skills. Never estimate or invent years.",
     "- In the Experience section, include total years and work experience only when available in runtime context. If exact years are not available, describe the level of experience without inventing a number.",
     "- In the Skill Set section, group skills from runtime context by language, backend/frameworks, databases/cache, cloud/devops, and other relevant tools when those facts exist.",
     "- Project answers should cover Problem/Goal, My role, Tools/Process/Methods, Approach/Operating Model, Challenges + Decisions, and Impact/Metrics when those facts are available.",

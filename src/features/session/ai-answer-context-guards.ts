@@ -1,4 +1,20 @@
 import type { AIAnswerLiveContextMetadata } from "./ai-answer.dto";
+import {
+  sanitizeLiveRequestContextV4,
+} from "./state/live-request-sanitizer-v4";
+import type {
+  InterviewerTone,
+  LiveRequestKind,
+  SanitizedLiveRequest,
+  ScenarioEvidencePacket,
+} from "./session-intelligence.types";
+
+export type {
+  InterviewerTone,
+  LiveRequestKind,
+  SanitizedLiveRequest,
+  ScenarioEvidencePacket,
+} from "./session-intelligence.types";
 
 export type TranscriptEvidenceSpeaker = "interviewer" | "candidate";
 
@@ -24,38 +40,6 @@ export type TranscriptEvidenceV3 = {
   scenarioPacket?: ScenarioEvidencePacket;
 };
 
-export type LiveRequestKind =
-  | "latest_question"
-  | "true_followup"
-  | "selected_card_followup"
-  | "regenerate"
-  | "coding"
-  | "code_followup"
-  | "scenario"
-  | "project_question"
-  | "noise";
-
-export type InterviewerTone =
-  | "neutral"
-  | "clarification"
-  | "deep_dive"
-  | "challenge"
-  | "skeptical"
-  | "stress_test"
-  | "urgency";
-
-export type ScenarioEvidencePacket = {
-  detected: boolean;
-  domain: string;
-  actors: string[];
-  constraints: string[];
-  numbers: string[];
-  failureSymptom?: string;
-  finalAsk: string;
-  transcriptLines: string[];
-  compactQuery: string;
-};
-
 export type LiveAnswerMetadataSanitization = {
   metadata?: AIAnswerLiveContextMetadata;
   originalMode?: string;
@@ -71,18 +55,6 @@ export type LiveAnswerMetadataSanitization = {
   scenarioPacket?: ScenarioEvidencePacket;
 };
 
-export type SanitizedLiveRequest = {
-  kind: LiveRequestKind;
-  metadata?: AIAnswerLiveContextMetadata;
-  clearReason?: string;
-  allowPreviousAnswer: boolean;
-  allowSelectedAnswer: boolean;
-  allowCodeMemory: boolean;
-  interviewerTone: InterviewerTone;
-  scenarioDetected: boolean;
-  scenarioPacket?: ScenarioEvidencePacket;
-};
-
 const SCENARIO_SETUP_RE =
   /\b(scenario|suppose|imagine|situation|case|what happens|there is|let'?s say|assume|during|production|incident|outage)\b/i;
 const EXPLICIT_SCENARIO_SETUP_RE =
@@ -93,16 +65,12 @@ const SCENARIO_ASK_RE =
   /\b(how (?:would|will|do) you (?:handle|tackle|solve|fix|prevent|approach|resolve)|what (?:would|will|do) you do|how should (?:we|you) fix|how can (?:we|you) prevent)\b/i;
 const SCENARIO_FAILURE_RE =
   /\b(issue|problem|bug|failure|failed|fails|left|remaining|available|buying|purchase|orders?|negative|oversell|oversold|race condition|concurrent|high traffic|outage|incident|production issue)\b/i;
-const CODE_FOLLOWUP_RE =
-  /\b(this code|the code|previous code|code you wrote|that code|this function|that function|the query|that query|same query|same code|explain (?:it|this|that)|optimi[sz]e|debug|edge cases?|test it|lag|row_number|window function)\b/i;
 const FRESH_CODE_GENERATION_RE =
   /\b(write|implement|create|build|develop|show|give|provide)\b.{0,80}\b(code|snippet|component|hook|function|class|query|api|example)\b/i;
 const FRAMEWORK_CODE_RE =
   /\b(?:code\s+in\s+(?:react|vue|angular|node(?:\.js)?|python|javascript|typescript|java|sql|pyspark)|(?:react|vue|angular|node(?:\.js)?|python|javascript|typescript|java|sql|pyspark)\s+(?:code|component|hook|function|snippet|query))\b/i;
 const REACT_CODE_CONCEPT_RE =
   /(?=.*\b(write|implement|create|build|code|component|example|snippet)\b)(?=.*\b(useeffect|usecontext|context api|react context)\b)/i;
-const PROJECT_RE =
-  /\b(projects?|experience|profile|background|skill set|worked on|built|role|responsibilit(?:y|ies)|tech stack)\b/i;
 const FILLER_RE =
   /^(hi|hello|hey|okay|ok|yeah|yes|no|right|fine|hmm|um|uh|thanks|thank you|can you hear me|am i audible)$/i;
 const URGENCY_RE = /\b(quickly|fast|immediately|right now|urgent|asap|within \d+\s*(?:minutes?|hours?|seconds?))\b/i;
@@ -111,8 +79,6 @@ const CHALLENGE_RE = /\b(why did you|why would you|why this|why that|justify|def
 const CLARIFICATION_RE = /\b(can you explain|clarify|explain more|tell me more|what do you mean|elaborate)\b/i;
 const STRESS_TEST_RE = /\b(what if|fails?|failure|production|outage|high traffic|scale|bottleneck|rollback|monitoring)\b/i;
 const DEEP_DIVE_RE = /\b(go deeper|deep dive|walk me through|step by step|architecture|internals|how exactly)\b/i;
-const TOPIC_CONTINUATION_RE =
-  /^(?:(?:and|yeah)[\s,.]+){0,2}what about [a-z0-9 .+#/_-]{2,50}(?: then)?\??$/i;
 const QUESTION_CUE_RE =
   /\b(what|why|how|when|where|which|who|can|could|would|should|is|are|do|does|did|explain|describe|tell me|walk me|list|share)\b/i;
 const WEAK_QUESTION_PREFIX_RE =
@@ -422,71 +388,6 @@ export function buildScenarioEvidence(input: {
   };
 }
 
-function clearSelectedAnswerContext(input: AIAnswerLiveContextMetadata): AIAnswerLiveContextMetadata {
-  return {
-    ...input,
-    answerClickMode: "answer_latest_unanswered",
-    selectedAnswerId: undefined,
-    selectedAnswerQuestion: undefined,
-    selectedAnswerText: undefined,
-    selectedAnswerCodeBlocks: undefined,
-    selectedAnswerTopic: undefined,
-    previousAiAnswer: undefined,
-    previousAiAnswers: undefined,
-    previousCodeBlocks: undefined,
-  };
-}
-
-function clearSelectedAnswerBinding(input: AIAnswerLiveContextMetadata): AIAnswerLiveContextMetadata {
-  return {
-    ...input,
-    answerClickMode: input.answerClickMode === "answer_followup" ? "answer_latest_unanswered" : input.answerClickMode,
-    selectedAnswerId: undefined,
-    selectedAnswerQuestion: undefined,
-    selectedAnswerText: undefined,
-    selectedAnswerCodeBlocks: undefined,
-    selectedAnswerTopic: undefined,
-  };
-}
-
-function hasSelectedAnswerBinding(input: AIAnswerLiveContextMetadata): boolean {
-  return Boolean(
-    input.selectedAnswerId ||
-      input.selectedAnswerQuestion ||
-      input.selectedAnswerText ||
-      input.selectedAnswerCodeBlocks?.length ||
-      input.selectedAnswerTopic,
-  );
-}
-
-function clearPreviousAnswerContext(input: AIAnswerLiveContextMetadata): AIAnswerLiveContextMetadata {
-  return {
-    ...input,
-    previousAiAnswer: undefined,
-    previousAiAnswers: undefined,
-    previousCodeBlocks: undefined,
-  };
-}
-
-function stripPreviousCodeMemory(input: AIAnswerLiveContextMetadata): AIAnswerLiveContextMetadata {
-  return {
-    ...input,
-    previousCodeBlocks: undefined,
-    previousAiAnswers: Array.isArray(input.previousAiAnswers)
-      ? input.previousAiAnswers.map((entry) => ({
-          ...(entry.question ? { question: entry.question } : {}),
-          answer: entry.answer,
-        }))
-      : input.previousAiAnswers,
-  };
-}
-
-function isFillerText(text: string): boolean {
-  const normalized = normalizeSpaces(text).toLowerCase();
-  if (!normalized) return true;
-  return FILLER_RE.test(normalized);
-}
-
 function inferTone(text: string): InterviewerTone {
   const normalized = normalizeSpaces(text);
   if (!normalized) return "neutral";
@@ -513,215 +414,7 @@ export function sanitizeLiveRequestContext(input: {
   transcriptEvidence?: TranscriptEvidenceV3;
   isRegenerate: boolean;
 }): SanitizedLiveRequest {
-  const metadata = input.metadata;
-  const scenarioDetected = !!input.transcriptEvidence?.scenarioDetected;
-  const evidenceText = normalizeSpaces(
-    [
-      input.transcriptEvidence?.compactQuery || "",
-      input.transcriptEvidence?.text || "",
-      metadata?.currentQuestionForBackend || "",
-      metadata?.activeQuestionDetection?.cleanedQuestion || "",
-    ].join(" "),
-  );
-  const interviewerTone = detectInterviewerTone({ text: evidenceText, scenarioDetected });
-  if (!metadata) {
-    return {
-      kind: scenarioDetected ? "scenario" : "noise",
-      scenarioDetected,
-      interviewerTone,
-      allowPreviousAnswer: false,
-      allowSelectedAnswer: false,
-      allowCodeMemory: false,
-      ...(input.transcriptEvidence?.scenarioPacket
-        ? { scenarioPacket: input.transcriptEvidence.scenarioPacket }
-        : {}),
-    };
-  }
-
-  if (input.isRegenerate) {
-    return {
-      kind: "regenerate",
-      metadata,
-      scenarioDetected,
-      interviewerTone,
-      allowPreviousAnswer: true,
-      allowSelectedAnswer: true,
-      allowCodeMemory: true,
-      ...(input.transcriptEvidence?.scenarioPacket
-        ? { scenarioPacket: input.transcriptEvidence.scenarioPacket }
-        : {}),
-    };
-  }
-
-  const selectedTopic = normalizeSpaces(metadata.selectedAnswerTopic || "");
-  const explicitSelectedFollowup =
-    metadata.answerClickMode === "answer_followup" && !!metadata.selectedAnswerId?.trim();
-  const detectionSaysFresh = metadata.answerClickMode === "answer_followup" &&
-    metadata.activeQuestionDetection?.isFollowUp === false;
-  const detectionSaysFollowup = metadata.activeQuestionDetection?.isFollowUp === true;
-  const semanticTopicContinuation = TOPIC_CONTINUATION_RE.test(
-    normalizeSpaces(
-      metadata.currentQuestionForBackend ||
-      metadata.activeQuestionDetection?.cleanedQuestion ||
-      "",
-    ),
-  );
-  const isCodeFollowup = CODE_FOLLOWUP_RE.test(evidenceText);
-  const isCodingRequest = isFreshCodeGenerationRequest(evidenceText);
-  const isProjectQuestion = PROJECT_RE.test(evidenceText);
-  const scenarioTopicConflict =
-    scenarioDetected &&
-    (!!metadata.selectedAnswerId || !!metadata.previousAiAnswer || !!metadata.previousAiAnswers?.length) &&
-    (
-      metadata.activeQuestionDetection?.isFollowUp !== true ||
-      (!!selectedTopic &&
-        !normalizeSpaces(input.transcriptEvidence?.compactQuery || "")
-          .toLowerCase()
-          .includes(selectedTopic.toLowerCase()))
-    );
-  const latestMode = metadata.answerClickMode === "answer_latest_unanswered" || !metadata.answerClickMode;
-  const noise = !scenarioDetected && isFillerText(evidenceText);
-
-  if (noise) {
-    return {
-      kind: "noise",
-      metadata: clearSelectedAnswerContext(metadata),
-      clearReason: "noise_only",
-      scenarioDetected,
-      interviewerTone,
-      allowPreviousAnswer: false,
-      allowSelectedAnswer: false,
-      allowCodeMemory: false,
-    };
-  }
-
-  if (scenarioTopicConflict || (scenarioDetected && !explicitSelectedFollowup)) {
-    return {
-      kind: "scenario",
-      metadata: clearSelectedAnswerContext(metadata),
-      clearReason: scenarioTopicConflict ? "scenario_topic_conflict" : "fresh_scenario_latest_question",
-      scenarioDetected,
-      interviewerTone,
-      allowPreviousAnswer: false,
-      allowSelectedAnswer: false,
-      allowCodeMemory: false,
-      ...(input.transcriptEvidence?.scenarioPacket
-        ? { scenarioPacket: input.transcriptEvidence.scenarioPacket }
-        : {}),
-    };
-  }
-
-  if (isCodingRequest && !explicitSelectedFollowup) {
-    return {
-      kind: "coding",
-      metadata: {
-        ...clearSelectedAnswerContext(metadata),
-        answerClickMode: "answer_latest_unanswered",
-      },
-      clearReason:
-        metadata.selectedAnswerId ||
-        metadata.previousAiAnswer ||
-        metadata.previousAiAnswers?.length ||
-        metadata.previousCodeBlocks?.length
-          ? "latest_coding_context_cleared"
-          : undefined,
-      scenarioDetected,
-      interviewerTone,
-      allowPreviousAnswer: false,
-      allowSelectedAnswer: false,
-      allowCodeMemory: false,
-    };
-  }
-
-  if (semanticTopicContinuation) {
-    return {
-      kind: "true_followup",
-      metadata: stripPreviousCodeMemory(clearSelectedAnswerBinding(metadata)),
-      clearReason: hasSelectedAnswerBinding(metadata)
-        ? "topic_continuation_selected_context_cleared"
-        : undefined,
-      scenarioDetected,
-      interviewerTone,
-      allowPreviousAnswer: true,
-      allowSelectedAnswer: false,
-      allowCodeMemory: false,
-    };
-  }
-
-  if (detectionSaysFresh) {
-    return {
-      kind: isCodingRequest ? "coding" : isProjectQuestion ? "project_question" : "latest_question",
-      metadata: clearSelectedAnswerContext(metadata),
-      clearReason: "frontend_detection_fresh_question",
-      scenarioDetected,
-      interviewerTone,
-      allowPreviousAnswer: false,
-      allowSelectedAnswer: false,
-      allowCodeMemory: false,
-    };
-  }
-
-  if (explicitSelectedFollowup) {
-    return {
-      kind: isCodeFollowup ? "code_followup" : "selected_card_followup",
-      metadata,
-      scenarioDetected,
-      interviewerTone,
-      allowPreviousAnswer: true,
-      allowSelectedAnswer: true,
-      allowCodeMemory: isCodeFollowup || !!metadata.selectedAnswerCodeBlocks?.length,
-    };
-  }
-
-  if (latestMode && !detectionSaysFollowup) {
-    return {
-      kind: isCodingRequest ? "coding" : isProjectQuestion ? "project_question" : "latest_question",
-      metadata: {
-        ...clearSelectedAnswerContext(metadata),
-        answerClickMode: "answer_latest_unanswered",
-      },
-      clearReason:
-        metadata.previousAiAnswer || metadata.previousAiAnswers?.length || metadata.previousCodeBlocks?.length
-          ? "latest_question_context_cleared"
-          : undefined,
-      scenarioDetected,
-      interviewerTone,
-      allowPreviousAnswer: false,
-      allowSelectedAnswer: false,
-      allowCodeMemory: false,
-    };
-  }
-
-  if (detectionSaysFollowup || isCodeFollowup) {
-    const metadataWithoutSelectedBinding = clearSelectedAnswerBinding(metadata);
-    const metadataForFollowup = isCodeFollowup
-      ? metadataWithoutSelectedBinding
-      : stripPreviousCodeMemory(metadataWithoutSelectedBinding);
-    return {
-      kind: isCodeFollowup ? "code_followup" : "true_followup",
-      metadata: metadataForFollowup,
-      clearReason:
-        hasSelectedAnswerBinding(metadata) || metadata.answerClickMode === "answer_followup"
-          ? "true_followup_selected_context_cleared"
-          : undefined,
-      scenarioDetected,
-      interviewerTone,
-      allowPreviousAnswer: true,
-      allowSelectedAnswer: false,
-      allowCodeMemory: isCodeFollowup,
-    };
-  }
-
-  return {
-    kind: isCodingRequest ? "coding" : isProjectQuestion ? "project_question" : "latest_question",
-    metadata: clearPreviousAnswerContext(clearSelectedAnswerContext(metadata)),
-    clearReason: "default_latest_context_cleared",
-    scenarioDetected,
-    interviewerTone,
-    allowPreviousAnswer: false,
-    allowSelectedAnswer: false,
-    allowCodeMemory: false,
-  };
+  return sanitizeLiveRequestContextV4(input);
 }
 
 export function sanitizeLiveAnswerMetadataForLatestQuestion(input: {

@@ -19,7 +19,7 @@ const CODE_BLOCK_CHARS_MAX = 1200;
 const CROSS_INTENT_CONCEPT_RE =
   /\b(what is|what are|explain|define|difference between|how does|what could be the reason|what could be a reason|can (?:you|we) (?:create|use))\b/i;
 const EXPLICIT_EXPERIENCE_RE =
-  /\b(your profile|walk me through (?:your )?profile|skill set|your skills|your background|your experience|your project|your company|tell me about your project|from your project|in your company|in your project|years? of experience|how many years|professional experience|work experience|project details?|your role|responsibilit(?:y|ies)|tech stack|impact|metrics?|worked on|services you worked on|critical situation|critical challenge|situation you faced|how did you handle it|rate yourself|how confident|your confidence|your tasks|included in your tasks|manage and secure sensitive credentials|client id and client secret|where do you store|key vault|secrets manager)\b/i;
+  /\b(introduce (?:yourself|yourselves)|tell me about yourself|your profile|walk me through (?:your )?profile|skill set|your skills|your background|your experience|your project|your company|tell me about your project|from your project|in your company|in your project|years? of experience|how many years|professional experience|work experience|project details?|your role|responsibilit(?:y|ies)|tech stack|impact|metrics?|worked on|services you worked on|critical situation|critical challenge|situation you faced|how did you handle it|rate yourself|how confident|your confidence|your tasks|included in your tasks|manage and secure sensitive credentials|client id and client secret|where do you store|key vault|secrets manager)\b/i;
 const PROJECT_OVERVIEW_RE =
   /\b(explain|describe|tell me about|walk me through|list|share)\b[\s\w]{0,30}\b(projects|project work|work done|things you built)\b/i;
 const CODE_REF_RE =
@@ -179,6 +179,7 @@ export function buildRequestScopedPolicy(input: {
     lines.push("- include_resume_or_project_backed_examples: true");
     lines.push("- project_source_precedence: selected_projects_first; resume_context_secondary_only_for_missing_details_or_when_projects_absent");
     lines.push("- experience_skill_project_structure: include Experience, Skill Set, and Projects when the question asks for profile/experience/skills/projects together");
+    lines.push("- introduction_years_rule: open with verified name, role, and total experience; then cover requested projects and skills; omit unavailable facts");
     lines.push("- years_rule: state exact years/work experience only if present in runtime context; otherwise describe experience level without inventing years");
     if (CLOUD_CREDENTIAL_SECURITY_RE.test(input.question || "")) {
       lines.push("- credential_security_answer_shape: Azure Key Vault; runtime retrieval from Azure Data Factory or Databricks; Azure RBAC or managed identity; AWS Secrets Manager or Systems Manager Parameter Store; runtime retrieval from Glue or Lambda; IAM least privilege; encryption, audit logging, and secret rotation");

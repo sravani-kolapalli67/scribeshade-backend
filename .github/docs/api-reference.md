@@ -1,7 +1,7 @@
 # ScribeShade Backend API Reference
 
-Last updated: 2026-05-07
-Document version: v1.8.0
+Last updated: 2026-06-06
+Document version: v1.9.1
 
 Base URL:
 - Local: `http://localhost:3200/api`
@@ -766,14 +766,40 @@ Error examples:
 ### POST /session/:id/ai-answer
 Streams AI answer from transcript.
 
+Auth: Clerk middleware applies globally.
+
 Request:
 ```json
 {
   "transcript": "user question transcript",
+  "currentQuestion": "cleaned current question",
+  "recentTranscriptWindow": ["recent transcript evidence"],
+  "speakerSeparatedTranscript": [
+    {
+      "speakerType": "interviewer",
+      "content": "What is dependency injection?"
+    }
+  ],
+  "activeQuestionDetection": {
+    "activeQuestion": "What is dependency injection?",
+    "cleanedQuestion": "What is dependency injection?",
+    "isFollowUp": false,
+    "topicChanged": true,
+    "confidenceScore": 0.95,
+    "ignoredNoise": false
+  },
+  "answerClickMode": "answer_latest_unanswered",
   "isCustomQuery": false,
   "aiModel": "Gemini 2.0 Flash"
 }
 ```
+
+Context rules:
+- Normal latest-question clicks must not send selected-answer or previous-answer fields.
+- `selectedAnswer*` fields are accepted only for `answer_followup`, regenerate, or re-answer flows.
+- `previousAiAnswer`, `previousAiAnswers`, and `previousCodeBlocks` are used only for explicit follow-up or regenerate flows.
+- The transcript is authoritative. Request metadata cannot override a newly detected scenario, code task, or topic switch.
+- A request performs one chunked OpenRouter answer stream. The server does not retry a `===NO_NEW_QUESTION===` result with another model call.
 
 Success `200`:
 - Streamed `text/plain` chunks.
@@ -782,6 +808,13 @@ Error examples:
 - `400`
 ```json
 { "error": "No transcript provided" }
+```
+- `409`
+```json
+{
+  "code": "DUPLICATE_IN_FLIGHT",
+  "reason": "AI answer request already in progress for this session"
+}
 ```
 - `500`
 ```json
@@ -1974,6 +2007,7 @@ Recommended client flow:
 
 | Version | Date | Summary |
 |---|---|---|
+| v1.9.1 | 2026-06-06 | Clarified `POST /session/:id/ai-answer` transcript authority, mode-scoped context fields, duplicate-request behavior, and single-stream-call semantics. |
 | v1.9.0 | 2026-05-18 | Added 3 Updates API endpoints: `GET /updates/latest.json` (Tauri updater manifest proxy), `GET /updates/download/:filename` (app binary streaming), `GET /updates/health` (updater system diagnostics). All endpoints documented with error handling and architectural notes. |
 | v1.8.0 | 2026-05-07 | Updated `GET /resume/list` to accept optional `search` for resume-name / JD / keyword search across uploaded and built resumes. Documented searchable sources and response `source` field example. |
 | v1.7.0 | 2026-05-04 | Added 4 previously undocumented endpoints: `POST /auth/tauri-ticket` (Tauri desktop sign-in token), `GET /session/:id/events` (SSE real-time stream), `POST /session-notes/:sessionId/generate` (AI session notes generation), `GET /session-notes/:sessionId` (retrieve notes). Added **Session Notes APIs** section. |

@@ -174,6 +174,26 @@ test("CIE extracts full candidate profile sections for profile walkthrough quest
   assert.ok(context.includes("Resume Project Summary"));
 });
 
+test("CIE derives factual total experience from dated work history", () => {
+  const context = extractCandidateProfileContext({
+    resumeText: [
+      "TUSHAR VAGHELA",
+      "R E A C T D E V E L O P E R",
+      "W O R K E X P E R I E N C E",
+      "WebSenor Full Stack Developer Intern Aug 2024 – Oct 2024",
+      "WebSenor MERN Stack Developer Nov 2024 – Feb 2025",
+      "MyPay Communication React Developer Feb 2025 – Present",
+      "E D U C A T I O N",
+      "Bachelor of Computer Applications Oct 2021 - Oct 2024",
+    ].join("\n"),
+    targetBudget: 400,
+    includeResumeProjects: false,
+    currentDate: new Date("2026-06-07T00:00:00.000Z"),
+  });
+
+  assert.ok(context.includes("Total Experience: 1 year 11 months"));
+});
+
 test("CIE profile digest excludes resume project section when selected projects are active", () => {
   const context = extractCandidateProfileContext({
     resumeText: [

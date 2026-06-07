@@ -41,6 +41,7 @@ test("system prompt remains behavior-only and keeps parser contract", () => {
   assert.ok(prompt.includes("CONTEXT PRIORITY"));
   assert.ok(prompt.includes("Candidate speech may contain the question they want help answering"));
   assert.ok(prompt.includes("answer in that order: Experience, Skill Set, Projects"));
+  assert.ok(prompt.includes("open with the verified candidate name, role, and exact Total Experience"));
   assert.ok(prompt.includes("include total years and work experience only when available"));
   assert.ok(prompt.includes("**QUESTION:**"));
   assert.ok(prompt.includes("**ANSWER:**"));

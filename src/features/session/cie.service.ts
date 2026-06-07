@@ -389,6 +389,71 @@ function extractExplicitTotalExperience(resumeText: string): string {
   return sentence?.[0]?.trim() || "";
 }
 
+function extractWorkDateRangeExperience(
+  resumeText: string,
+  currentDate: Date,
+): string {
+  const lines = splitResumeLines(resumeText);
+  const normalizedHeading = (line: string): string =>
+    line.replace(/[^a-z]/gi, "").toLowerCase();
+  const workStart = lines.findIndex(
+    (line) => normalizedHeading(line) === "workexperience",
+  );
+  if (workStart < 0) return "";
+  const workEndOffset = lines
+    .slice(workStart + 1)
+    .findIndex((line) =>
+      ["projects", "education", "certifications"].includes(
+        normalizedHeading(line),
+      ),
+    );
+  const workLines = lines.slice(
+    workStart + 1,
+    workEndOffset >= 0 ? workStart + 1 + workEndOffset : lines.length,
+  );
+  const monthNames =
+    "jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec";
+  const ranges = workLines
+    .join("\n")
+    .matchAll(
+      new RegExp(
+        `\\b(${monthNames})[a-z]*\\s+(\\d{4})\\s*[–—-]\\s*(?:(present|current)|(${monthNames})[a-z]*\\s+(\\d{4}))`,
+        "gi",
+      ),
+    );
+  const monthIndex = (value: string): number =>
+    ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]
+      .indexOf(value.slice(0, 3).toLowerCase());
+  const intervals = Array.from(ranges)
+    .map((match) => {
+      const start = Number(match[2]) * 12 + monthIndex(match[1]);
+      const end = match[3]
+        ? currentDate.getUTCFullYear() * 12 + currentDate.getUTCMonth()
+        : Number(match[5]) * 12 + monthIndex(match[4]);
+      return { start, end: Math.max(start, end) };
+    })
+    .sort((left, right) => left.start - right.start);
+  if (intervals.length === 0) return "";
+
+  let totalMonths = 0;
+  let active = intervals[0];
+  for (const interval of intervals.slice(1)) {
+    if (interval.start <= active.end + 1) {
+      active = { start: active.start, end: Math.max(active.end, interval.end) };
+      continue;
+    }
+    totalMonths += active.end - active.start + 1;
+    active = interval;
+  }
+  totalMonths += active.end - active.start + 1;
+  const years = Math.floor(totalMonths / 12);
+  const months = totalMonths % 12;
+  return [
+    years > 0 ? `${years} ${years === 1 ? "year" : "years"}` : "",
+    months > 0 ? `${months} ${months === 1 ? "month" : "months"}` : "",
+  ].filter(Boolean).join(" ");
+}
+
 function compactResumeSection(section: string, maxChars: number): string {
   const normalized = section
     .split(/\r?\n/)
@@ -403,6 +468,7 @@ export function extractCandidateProfileContext(input: {
   resumeText: string;
   targetBudget: number;
   includeResumeProjects: boolean;
+  currentDate?: Date;
 }): string {
   if (!input.resumeText.trim()) return "";
   const lines = splitResumeLines(input.resumeText);
@@ -442,7 +508,12 @@ export function extractCandidateProfileContext(input: {
     : "";
   const name = extractFirstResumeLine(lines, /^name\s*:\s*(.+)$/i);
   const role = extractFirstResumeLine(lines, /^(?:role|title|current role)\s*:\s*(.+)$/i);
-  const totalExperience = extractExplicitTotalExperience(input.resumeText);
+  const totalExperience =
+    extractExplicitTotalExperience(input.resumeText) ||
+    extractWorkDateRangeExperience(
+      input.resumeText,
+      input.currentDate || new Date(),
+    );
   const headerLines = lines
     .slice(0, 12)
     .filter((line) => !isResumeSectionHeading(line, stopAtMajorSection))
@@ -955,6 +1026,13 @@ export async function buildOptimizedContext(
     complexity?: QuestionComplexity;
     disableProjectPriority?: boolean;
     contextMode?: "live" | "offline";
+    sourcePolicy?: {
+      includeResume: boolean;
+      includeProjects: boolean;
+      includeHistory: boolean;
+      includeDocuments: boolean;
+      includeVector: boolean;
+    };
   },
 ) {
   const contextMode = options?.contextMode || "offline";
@@ -1031,17 +1109,28 @@ export async function buildOptimizedContext(
   console.log(`[CIE] Complexity: ${complexity} | Query: "${queryPreview}" (${wordCount} words)`);
 
   // ── Step 2: Conditionally fetch only what the tier needs ──────────────────
-  const includeResume =
+  const tierIncludesResume =
     (shouldIncludeResume(complexity) ||
       resumeProjectFallbackActive ||
       (projectPriorityActive && isMixedExperienceProject)) &&
     (!projectPriorityActive || isMixedExperienceProject);
-  const includeProjects =
+  const tierIncludesProjects =
     shouldIncludeProjects(complexity) &&
     (projectPriorityActive || isProjectDetailQuestion || resumeProjectFallbackActive);
-  const includeDocuments = shouldIncludeDocuments(complexity);
-  const includeHistory = shouldIncludeHistory(complexity);
-  const includeVector = contextMode !== "live" && shouldIncludeVectorRAG(complexity);
+  const includeResume =
+    tierIncludesResume && (options?.sourcePolicy?.includeResume ?? true);
+  const includeProjects =
+    tierIncludesProjects && (options?.sourcePolicy?.includeProjects ?? true);
+  const includeDocuments =
+    shouldIncludeDocuments(complexity) &&
+    (options?.sourcePolicy?.includeDocuments ?? true);
+  const includeHistory =
+    shouldIncludeHistory(complexity) &&
+    (options?.sourcePolicy?.includeHistory ?? true);
+  const includeVector =
+    contextMode !== "live" &&
+    shouldIncludeVectorRAG(complexity) &&
+    (options?.sourcePolicy?.includeVector ?? true);
   const sourceTimingsStartedAt = Date.now();
 
   // Parallel fetch — only the sources this tier requires

@@ -1,12 +1,11 @@
+import type { AnswerValidationResult } from "./session-intelligence.types";
+import type { AnswerTrust } from "./session-intelligence.types";
+
+export type { AnswerValidationResult } from "./session-intelligence.types";
+
 export type ExtractedAnswerPair = {
   question: string;
   answer: string;
-};
-
-export type AnswerValidationResult = {
-  persistCard: boolean;
-  updateMemory: boolean;
-  reasons: string[];
 };
 
 const SEGMENT_MARKER_RE = /\n?={3,}NEXT_QUESTION={3,}\n?/i;
@@ -155,6 +154,7 @@ export function validateAnswerForMemory(input: {
   skipUnsupportedQuestionEvidenceCheck?: boolean;
   staleContextCleared: boolean;
   scenarioNumbers?: string[];
+  requestedTrust?: AnswerTrust;
 }): AnswerValidationResult {
   const reasons: string[] = [];
   const response = input.finalResponse || "";
@@ -195,7 +195,6 @@ export function validateAnswerForMemory(input: {
   if (missingScenarioNumbers.length > 0 && input.scenarioNumbers && input.scenarioNumbers.length > 0) {
     reasons.push(`scenario_numbers_not_preserved:${missingScenarioNumbers.slice(0, 4).join(",")}`);
   }
-
   const blockingReasons = new Set([
     "no_new_question_sentinel",
     "question_not_supported_by_evidence",
@@ -203,9 +202,22 @@ export function validateAnswerForMemory(input: {
     "stale_context_reference_after_clear",
   ]);
   const persistCard = !reasons.some((reason) => blockingReasons.has(reason));
+  const weakEvidence = reasons.some(
+    (reason) =>
+      reason.startsWith("scenario_numbers_not_preserved") ||
+      reason === "unsupported_extra_question_without_separator",
+  );
+  const trust = !persistCard
+    ? "none"
+    : input.requestedTrust === "none"
+      ? "none"
+      : input.requestedTrust === "weak" || weakEvidence
+        ? "weak"
+        : "strong";
   return {
     persistCard,
-    updateMemory: persistCard && !reasons.some((reason) => reason.startsWith("scenario_numbers_not_preserved")),
+    updateMemory: trust === "strong",
+    trust,
     reasons,
   };
 }

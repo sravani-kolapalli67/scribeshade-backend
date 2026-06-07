@@ -386,7 +386,7 @@ test("fresh latest coding request overrides stale followup metadata and clears o
     },
   });
 
-  assert.equal(result.kind, "coding");
+  assert.equal(result.kind, "code_generation");
   assert.equal(result.allowPreviousAnswer, false);
   assert.equal(result.allowSelectedAnswer, false);
   assert.equal(result.allowCodeMemory, false);
@@ -395,7 +395,7 @@ test("fresh latest coding request overrides stale followup metadata and clears o
   assert.equal(result.metadata?.previousAiAnswer, undefined);
   assert.equal(result.metadata?.previousAiAnswers, undefined);
   assert.equal(result.metadata?.previousCodeBlocks, undefined);
-  assert.equal(result.clearReason, "latest_coding_context_cleared");
+  assert.equal(result.clearReason, "fresh_code_generation_context_cleared");
 });
 
 test("scenario evidence preserves ecommerce setup and final ask", () => {

@@ -33,9 +33,7 @@ import {
 } from "./ai-answer.dto";
 import { buildRequestScopedPolicy } from "./answer-policy";
 import {
-  decideAISessionState,
   fallbackAISessionDecision,
-  toDecisionContextTargets,
 } from "./ai-session-decision";
 import {
   buildEffectiveLiveContextMetadata,
@@ -54,7 +52,6 @@ import {
   enqueueCandidateDigestWarmup,
 } from "./candidate-digest.service";
 import {
-  orchestrateAIContext,
   type ContextOrchestrationResult,
   type QuestionMeta,
 } from "./context-orchestrator.service";
@@ -92,13 +89,27 @@ import {
   type TranscriptEvidenceSpeaker,
 } from "./ai-answer-context-guards";
 import {
-  applyRoutedAnswerContext,
+  applyLiveRequestToSessionStateV3,
   buildSessionStateV3,
   compactSessionStateForPrompt,
-  routeAnswerContextV3,
-  type RoutedAnswerContext,
-  type SessionStateV3,
 } from "./session-intelligence.service";
+import {
+  applyContextRouterV3,
+  routeAnswerContextV3,
+} from "./context/context-router-v3.service";
+import {
+  buildSanitizerDiagnostics,
+} from "./state/live-request-sanitizer-v4";
+import { readSessionStateV3 } from "./state/session-state-v3.service";
+import { enqueueSessionMemoryJob } from "../jobs/session-memory.queue";
+import { enqueueSessionRagJob } from "../jobs/session-rag.queue";
+import {
+  retrieveSessionSupportingEvidence,
+} from "./rag/session-rag-retriever.service";
+import type {
+  RoutedAnswerContext,
+  SessionStateV3,
+} from "./session-intelligence.types";
 
 const ai = new OpenRouter({
   apiKey: process.env.OPENROUTER_API_KEY || "",
@@ -108,7 +119,6 @@ const ai = new OpenRouter({
 
 const model = process.env.OPENROUTER_MODEL;
 const ACTIVE_QUESTION_CONFIDENCE_THRESHOLD = 0.58;
-const AI_DECISION_CONFIDENCE_THRESHOLD = 0.62;
 const LIVE_TRANSCRIPT_GROUP_ID = "live-transcript";
 const LEGACY_TRANSCRIPT_FLUSH_DELAY_MS = Number(process.env.LEGACY_TRANSCRIPT_FLUSH_DELAY_MS || 7000);
 const RECENT_TRANSCRIPT_CONTEXT_WINDOW_MS = 120_000;
@@ -978,8 +988,8 @@ function resolveCleanQuestionForContext(input: {
     });
   }
   return normalizePromptSpaces(
-    input.transcriptEvidence?.dominantQuestion ||
-      input.transcriptEvidence?.currentQuestionHint ||
+    input.transcriptEvidence?.currentQuestionHint ||
+      input.transcriptEvidence?.dominantQuestion ||
       input.transcriptEvidence?.compactQuery ||
       latestQuestionLikeEvidence(input.transcriptEvidence?.lines || []) ||
       input.transcript,
@@ -2029,8 +2039,9 @@ function processAIStream(
     skipUnsupportedQuestionEvidenceCheck?: boolean;
     staleContextCleared: boolean;
     scenarioNumbers?: string[];
+    requestedTrust?: SanitizedLiveRequest["answerTrust"];
+    requestKind?: SanitizedLiveRequest["kind"];
   },
-  retryOnNoQuestion?: () => any,
 ) {
   const segmentMarker = /\n?={3,}NEXT_QUESTION={3,}\n?/i;
   const rewriteFirstQuestionBlock = (text: string): string => {
@@ -2076,7 +2087,6 @@ function processAIStream(
   async function* streamGenerator() {
     let finalResponse = "";
     let activeResult = result;
-    let retryAttempted = false;
 
     if (questionMeta) {
       yield { text: `===QUESTION_META=${JSON.stringify(questionMeta)}===\n` };
@@ -2097,7 +2107,7 @@ function processAIStream(
             sessionId,
             firstTokenMs,
             model: targetModel || "default",
-            retryAttempted,
+            retryAttempted: false,
           });
           if (firstTokenMs > 2500) {
             console.warn("[AI Stream][first-token-slow]", {
@@ -2123,19 +2133,6 @@ function processAIStream(
 
       const rawAttemptResponse = attemptResponse || (await activeResult.getText());
       const rewrittenAttemptResponse = rewriteFirstQuestionBlock(rawAttemptResponse);
-      if (
-        rewrittenAttemptResponse.trim() === "===NO_NEW_QUESTION===" &&
-        retryOnNoQuestion &&
-        !retryAttempted
-      ) {
-        retryAttempted = true;
-        console.warn("[AI Answer] answerable request returned sentinel; retrying with authoritative question", {
-          sessionId,
-          authoritativeQuestion: authoritativeQuestion || fallbackQuestion,
-        });
-        activeResult = retryOnNoQuestion();
-        continue;
-      }
 
       if (!streamReleased && rewrittenAttemptResponse) {
         yield { text: rewrittenAttemptResponse };
@@ -2178,6 +2175,7 @@ function processAIStream(
                   answerValidationContext?.skipUnsupportedQuestionEvidenceCheck === true,
                 staleContextCleared: answerValidationContext?.staleContextCleared === true,
                 scenarioNumbers: answerValidationContext?.scenarioNumbers || [],
+                requestedTrust: answerValidationContext?.requestedTrust,
               });
               if (!validation.persistCard) {
                 console.warn("[AI Answer] skipped invalid generated answer card", {
@@ -2266,15 +2264,86 @@ function processAIStream(
                 }
               }
               if (validation.updateMemory) {
+                const answerId =
+                  pairSnapshotId || snapshotId || crypto.randomUUID();
                 await recordAnswerInLedgers({
                   sessionId,
-                  answerId: pairSnapshotId || snapshotId || crypto.randomUUID(),
+                  answerId,
                   question,
                   answer,
                   topic:
                     orchestration?.questionMeta.topic ||
                     deriveTopicFromAnyText(question),
                 }).catch((e) => console.error("recordAnswerInLedgers Error:", e));
+                void enqueueSessionMemoryJob({
+                  type: "memory-update",
+                  sessionId,
+                  answerId,
+                  question,
+                  answer,
+                  trust: validation.trust === "strong" ? "strong" : "weak",
+                }).catch((error) => {
+                  console.warn("[AI Answer] memory update enqueue failed", {
+                    sessionId,
+                    answerId,
+                    error,
+                  });
+                });
+                void enqueueSessionRagJob({
+                  type: "index-document",
+                  document: {
+                    id: `qa:${answerId}`,
+                    sessionId,
+                    userId: session.userId,
+                    type: "qa_summary",
+                    topic: deriveTopicFromAnyText(question),
+                    text: `Question: ${question}\nAnswer: ${answer}`,
+                    speaker: "assistant",
+                    timestamp: new Date().toISOString(),
+                    trust:
+                      validation.trust === "strong" ? "strong" : "weak",
+                    answerId,
+                  },
+                }).catch((error) => {
+                  console.warn("[AI Answer] RAG indexing enqueue failed", {
+                    sessionId,
+                    answerId,
+                    error,
+                  });
+                });
+                if (
+                  answerValidationContext?.requestKind === "code_generation" ||
+                  answerValidationContext?.requestKind === "code_followup"
+                ) {
+                  void enqueueSessionMemoryJob({
+                    type: "code-task-update",
+                    sessionId,
+                    answerId,
+                    question,
+                    answer,
+                    topic: deriveTopicFromAnyText(question),
+                    explicitCodeTask: true,
+                  }).catch((error) => {
+                    console.warn("[AI Answer] code memory enqueue failed", {
+                      sessionId,
+                      answerId,
+                      error,
+                    });
+                  });
+                }
+                if (answerValidationContext?.requestKind === "scenario") {
+                  void enqueueSessionMemoryJob({
+                    type: "scenario-update",
+                    sessionId,
+                    currentQuestionHint: question,
+                  }).catch((error) => {
+                    console.warn("[AI Answer] scenario memory enqueue failed", {
+                      sessionId,
+                      answerId,
+                      error,
+                    });
+                  });
+                }
               } else {
                 console.warn("[AI Answer] skipped memory update for generated answer", {
                   sessionId,
@@ -2464,10 +2533,6 @@ export async function analyzeScreen(
         skipUnsupportedQuestionEvidenceCheck: true,
         staleContextCleared: true,
       },
-      () =>
-        callScreenModel(
-          "The previous response incorrectly refused the explicit Analyze Screen request. Return a useful **QUESTION:** / **ANSWER:** response now. Infer the best-supported interview task from the screenshot and context.",
-        ),
     );
   } catch (err: any) {
     console.error("OpenRouter Error (analyzeScreen):", err);
@@ -2530,7 +2595,6 @@ export async function getAIAnswer(
   let finalTranscript = transcript;
   let finalSnapshotId = snapshotId;
   let orchestration: ContextOrchestrationResult | undefined;
-  let orchestrationPromise: Promise<ContextOrchestrationResult> | undefined;
   let segmenterResult: AIAnswerSegmenterResult | undefined;
   let transcriptEvidence: TranscriptEvidenceV3 | undefined;
   let intentLedger: IntentLedger = { intents: [] };
@@ -2567,6 +2631,7 @@ export async function getAIAnswer(
       transcript,
       metadata: liveContextMetadata,
     });
+    const originalLiveContextMetadata = liveContextMetadata;
     sanitizedLiveRequest = sanitizeLiveRequestContext({
       metadata: liveContextMetadata,
       transcriptEvidence,
@@ -2575,7 +2640,7 @@ export async function getAIAnswer(
     metadataSanitization = {
       metadata: sanitizedLiveRequest.metadata,
       originalMode: liveContextMetadata?.answerClickMode,
-      effectiveMode: sanitizedLiveRequest.metadata?.answerClickMode,
+      effectiveMode: sanitizedLiveRequest.effectiveAnswerClickMode,
       selectedTopic: liveContextMetadata?.selectedAnswerTopic || "",
       scenarioDetected: sanitizedLiveRequest.scenarioDetected,
       clearReason: sanitizedLiveRequest.clearReason,
@@ -2589,6 +2654,13 @@ export async function getAIAnswer(
         : {}),
     };
     liveContextMetadata = metadataSanitization.metadata;
+    console.log("[AI Answer] request sanitized", {
+      sessionId: id,
+      ...buildSanitizerDiagnostics({
+        originalMetadata: originalLiveContextMetadata,
+        sanitizedRequest: sanitizedLiveRequest,
+      }),
+    });
     detection =
       !isRegenerate && liveContextMetadata?.activeQuestionDetection
         ? liveContextMetadata.activeQuestionDetection
@@ -2620,14 +2692,37 @@ export async function getAIAnswer(
       isCustomQuery,
       isRegenerate,
     });
-    orchestrationPromise = orchestrateAIContext({
-      sessionId: id,
-      resolvedQuestion: finalTranscript,
-      metadata: liveContextMetadata,
-    });
   }
 
   finalTranscript = normalizeTranscriptForQuestionDetection(finalTranscript);
+  if (!isRegenerate && sanitizedLiveRequest) {
+    const storedSessionState = await readSessionStateV3(id);
+    const requestSessionState =
+      storedSessionState ||
+      buildSessionStateV3({
+        sessionId: id,
+        sanitizedRequest: sanitizedLiveRequest,
+        intentLedger,
+        answerLedger,
+        transcriptEvidence,
+        fallbackTopic: deriveTopicFromAnyText(finalTranscript),
+      });
+    sessionStateV3 = applyLiveRequestToSessionStateV3({
+      state: requestSessionState,
+      sanitizedRequest: sanitizedLiveRequest,
+      transcriptEvidence,
+      fallbackTopic: deriveTopicFromAnyText(finalTranscript),
+    });
+    routedAnswerContext = routeAnswerContextV3({
+      sanitizedRequest: sanitizedLiveRequest,
+      sessionState: sessionStateV3,
+      question: finalTranscript,
+      hasResume: Boolean(session.resumeId),
+      hasProjects:
+        Array.isArray(session.projectIds) && session.projectIds.length > 0,
+      hasDocument: Boolean(session.documentId),
+    });
+  }
   const liveHistoryPromise = loadLiveAnswerHistoryMessages(id).catch((error) => {
     console.warn("[AI Answer Debug] failed loading live transcript chunk history", {
       sessionId: id,
@@ -2686,12 +2781,26 @@ export async function getAIAnswer(
       }
     }
   } else {
-    [contextForCall, orchestration] = await Promise.all([
-      buildOptimizedContext(id, finalTranscript, undefined, session, {
+    contextForCall = await buildOptimizedContext(
+      id,
+      finalTranscript,
+      undefined,
+      session,
+      {
         contextMode: "live",
-      }),
-      orchestrationPromise || Promise.resolve(undefined),
-    ]);
+        ...(routedAnswerContext
+          ? {
+              sourcePolicy: {
+                includeResume: routedAnswerContext.includeResume,
+                includeProjects: routedAnswerContext.includeProjects,
+                includeHistory: routedAnswerContext.includeHistory,
+                includeDocuments: routedAnswerContext.includeDocuments,
+                includeVector: false,
+              },
+            }
+          : {}),
+      },
+    );
     if (!contextForCall) {
       throw new Error("Failed to build context");
     }
@@ -2741,46 +2850,12 @@ export async function getAIAnswer(
       followup,
     });
     const decisionStartedAt = Date.now();
-    const shouldUseDeterministicDecision =
-      conversationIntent !== "UNKNOWN" ||
-      followup.isExplicitFollowupReference ||
-      !!followup.target ||
-      !!detection?.isFollowUp;
-    const aiDecisionResult = shouldUseDeterministicDecision
-        ? {
-          decision: fallbackDecision,
-          fallbackDecisionUsed: true,
-          error: "deterministic_live_decision",
-        }
-        : await decideAISessionState({
-          ai,
-          model: targetModel,
-          provider: latencyOptimizedProvider as any,
-          fallback: fallbackDecision,
-          timeoutMs: 450,
-          input: {
-            currentQuestion: effectiveQuestionForPolicy,
-            recentTranscriptWindow: liveContextMetadata?.recentTranscriptWindow,
-            speakerSeparatedTranscript: liveContextMetadata?.speakerSeparatedTranscript,
-            activeQuestionDetection: detection,
-            previousAiAnswer: liveContextMetadata?.previousAiAnswer,
-            previousAiAnswers: liveContextMetadata?.previousAiAnswers,
-            previousCodeBlocks: liveContextMetadata?.previousCodeBlocks,
-            selectedAnswerId: liveContextMetadata?.selectedAnswerId,
-            selectedAnswerQuestion: liveContextMetadata?.selectedAnswerQuestion,
-            selectedAnswerText: liveContextMetadata?.selectedAnswerText,
-            selectedAnswerTopic: liveContextMetadata?.selectedAnswerTopic,
-            answerHistory: toDecisionContextTargets(history),
-            deterministic: {
-              conversationIntent,
-              isExplicitFollowupReference: followup.isExplicitFollowupReference,
-              fallbackTargetId: followup.target?.id || null,
-              fallbackTargetHasCode: !!followup.target?.codeBlocks?.length,
-              fallbackTargetTopic: followup.target?.topic || null,
-              reasonForNoTarget: followup.reasonForNoTarget,
-            },
-          },
-        });
+    const shouldUseDeterministicDecision = true;
+    const aiDecisionResult = {
+      decision: fallbackDecision,
+      fallbackDecisionUsed: true,
+      error: "deterministic_live_decision",
+    };
     console.log("[AI Answer Debug] decision timing:", {
       sessionId: id,
       decisionMs: Date.now() - decisionStartedAt,
@@ -2788,9 +2863,7 @@ export async function getAIAnswer(
       error: aiDecisionResult.error || null,
     });
     const aiDecision = aiDecisionResult.decision;
-    const aiDecisionAuthoritative =
-      !aiDecisionResult.fallbackDecisionUsed &&
-      aiDecision.confidence >= AI_DECISION_CONFIDENCE_THRESHOLD;
+    const aiDecisionAuthoritative = true;
     const aiDetectedFollowup =
       aiDecision.isFollowUp ||
       [
@@ -2807,7 +2880,14 @@ export async function getAIAnswer(
       ? !freshScenarioRequest && aiDetectedFollowup
       : !freshScenarioRequest &&
         (followup.isExplicitFollowupReference || isFollowupConversationIntent(conversationIntent));
-    const shouldUseFollowupContext = !freshScenarioRequest && (!!detection?.isFollowUp || backendDetectedFollowup);
+    const authorizedFollowupRequest =
+      sanitizedLiveRequest?.kind === "true_followup" ||
+      sanitizedLiveRequest?.kind === "selected_card_followup" ||
+      sanitizedLiveRequest?.kind === "code_followup" ||
+      sanitizedLiveRequest?.kind === "challenge_or_correction" ||
+      sanitizedLiveRequest?.kind === "regenerate";
+    const shouldUseFollowupContext =
+      !freshScenarioRequest && authorizedFollowupRequest;
     const referencedTarget = detection?.referencedHistoryTurnId
       ? history.find((h) => h.id === detection.referencedHistoryTurnId) || null
       : null;
@@ -2831,23 +2911,7 @@ export async function getAIAnswer(
       : aiDecisionAuthoritative && aiDetectedFollowup
         ? false
         : topicChanged;
-    const metadataForRequest = isRegenerate
-      ? liveContextMetadata
-      : shouldUseFollowupContext && !effectiveTopicChanged
-      ? liveContextMetadata
-      : {
-          ...liveContextMetadata,
-          // Always preserve previousAiAnswer/previousCodeBlocks so the AI
-          // maintains technical continuity regardless of follow-up classification.
-          // Only strip the selected-answer bindings that anchor to a specific turn.
-          previousAiAnswer: liveContextMetadata?.previousAiAnswer,
-          previousCodeBlocks: liveContextMetadata?.previousCodeBlocks,
-          selectedAnswerId: undefined,
-          selectedAnswerQuestion: undefined,
-          selectedAnswerText: undefined,
-          selectedAnswerCodeBlocks: undefined,
-          selectedAnswerTopic: undefined,
-        };
+    const metadataForRequest = liveContextMetadata;
     const questionTopic = deriveTopicFromAnyText(effectiveQuestionForPolicy);
     const selectedAnswerTopicForLog =
       liveContextMetadata?.selectedAnswerTopic ||
@@ -2857,44 +2921,6 @@ export async function getAIAnswer(
     let previousAiAnswerIgnoredReason: string | null = null;
     const metadataAfterPreviousAnswerGuard = { ...(metadataForRequest || {}) };
     const strictSelectedFollowup = isStrictSelectedFollowup(liveContextMetadata);
-    if (strictSelectedFollowup) {
-      metadataAfterPreviousAnswerGuard.previousAiAnswer = liveContextMetadata?.selectedAnswerText
-        ? String(liveContextMetadata.selectedAnswerText).slice(0, 1000)
-        : undefined;
-      metadataAfterPreviousAnswerGuard.previousCodeBlocks =
-        Array.isArray(liveContextMetadata?.selectedAnswerCodeBlocks) &&
-        liveContextMetadata.selectedAnswerCodeBlocks.length > 0
-          ? liveContextMetadata.selectedAnswerCodeBlocks
-              .slice(0, 2)
-              .map((block) => String(block || "").slice(0, 1500))
-              .filter(Boolean)
-          : undefined;
-    }
-    if (
-      !strictSelectedFollowup &&
-      !metadataAfterPreviousAnswerGuard.previousAiAnswer &&
-      Array.isArray((metadataAfterPreviousAnswerGuard as any).previousAiAnswers) &&
-      (metadataAfterPreviousAnswerGuard as any).previousAiAnswers.length > 0
-    ) {
-      const latestPreviousAnswer = (metadataAfterPreviousAnswerGuard as any).previousAiAnswers[
-        (metadataAfterPreviousAnswerGuard as any).previousAiAnswers.length - 1
-      ];
-      if (latestPreviousAnswer?.answer) {
-        metadataAfterPreviousAnswerGuard.previousAiAnswer = String(
-          latestPreviousAnswer.answer,
-        ).slice(0, 1000);
-      }
-      if (
-        !metadataAfterPreviousAnswerGuard.previousCodeBlocks &&
-        Array.isArray(latestPreviousAnswer?.codeBlocks)
-      ) {
-        metadataAfterPreviousAnswerGuard.previousCodeBlocks =
-          latestPreviousAnswer.codeBlocks
-            .slice(0, 2)
-            .map((block: unknown) => String(block || "").slice(0, 1500))
-            .filter(Boolean);
-      }
-    }
     if (
       !strictSelectedFollowup &&
       metadataAfterPreviousAnswerGuard.previousAiAnswer &&
@@ -2919,15 +2945,15 @@ export async function getAIAnswer(
       ? followup.target
       : isRegenerate && followup.target
       ? followup.target
-      : effectiveTopicChanged
+      : !shouldUseFollowupContext || effectiveTopicChanged
       ? null
-      : shouldUseFollowupContext && aiDecisionAuthoritative && aiDecisionTarget
+      : aiDecisionAuthoritative && aiDecisionTarget
       ? aiDecisionTarget
-      : shouldUseFollowupContext && aiDecisionLatestCodeTarget
+      : aiDecisionLatestCodeTarget
       ? aiDecisionLatestCodeTarget
-      : shouldUseFollowupContext && hasExplicitReference && referencedTarget
+      : hasExplicitReference && referencedTarget
       ? referencedTarget
-      : shouldUseFollowupContext && !hasExplicitReference
+      : !hasExplicitReference
       ? followup.target
       : null;
     const effectiveMetadata = buildEffectiveLiveContextMetadata({
@@ -2947,7 +2973,22 @@ export async function getAIAnswer(
     const effectiveSanitizedRequest: SanitizedLiveRequest =
       sanitizedLiveRequest || {
         kind: isRegenerate ? "regenerate" : "latest_question",
-        metadata: liveContextMetadata,
+        effectiveAnswerClickMode:
+          liveContextMetadata?.answerClickMode ||
+          (isRegenerate
+            ? "regenerate_answer"
+            : "answer_latest_unanswered"),
+        metadata:
+          liveContextMetadata || {
+            answerClickMode: isRegenerate
+              ? "regenerate_answer"
+              : "answer_latest_unanswered",
+          },
+        allowPreviousAnswers: isRegenerate,
+        allowProjectContext: isRegenerate,
+        allowHistory: false,
+        answerKind: isRegenerate ? "regenerate" : "final",
+        answerTrust: "strong",
         scenarioDetected: !!transcriptEvidence?.scenarioDetected,
         interviewerTone: "neutral",
         allowPreviousAnswer: isRegenerate,
@@ -2957,13 +2998,16 @@ export async function getAIAnswer(
           ? { scenarioPacket: transcriptEvidence.scenarioPacket }
           : {}),
       };
-    sessionStateV3 = buildSessionStateV3({
-      sanitizedRequest: effectiveSanitizedRequest,
-      intentLedger,
-      answerLedger,
-      transcriptEvidence,
-      fallbackTopic: questionTopic,
-    });
+    sessionStateV3 =
+      sessionStateV3 ||
+      buildSessionStateV3({
+        sessionId: id,
+        sanitizedRequest: effectiveSanitizedRequest,
+        intentLedger,
+        answerLedger,
+        transcriptEvidence,
+        fallbackTopic: questionTopic,
+      });
     routedAnswerContext = routeAnswerContextV3({
       sanitizedRequest: effectiveSanitizedRequest,
       sessionState: sessionStateV3,
@@ -2977,6 +3021,20 @@ export async function getAIAnswer(
       hasDocument:
         !!contextForCall?.document &&
         !String(contextForCall.document).startsWith("None provided."),
+    });
+    const ragRetrieval = await retrieveSessionSupportingEvidence({
+      sessionId: id,
+      userId: session.userId,
+      question: effectiveQuestionForPolicy,
+      route: routedAnswerContext,
+    });
+    console.log("[AI Answer][RAG]", {
+      sessionId: id,
+      count: ragRetrieval.count,
+      latencyMs: ragRetrieval.latencyMs,
+      skipReason: ragRetrieval.skipReason || null,
+      retrieveTypes: routedAnswerContext.retrieveTypes,
+      trustFilter: routedAnswerContext.trustFilter,
     });
     const hasCodeFollowupAnchor =
       (followup.isExplicitFollowupReference ||
@@ -3044,7 +3102,7 @@ export async function getAIAnswer(
           })
         : "";
     const routedRuntimeContext = routedAnswerContext
-      ? applyRoutedAnswerContext({
+      ? applyContextRouterV3({
           context: {
             resume: contextForCall?.resume || "",
             projects: contextForCall?.projects || "",
@@ -3065,7 +3123,10 @@ export async function getAIAnswer(
       resumeDigest: routedRuntimeContext.resume,
       projectDigest: routedRuntimeContext.projects,
       sessionUserName: session.user?.name,
-      maxChars: Math.max(1000, (routedAnswerContext?.resumeBudget || 250) * 4),
+      maxChars: Math.max(
+        1000,
+        (routedAnswerContext?.budgets.resume || 250) * 4,
+      ),
     });
     const promptContextForCall = {
       ...contextForCall,
@@ -3088,7 +3149,7 @@ export async function getAIAnswer(
           : "no_selected_projects",
       projectPriority: contextForCall?.projectPriorityMode || "project_questions_only",
       resumeDigest: candidateProfileDigest,
-      candidateProfileTokenBudget: routedAnswerContext?.resumeBudget,
+      candidateProfileTokenBudget: routedAnswerContext?.budgets.resume,
       projectDigest: routedRuntimeContext.projects,
       documentSummary:
         routedRuntimeContext.document && routedRuntimeContext.document !== "None provided."
@@ -3101,6 +3162,7 @@ export async function getAIAnswer(
           : "",
       memorySummary: [
         sessionStateMemorySummary,
+        ...ragRetrieval.evidence.slice(0, 5),
         recentQaMemorySummary,
         includeHistoryMemory ? composerMemorySummary : "",
         includeHistoryMemory ? memorySummary : "",
@@ -3110,7 +3172,7 @@ export async function getAIAnswer(
           ? contextForCall.instructions
           : "",
       isProjectQuestion: !!contextForCall?.isProjectQuestion,
-      projectDigestTokenBudget: routedAnswerContext?.projectBudget,
+      projectDigestTokenBudget: routedAnswerContext?.budgets.projects,
     });
     const memoryAnchor = compactFollowupAnchor({
         selectedTarget: selectedTargetForRequest,
@@ -3288,40 +3350,9 @@ export async function getAIAnswer(
         allowFencedBlocks: shouldForceDiagram,
         staleContextCleared: !!metadataSanitization?.clearReason,
         scenarioNumbers: transcriptEvidence?.scenarioPacket?.numbers || [],
+        requestedTrust: effectiveSanitizedRequest.answerTrust,
+        requestKind: effectiveSanitizedRequest.kind,
       },
-      () =>
-        ai.callModel({
-          model: targetModel,
-          maxOutputTokens,
-          provider: latencyOptimizedProvider as any,
-          store: false,
-          sessionId: id,
-          input: [
-            {
-              role: "system",
-              type: "message",
-              content: systemPrompt,
-            } as any,
-            {
-              role: "user",
-              type: "message",
-              content: runtimeContextMessage,
-            },
-            {
-              role: "user",
-              type: "message",
-              content: [
-                "FORCED ANSWER RETRY",
-                "The previous attempt incorrectly returned ===NO_NEW_QUESTION===.",
-                "The backend has confirmed that this is an answerable AI Answer click.",
-                `Authoritative question: ${effectiveQuestionForPolicy}`,
-                "Answer the authoritative question now.",
-                "Output exactly one **QUESTION:** / **ANSWER:** block.",
-                "Never output ===NO_NEW_QUESTION===.",
-              ].join("\n"),
-            },
-          ],
-        }),
     );
   } catch (err: any) {
     console.error("OpenRouter Streaming Error (getAIAnswer):", err);
@@ -3388,6 +3419,57 @@ export async function appendMessage(
       isQuestion: role === "INTERVIEWER",
     },
   });
+  void enqueueSessionMemoryJob({
+    type: "memory-update",
+    sessionId,
+    question: question || undefined,
+  }).catch((error) => {
+    console.warn("[save-message] memory update enqueue failed", {
+      sessionId,
+      messageId: resolvedMessageId,
+      error,
+    });
+  });
+  const transcriptText = buildTranscriptContent(question, answer || "");
+  const transcriptTopic = deriveTopicFromAnyText(question || transcriptText);
+  void enqueueSessionRagJob({
+    type: "index-document",
+    document: {
+      id: `transcript:${chunk.id}`,
+      sessionId,
+      userId: session.userId,
+      type: role === "INTERVIEWER" ? "clean_question" : "transcript_turn",
+      topic: transcriptTopic,
+      text: transcriptText,
+      speaker:
+        role === "INTERVIEWER"
+          ? "interviewer"
+          : role === "AI_ASSISTANT"
+            ? "assistant"
+            : "candidate",
+      timestamp: new Date(timestamp).toISOString(),
+      trust: role === "INTERVIEWER" ? "strong" : "weak",
+    },
+  }).catch((error) => {
+    console.warn("[save-message] RAG document enqueue failed", {
+      sessionId,
+      messageId: resolvedMessageId,
+      error,
+    });
+  });
+  if (role === "INTERVIEWER" && question.trim()) {
+    void enqueueSessionRagJob({
+      type: "index-question",
+      sessionId,
+      question,
+    }).catch((error) => {
+      console.warn("[save-message] RAG question enqueue failed", {
+        sessionId,
+        messageId: resolvedMessageId,
+        error,
+      });
+    });
+  }
   await appendSegmenterTranscriptMemory({
     sessionId,
     chunk: {
