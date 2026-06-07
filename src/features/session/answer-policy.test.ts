@@ -78,6 +78,58 @@ test("fresh React Context API component request allows code generation", () => {
   );
 });
 
+test("architecture drawing request uses architecture response policy", () => {
+  const policy = buildRequestScopedPolicy({
+    question: "Can you draw the architecture of a MERN e-commerce app?",
+    metadata: { transcript: "Can you draw the architecture of a MERN e-commerce app?" } as any,
+    cieComplexity: "system_design",
+  });
+
+  assert.equal(policy.answerIntent, "system_design");
+  assert.equal(policy.effectiveAnswerMode, "system_design");
+  assert.ok(policy.policyBlock.includes("architecture_response_mode: true"));
+  assert.ok(policy.policyBlock.includes("Sure, I would explain it as a simple high-level architecture first."));
+  assert.ok(policy.policyBlock.includes("```text```"));
+  assert.ok(policy.policyBlock.includes("**Request Flow Example**"));
+  assert.ok(policy.policyBlock.includes("**How I would explain this verbally**"));
+});
+
+test("request flow question uses architecture response policy", () => {
+  const policy = buildRequestScopedPolicy({
+    question: "Walk me through the request flow for this dashboard.",
+    metadata: { transcript: "Walk me through the request flow for this dashboard." } as any,
+    cieComplexity: "system_design",
+  });
+
+  assert.equal(policy.answerIntent, "system_design");
+  assert.ok(policy.policyBlock.includes("architecture_response_mode: true"));
+  assert.ok(policy.policyBlock.includes("architecture_diagram"));
+});
+
+test("code-only implementation request does not force architecture response", () => {
+  const policy = buildRequestScopedPolicy({
+    question: "Implement pivot index.",
+    metadata: { transcript: "Implement pivot index." } as any,
+    cieComplexity: "simple_atomic",
+  });
+
+  assert.equal(policy.policyBlock.includes("architecture_response_mode: true"), false);
+  assert.equal(policy.policyBlock.includes("architecture_diagram"), false);
+});
+
+test("combined design and implementation request keeps architecture first without blocking implementation", () => {
+  const policy = buildRequestScopedPolicy({
+    question: "Design and implement a chat app.",
+    metadata: { transcript: "Design and implement a chat app." } as any,
+    cieComplexity: "system_design",
+  });
+
+  assert.equal(policy.answerIntent, "system_design");
+  assert.ok(policy.policyBlock.includes("architecture_response_mode: true"));
+  assert.ok(policy.policyBlock.includes("architecture_plus_implementation_rule"));
+  assert.ok(policy.policyBlock.includes("architecture first, then concise implementation approach bullets"));
+});
+
 test("function followup without selected code blocks injects no unrelated code", () => {
   const policy = buildRequestScopedPolicy({
     question:

@@ -4,13 +4,13 @@ import type { QuestionQualityResult } from "./question-quality.service";
 
 export const AI_ANSWER_LIMITS = {
   recentTranscriptWindowMax: 60,
-  previousAiAnswerMaxChars: 1000,
+  previousAiAnswerMaxChars: 3000,
   previousAiAnswersMax: 2,
   previousAiAnswerQuestionMaxChars: 500,
   previousCodeBlocksMax: 2,
   previousCodeBlockMaxChars: 1500,
   selectedAnswerQuestionMaxChars: 500,
-  selectedAnswerTextMaxChars: 1000,
+  selectedAnswerTextMaxChars: 3000,
   selectedAnswerTopicMaxChars: 80,
 } as const;
 

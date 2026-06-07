@@ -66,12 +66,14 @@ export type ActiveTaskV3 = {
   manualRequest?: string;
   originalQuestion?: string;
   previousAnswerSummary?: string;
+  previousAnswerReference?: string;
   memoryAnchor?: {
     priorTopic?: string;
     priorAnswerSummary?: string;
     codeMemory?: string;
   };
   projectDiagram?: string;
+  requestPolicy?: string;
   regenerateInstruction?: string;
   answerClickMode?: string;
   language: string;
@@ -226,6 +228,8 @@ function legacyProjectMode(context: any): AnswerRuntimeContext["projectMode"] {
 const MARKDOWN_ANSWER_CONTRACT_LINES = [
   "MANDATORY MARKDOWN ANSWER FORMAT:",
   "- Keep parser labels exact: output starts with **QUESTION:**, then **ANSWER:**. Keep ===NEXT_QUESTION=== between independent questions.",
+  "- Keep **QUESTION:** as a compact but complete display question, not a pasted problem statement. For long coding/scenario prompts, summarize the visible task in one sentence around 160-220 characters.",
+  "- Preserve the full problem constraints and examples in **ANSWER:** when needed; do not lose requirements just because **QUESTION:** is shortened.",
   "- The answer body under **ANSWER:** must be Markdown with clear structure, not dense paragraphs.",
   "- Use exactly one blank line between major sections or label groups to keep spacing readable.",
   "- Use separate '- ' bullets whenever the answer has more than 2 short sentences, multiple ideas, steps, responsibilities, metrics, trade-offs, or tools.",
@@ -236,7 +240,7 @@ const MARKDOWN_ANSWER_CONTRACT_LINES = [
   "- Bold short labels and high-signal keywords only: project names, business domains, exact metrics/numbers, role ownership, and major outcomes. Never bold full sentences or full paragraphs.",
   "- Use inline code for explicit tools, APIs, commands, file paths, database objects, and technical keywords, e.g. `Databricks`, `Azure Data Factory`, `PySpark`, `React`.",
   "- Highlight exact numbers and measurable values with bold, e.g. **438 days**, **1TB+**, **40%**, but never create numbers that are not in context.",
-  "- Use fenced code blocks only when the question asks for code, syntax, query, implementation, debugging, or optimization.",
+  "- Use fenced code blocks only when the question asks for code, syntax, query, implementation, debugging, optimization, or an ASCII/text architecture diagram.",
   "- Keep output parser-safe: do not emit raw HTML, color tags, CSS, tables, broken markdown markers, or dense paragraph blocks.",
   "- Markdown self-check before final output: labels are exact, blank lines are present, bullets are valid, nested bullets use two spaces, and no stray '**' markers remain.",
   "- Do not end with a clarification question or 'let me know'. Answer directly and stop.",
@@ -256,6 +260,7 @@ function buildProjectBehaviorRules(context: any): string[] {
     "- For broad project asks, cover relevant selected projects with PRIMARY first. For a specific named project, answer that project only.",
     "- For combined profile questions asking experience, skill set, and projects, answer in that order: Experience, Skill Set, Projects.",
     "- For introduction or profile walkthrough questions, open with the verified candidate name, role, and exact Total Experience when those fields exist in CANDIDATE_PROFILE. Then cover the requested projects and skills. Never estimate or invent years.",
+    "- For education questions, copy degree, institution, and dates only from the Education block in CANDIDATE_PROFILE. Never infer or substitute a school, degree, year, coursework, or academic focus.",
     "- In the Experience section, include total years and work experience only when available in runtime context. If exact years are not available, describe the level of experience without inventing a number.",
     "- In the Skill Set section, group skills from runtime context by language, backend/frameworks, databases/cache, cloud/devops, and other relevant tools when those facts exist.",
     "- Project answers should cover Problem/Goal, My role, Tools/Process/Methods, Approach/Operating Model, Challenges + Decisions, and Impact/Metrics when those facts are available.",
@@ -407,11 +412,19 @@ export function buildScreenSystemMessage(context: any): string {
     "- Prefer the clearest visible interview question, coding problem, system-design prompt, or instruction.",
     "- If the wording is fragmented, reconstruct the best-supported complete question from visible screenshot content.",
     "- If no explicit question is visible, explain the most interview-relevant visible topic, error, code, diagram, or instruction.",
+    "- Keep **QUESTION:** concise but not too short. If the screenshot shows a long problem statement, output one descriptive sentence around 160-220 characters that preserves the task, key condition, and return rule, e.g. 'Find the leftmost pivot index in an integer array where the left-side sum equals the right-side sum, returning -1 if none exists.'",
+    "- Do not paste full problem descriptions, bullet constraints, examples, or edge-case paragraphs into **QUESTION:**. Use those details only inside **ANSWER:**.",
     "- Output only **QUESTION:** followed by **ANSWER:**. The first non-whitespace characters must be **QUESTION:**.",
     "- If multiple independent questions are visible, answer every one and separate blocks with exactly ===NEXT_QUESTION===.",
     "- Keep one scenario with related sub-questions in one block.",
     "- Answer directly in concise, natural first-person candidate voice when appropriate.",
-    "- Use short Markdown bullets for multiple points and fenced code only when code is requested.",
+    "- Use short Markdown bullets for multiple points. Use fenced blocks only for requested code or text/ASCII diagrams.",
+    "- For coding problems, do not write a long tutorial. Give a direct approach in 1-2 bullets, then working code, then time/space complexity.",
+    "- For visible architecture/drawing/design/build/flow questions, use architecture response mode: inside **ANSWER:** first write exactly 'Sure, I would explain it as a simple high-level architecture first.'",
+    "- In architecture response mode, then include one fenced ```text``` ASCII diagram, followed by **Request Flow Example** and **How I would explain this verbally**.",
+    "- For architecture response mode, use visible/runtime technologies when available; never invent candidate-specific project names, company claims, metrics, or tools.",
+    "- If the visible task asks both design and implementation, answer architecture first, then concise implementation approach bullets. If it asks only for code, do not force a diagram.",
+    "- Preserve all visible constraints and return rules from the screenshot in the solution, even when **QUESTION:** is summarized.",
     `- Simple language mode is ${context?.simpleLanguage ? "ON: use plain English and short sentences." : "OFF: normal technical vocabulary is allowed."}`,
     "- Use runtime resume/project facts only when relevant. Never invent candidate facts, tools, or metrics.",
     "- Do not ask for clarification, add meta-commentary, or end with an offer to help.",
@@ -559,6 +572,13 @@ function buildActiveTaskInstruction(input: ActiveTaskV3): string[] {
   if (input.regenerateInstruction) {
     lines.push(`Regenerate instruction: ${clipTokens(input.regenerateInstruction, 100)}`);
   }
+  if (input.mode === "regenerate_answer") {
+    lines.push(
+      "For regeneration, preserve the same question, scenario/domain, entities, architecture components, tools, constraints, and diagram shape from Previous Answer Reference.",
+      "Do not switch to a different generic scenario or unrelated project/data-flow architecture.",
+      "Improve clarity, completeness, and structure only.",
+    );
+  }
   if (input.projectDiagram) {
     lines.push("Include one fenced ```text``` architecture flow block inside **ANSWER:** using Project Diagram Context.");
   }
@@ -590,6 +610,13 @@ export function buildActiveTaskV3(input: ActiveTaskV3): string {
       "",
       "Previous Answer Summary:",
       clipTokens(input.previousAnswerSummary || "none", 180),
+      ...(input.previousAnswerReference?.trim()
+        ? [
+            "",
+            "Previous Answer Reference (preserve scenario, domain, components, tools, and diagram shape):",
+            clipMultilineTokens(input.previousAnswerReference, 750),
+          ]
+        : []),
     );
   } else {
     lines.push(
@@ -630,6 +657,14 @@ export function buildActiveTaskV3(input: ActiveTaskV3): string {
     );
   }
 
+  if (input.requestPolicy?.trim()) {
+    lines.push(
+      "",
+      "Request Policy:",
+      clipMultilineTokens(input.requestPolicy, 700),
+    );
+  }
+
   lines.push("", ...buildActiveTaskInstruction(input));
 
   return lines.join("\n");
@@ -665,6 +700,11 @@ export function buildScreenAnalysisMessage(context: any): string {
     "Ignore questions from earlier conversation turns; copy or faithfully reconstruct the question currently visible on screen.",
     "Use nearby visible content as setup when the final question depends on it.",
     "When wording is incomplete, reconstruct the best-supported ask instead of refusing.",
+    "- For long visible coding/problem statements, summarize the display question in one descriptive sentence around 160-220 characters.",
+    "- Keep all required constraints, return rules, examples, and edge cases in the answer reasoning/code, not in the **QUESTION:** line.",
+    "- If the visible task asks to draw/design/explain architecture, high-level design, end-to-end flow, request flow, components, or how to build an app/system, use architecture response mode.",
+    "- Architecture response mode means: exact opener inside **ANSWER:**, simple fenced ```text``` ASCII diagram, **Request Flow Example**, then **How I would explain this verbally**.",
+    "- If a visible task asks only for code or algorithm implementation, answer normally without forcing an architecture diagram.",
     "- Answer order must match the on-screen order: top to bottom, left to right.",
     "- Use ===NEXT_QUESTION=== only between truly independent questions.",
   ].join("\n");

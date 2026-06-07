@@ -205,6 +205,56 @@ test("CIE derives factual total experience from dated work history", () => {
   assert.ok(context.includes("JavaScript, ReactJS, Node.js, MongoDB"));
 });
 
+test("CIE reads identity and education from a reverse-column resume extraction", () => {
+  const context = extractCandidateProfileContext({
+    resumeText: [
+      "Innovative Data Engineer with over 5.9 years of experience specializing in data architecture and engineering.",
+      "About Me",
+      "Work Experience",
+      "April 2023 - present",
+      "Data Engineer",
+      "3i Infotech LTD.",
+      "PROJECT ENGINEER",
+      "NOV 2018 - OCT 2021",
+      "WIPRO LIMITED",
+      "Data Engineer",
+      "DHIRAJ",
+      "THAKUR",
+      "thakurdhiraj10@gmail.com",
+      "+91 8268982898",
+      "Mumbai, India",
+      "Skills",
+      "Contact",
+      "Language",
+      "B.E/B.Tech",
+      "SIES Graduate School of",
+      "Technology, Mumbai",
+      "University",
+      "2014 - 2018",
+      "Education",
+      "Databricks",
+      "PySpark",
+      "Python",
+      "SQL Azure",
+      "Redshift",
+      "AWS Glue",
+      "Athena",
+      "Lambda",
+      "English",
+      "Hindi",
+    ].join("\n"),
+    targetBudget: 500,
+    includeResumeProjects: false,
+    query: "What is your educational background?",
+  });
+
+  assert.ok(context.includes("Name: Dhiraj Thakur"));
+  assert.ok(context.includes("B.E/B.Tech"));
+  assert.ok(context.includes("SIES Graduate School of"));
+  assert.ok(context.includes("2014 - 2018"));
+  assert.equal(context.includes("Education:\nEducation\nDatabricks"), false);
+});
+
 test("CIE profile digest excludes resume project section when selected projects are active", () => {
   const context = extractCandidateProfileContext({
     resumeText: [

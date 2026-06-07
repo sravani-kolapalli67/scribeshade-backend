@@ -406,6 +406,54 @@ function extractFirstResumeLine(lines: string[], pattern: RegExp): string {
   return line.replace(pattern, "$1").replace(/\s+/g, " ").trim();
 }
 
+function extractCandidateNameFromResume(lines: string[]): string {
+  const explicitName = extractFirstResumeLine(lines, /^name\s*:\s*(.+)$/i);
+  if (explicitName) return explicitName;
+
+  const emailIndex = lines.findIndex((line) =>
+    /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(line),
+  );
+  if (emailIndex < 1) return "";
+
+  const nameParts: string[] = [];
+  for (
+    let index = emailIndex - 1;
+    index >= Math.max(0, emailIndex - 4);
+    index -= 1
+  ) {
+    const line = lines[index].trim();
+    if (!/^[A-Z][A-Z.'-]{1,30}$/.test(line)) break;
+    nameParts.unshift(line);
+  }
+  return nameParts.length >= 2
+    ? nameParts
+        .map(
+          (part) =>
+            `${part.charAt(0).toUpperCase()}${part.slice(1).toLowerCase()}`,
+        )
+        .join(" ")
+    : "";
+}
+
+function extractSectionBeforeHeading(
+  lines: string[],
+  headingPattern: RegExp,
+  boundaryPattern: RegExp,
+): string {
+  const headingIndex = lines.findIndex((line) =>
+    isResumeSectionHeading(line, headingPattern),
+  );
+  if (headingIndex <= 0) return "";
+
+  const selected: string[] = [];
+  for (let index = headingIndex - 1; index >= 0; index -= 1) {
+    const line = lines[index];
+    if (isResumeSectionHeading(line, boundaryPattern)) break;
+    selected.unshift(line);
+  }
+  return selected.join("\n").trim();
+}
+
 function extractExplicitTotalExperience(resumeText: string): string {
   const normalized = resumeText.replace(/\s+/g, " ").trim();
   const labeled = normalized.match(
@@ -519,11 +567,25 @@ export function extractCandidateProfileContext(input: {
     /^(skills?|technical skills?)$/i,
     /^(work experience|professional experience|experience|employment history|internships?|projects?|project experience|academic projects|professional projects|education|certifications?|achievements?|awards?|languages?|publications?|contact|personal details)$/i,
   );
-  const education = extractSectionByHeading(
+  const forwardEducation = extractSectionByHeading(
     lines,
     /^(education)$/i,
     /^(work experience|professional experience|experience|employment history|internships?|skills?|technical skills?|projects?|project experience|academic projects|professional projects|certifications?|achievements?|awards?|languages?|publications?|contact|personal details)$/i,
   );
+  const precedingEducation = extractSectionBeforeHeading(
+    lines,
+    /^(education)$/i,
+    /^(skills?|technical skills?|contact|languages?|personal details)$/i,
+  );
+  const precedingHasEducationFacts =
+    /\bB\.?E(?:\.|\/|\b)/.test(precedingEducation) ||
+    /\b(?:b\.?tech|bachelor|master|degree|university|college)\b/i.test(
+      precedingEducation,
+    );
+  const education =
+    precedingHasEducationFacts
+      ? `Education\n${precedingEducation}`
+      : forwardEducation;
   const certifications = extractSectionByHeading(
     lines,
     /^(certifications?)$/i,
@@ -536,7 +598,7 @@ export function extractCandidateProfileContext(input: {
         /^(work experience|professional experience|experience|employment history|internships?|skills?|technical skills?|education|certifications?|achievements?|awards?|languages?|publications?|contact|personal details)$/i,
       )
     : "";
-  const name = extractFirstResumeLine(lines, /^name\s*:\s*(.+)$/i);
+  const name = extractCandidateNameFromResume(lines);
   const role = extractFirstResumeLine(lines, /^(?:role|title|current role)\s*:\s*(.+)$/i);
   const totalExperience =
     extractExplicitTotalExperience(input.resumeText) ||

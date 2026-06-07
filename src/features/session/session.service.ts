@@ -110,6 +110,8 @@ import type {
   RoutedAnswerContext,
   SessionStateV3,
 } from "./session-intelligence.types";
+import { toSafeExternalErrorDetails } from "../../shared/lib/error-log";
+import { isProjectExplainQuestion } from "./project-diagram-context";
 
 const ai = new OpenRouter({
   apiKey: process.env.OPENROUTER_API_KEY || "",
@@ -118,6 +120,10 @@ const ai = new OpenRouter({
 });
 
 const model = process.env.OPENROUTER_MODEL;
+const SCREEN_ANALYSIS_MODEL = "openai/gpt-4o-mini";
+const SCREEN_PRECOMPRESSED_IMAGE_LIMIT_BYTES = 1_500 * 1024;
+const SCREEN_IMAGE_MAX_WIDTH = 1600;
+const SCREEN_IMAGE_JPEG_QUALITY = 85;
 const ACTIVE_QUESTION_CONFIDENCE_THRESHOLD = 0.58;
 const LIVE_TRANSCRIPT_GROUP_ID = "live-transcript";
 const LEGACY_TRANSCRIPT_FLUSH_DELAY_MS = Number(process.env.LEGACY_TRANSCRIPT_FLUSH_DELAY_MS || 7000);
@@ -143,7 +149,13 @@ const KNOWN_TECH_TERMS = [
   "Python",
   "PySpark",
   "Databricks",
+  "Azure",
   "Azure Data Factory",
+  "AWS Glue",
+  "Redshift",
+  "Athena",
+  "Lambda",
+  "Datastage",
   "SQL",
   "MySQL",
   "GraphQL",
@@ -460,6 +472,22 @@ function resolveModelId(id: string | undefined): string | undefined {
   return MODEL_ID_MAP[normalized] ?? id;
 }
 
+function resolveScreenAnalysisModel(requestedModel: string | undefined): string {
+  const normalizedModel = resolveModelId(requestedModel);
+  if (
+    normalizedModel &&
+    normalizedModel !== SCREEN_ANALYSIS_MODEL &&
+    process.env.NODE_ENV !== "production"
+  ) {
+    console.warn("[Analyze Screen][model-override]", {
+      requestedModel: normalizedModel,
+      resolvedModel: SCREEN_ANALYSIS_MODEL,
+      reason: "Analyze Screen uses the Responses-compatible vision model",
+    });
+  }
+  return SCREEN_ANALYSIS_MODEL;
+}
+
 const latencyOptimizedProvider = {
   sort: "latency",
   allowFallbacks: true,
@@ -516,13 +544,12 @@ function resolveScreenMaxOutputTokens() {
   return 1600;
 }
 
-function isProjectExplainQuestion(question: string): boolean {
-  const q = (question || "").toLowerCase().trim();
-  if (!q) return false;
-  return (
-    /\b(project|architecture|system|design|data flow|implementation flow|flow|diagram)\b/.test(q) &&
-    /\b(architecture|system design|data flow|implementation flow|technical flow|design choices?|how (?:it|the system|the project) works|walk me through (?:the )?(?:architecture|flow|design))\b/.test(q)
-  );
+function resolveScreenImageDetail(): "auto" | "low" | "high" {
+  const value = (process.env.AI_SCREEN_IMAGE_DETAIL || "high").toLowerCase();
+  if (value === "low" || value === "high" || value === "auto") {
+    return value;
+  }
+  return "high";
 }
 
 function extractArchitectureDiagramBlock(projectsContext: unknown): string | null {
@@ -669,7 +696,7 @@ function deriveKnownSkillsFromContext(text: string): string[] {
   const found = KNOWN_TECH_TERMS.filter((term) =>
     normalized.includes(term.toLowerCase()),
   );
-  return [...new Set(found)].slice(0, 10);
+  return [...new Set(found)].slice(0, 16);
 }
 
 function hasUsableProjectContextForPrompt(value: unknown): boolean {
@@ -696,10 +723,13 @@ function buildCandidateProfileDigest(input: {
       ? ""
       : input.projectDigest;
   const configuredFallbackName = normalizePromptSpaces(process.env.AI_CANDIDATE_NAME_FALLBACK || "");
-  const name =
-    extractCandidateNameFromContext(resumeDigest) ||
-    normalizePromptSpaces(input.sessionUserName || "") ||
-    (configuredFallbackName && process.env.NODE_ENV !== "production" ? configuredFallbackName : "");
+  const resumeName = extractCandidateNameFromContext(resumeDigest);
+  const name = resumeDigest
+    ? resumeName
+    : normalizePromptSpaces(input.sessionUserName || "") ||
+      (configuredFallbackName && process.env.NODE_ENV !== "production"
+        ? configuredFallbackName
+        : "");
   const skills = deriveKnownSkillsFromContext(`${resumeDigest}\n${projectDigest}`);
   const candidateFacts =
     resumeDigest ||
@@ -2386,14 +2416,16 @@ export async function analyzeScreen(
   aiModel?: string,
   liveContextMetadata?: AIAnswerLiveContextMetadata,
 ) {
-  // Skip recompression if the frontend already sent a pre-compressed JPEG (<= 600 KB).
+  // Skip recompression if the frontend already sent a pre-compressed JPEG.
   // Otherwise apply sharp to enforce a safe size cap for the LLM vision API.
-  const isPreCompressed = file.mimetype === "image/jpeg" && file.size <= 600 * 1024;
+  const isPreCompressed =
+    file.mimetype === "image/jpeg" &&
+    file.size <= SCREEN_PRECOMPRESSED_IMAGE_LIMIT_BYTES;
   const compressPromise = isPreCompressed
     ? Promise.resolve(file.buffer)
     : sharp(file.buffer)
-      .resize({ width: 1024 })
-      .jpeg({ quality: 65 })
+      .resize({ width: SCREEN_IMAGE_MAX_WIDTH })
+      .jpeg({ quality: SCREEN_IMAGE_JPEG_QUALITY })
       .toBuffer()
       .catch((err) => { console.error("Sharp compression error:", err); throw err; });
 
@@ -2450,7 +2482,7 @@ export async function analyzeScreen(
   }
 
   try {
-    const targetModel = resolveModelId(aiModel) || model;
+    const targetModel = resolveScreenAnalysisModel(aiModel);
     // ── Full Prompt Budget Accounting (screen analysis) ──────────────────
     const screenSystemPrompt = buildScreenSystemMessage(screenContext);
     const screenRuntimeContext = buildRuntimeContextMessage(screenContext);
@@ -2504,7 +2536,7 @@ export async function analyzeScreen(
               },
               {
                 type: "input_image",
-                detail: "high",
+                detail: resolveScreenImageDetail(),
                 imageUrl,
               },
             ] as any,
@@ -2535,7 +2567,10 @@ export async function analyzeScreen(
       },
     );
   } catch (err: any) {
-    console.error("OpenRouter Error (analyzeScreen):", err);
+    console.error(
+      "OpenRouter Error (analyzeScreen):",
+      toSafeExternalErrorDetails(err),
+    );
     if (err.status === 429 || err.statusCode === 429) {
       return (async function* () {
         yield {
@@ -3184,6 +3219,12 @@ export async function getAIAnswer(
       liveContextMetadata?.previousAiAnswer ||
       answerLedger.answers.at(-1)?.answerSummary ||
       "none";
+    const previousAnswerReference =
+      isRegenerate
+        ? liveContextMetadata?.selectedAnswerText ||
+          liveContextMetadata?.previousAiAnswer ||
+          ""
+        : undefined;
     const userMessage = buildActiveTaskV3({
       mode: isRegenerate ? "regenerate_answer" : isCustomQuery ? "manual_query" : "live_ai_answer",
       transcriptEvidence:
@@ -3200,10 +3241,12 @@ export async function getAIAnswer(
       manualRequest: isCustomQuery ? transcript : undefined,
       originalQuestion: isRegenerate ? effectiveQuestionForPolicy : undefined,
       previousAnswerSummary: isRegenerate ? previousAnswerSummary : undefined,
+      previousAnswerReference,
       memoryAnchor,
       ...(shouldForceDiagram && architectureFlowForPrompt
         ? { projectDiagram: architectureFlowForPrompt }
         : {}),
+      requestPolicy: policy.policyBlock,
       regenerateInstruction,
       answerClickMode: liveContextMetadata?.answerClickMode,
       language: contextForCall?.language || "the relevant language",

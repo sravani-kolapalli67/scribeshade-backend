@@ -6,6 +6,7 @@ import {
   shouldScheduleBackgroundComposer,
   validateAnswerForMemory,
 } from "./ai-answer-safeguards";
+import { isProjectExplainQuestion } from "./project-diagram-context";
 import {
   buildScenarioEvidence,
   detectInterviewerTone,
@@ -494,6 +495,25 @@ test("production project architecture question is not treated as scenario setup"
   });
 
   assert.equal(evidence, null);
+});
+
+test("project diagram context is only forced for candidate project architecture", () => {
+  assert.equal(
+    isProjectExplainQuestion("Draw an architecture of an ecommerce application."),
+    false,
+  );
+  assert.equal(
+    isProjectExplainQuestion("Design and implement a chat app."),
+    false,
+  );
+  assert.equal(
+    isProjectExplainQuestion("Can you explain the architecture of that project?"),
+    true,
+  );
+  assert.equal(
+    isProjectExplainQuestion("Walk me through your project flow."),
+    true,
+  );
 });
 
 test("interviewer tone detects skeptical and challenge phrasing", () => {

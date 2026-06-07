@@ -6,6 +6,7 @@ import { SessionStatus } from "@prisma/client";
 import { AppError } from "../../shared/middleware/error.middleware";
 import { normalizeAIAnswerRequestBody } from "./ai-answer.dto";
 import { acquireInFlight, releaseInFlight } from "../../shared/lib/inflight-requests";
+import { toSafeExternalErrorDetails } from "../../shared/lib/error-log";
 
 /**
  * Handles the creation of a new session.
@@ -307,8 +308,22 @@ export async function subscribeToEvents(req: Request, res: Response) {
  * Analyzes a screen screenshot and streams the raw AI response.
  */
 export async function analyzeScreen(req: Request, res: Response) {
+  const requestStartedAt = Date.now();
+  const id = req.params.id as string;
+  const inFlightKey = `analyze-screen:${id}`;
+  const requestId = randomUUID();
+
   try {
-    const id = req.params.id as string;
+    const lock = acquireInFlight(inFlightKey, requestId);
+    if (!lock.ok) {
+      return res.status(409).json({
+        code: "DUPLICATE_IN_FLIGHT",
+        sessionId: id,
+        requestId,
+        reason: "Analyze Screen request already in progress for this session",
+      });
+    }
+
     const file = req.file;
     const aiModel = req.body.aiModel;
     const contextPayloadRaw = req.body?.contextPayload;
@@ -354,8 +369,12 @@ export async function analyzeScreen(req: Request, res: Response) {
     res.setHeader("Transfer-Encoding", "chunked");
     res.setHeader("X-Accel-Buffering", "no");
 
+    let firstChunkAt: number | null = null;
     for await (const chunk of result as any) {
       if (chunk.text) {
+        if (!firstChunkAt) {
+          firstChunkAt = Date.now();
+        }
         // Send raw text tokens directly
         res.write(chunk.text);
         
@@ -365,14 +384,35 @@ export async function analyzeScreen(req: Request, res: Response) {
       }
     }
 
+    const totalMs = Date.now() - requestStartedAt;
+    const firstTokenMs = firstChunkAt ? firstChunkAt - requestStartedAt : null;
+    console.log("[Analyze Screen][Timing][Controller]", {
+      sessionId: id,
+      requestId,
+      totalMs,
+      firstTokenMs,
+    });
+    if (totalMs > 3000) {
+      console.warn("[Analyze Screen][controller-slow]", {
+        sessionId: id,
+        totalMs,
+        firstTokenMs,
+      });
+    }
+
     res.end();
   } catch (error) {
-    console.error("Analyze Screen Error:", error);
+    console.error(
+      "Analyze Screen Error:",
+      toSafeExternalErrorDetails(error),
+    );
     if (!res.headersSent) {
       res.status(500).json({ error: "Failed to analyze screen" });
     } else {
       res.end();
     }
+  } finally {
+    releaseInFlight(inFlightKey, requestId);
   }
 }
 

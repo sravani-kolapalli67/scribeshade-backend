@@ -14,7 +14,7 @@ export type AnswerIntent =
   | "general_followup";
 
 const PREV_ANSWER_EXCERPT_MAX = 700;
-const POLICY_BLOCK_MAX_CHARS = 1400;
+const POLICY_BLOCK_MAX_CHARS = 2400;
 const CODE_BLOCK_CHARS_MAX = 1200;
 const CROSS_INTENT_CONCEPT_RE =
   /\b(what is|what are|explain|define|difference between|how does|what could be the reason|what could be a reason|can (?:you|we) (?:create|use))\b/i;
@@ -30,6 +30,8 @@ const CODE_GEN_RE =
   /\b(write|implement|give|show|create|build)\b.{0,40}\b(code|snippet|function|class|query|api|component|hook)\b/i;
 const SYSTEM_DESIGN_RE =
   /\b(system design|design a|architect|architecture|scalab|throughput|latency|distributed|microservice)\b/i;
+const ARCHITECTURE_RESPONSE_RE =
+  /\b(?:draw|show|diagram|architecture diagram|high[-\s]?level design|end[-\s]?to[-\s]?end flow|request flow|system architecture|technical architecture|component(?:s)? involved|frontend.*backend.*database|how (?:would|will) (?:you|we) build (?:this |the |a |an )?(?:system|application|app|service|platform|dashboard|chat|payment|e-?commerce|saas)|walk me through (?:the )?(?:architecture|flow|request flow|end[-\s]?to[-\s]?end flow)|design (?:and implement )?(?:a |an |the )?(?:system|architecture|application|app|e-?commerce|saas|chat|payment|dashboard))\b/i;
 const SCENARIO_RE =
   /\b(scenario setup|scenario|suppose|imagine|case where|incident|outage|what would you do|how would you handle|how will you tackle|continue from (?:database|backend|frontend|api|architecture|deployment|security|scaling) part|database part|architecture part|production|e-?commerce|inventory|stock|oversell|oversold|multiple users?|concurrent|race condition|high traffic|negative orders?)\b/i;
 const FOLLOWUP_RE =
@@ -45,6 +47,10 @@ function clip(text: string, max: number): string {
   return (text || "").trim().slice(0, max);
 }
 
+function shouldUseArchitectureResponseMode(question: string): boolean {
+  return ARCHITECTURE_RESPONSE_RE.test(question || "");
+}
+
 export function classifyAnswerIntent(input: {
   question: string;
   answerMode?: AIAnswerLiveContextMetadata["answerMode"];
@@ -54,11 +60,16 @@ export function classifyAnswerIntent(input: {
 }): AnswerIntent {
   const q = (input.question || "").toLowerCase().trim();
   const hasPrevCode = !!(input.previousCodeBlocks && input.previousCodeBlocks.length > 0);
+  const architectureResponseMode = shouldUseArchitectureResponseMode(input.question);
   const isFreshCodeGeneration =
     input.answerMode === "code_required" ||
     input.answerMode === "minimal_code" ||
     CODE_GEN_RE.test(q) ||
     isFreshCodeGenerationRequest(input.question);
+
+  if (architectureResponseMode) {
+    return "system_design";
+  }
 
   if (isFreshCodeGeneration && input.answerMode !== "explain_existing_code") {
     return "code_generation";
@@ -160,6 +171,7 @@ export function buildRequestScopedPolicy(input: {
   })();
 
   const explicitExperienceRequested = EXPLICIT_EXPERIENCE_RE.test(input.question || "");
+  const architectureResponseMode = shouldUseArchitectureResponseMode(input.question);
   const experienceSuppressed =
     answerIntent === "concept_explanation" && !explicitExperienceRequested;
 
@@ -201,6 +213,16 @@ export function buildRequestScopedPolicy(input: {
   if (answerIntent === "concept_explanation") {
     lines.push("- concept_policy: explain concept first; optional tiny example only if useful");
   }
+  if (architectureResponseMode) {
+    lines.push("- architecture_response_mode: true");
+    lines.push("- architecture_opener: first sentence inside **ANSWER:** must be exactly \"Sure, I would explain it as a simple high-level architecture first.\"");
+    lines.push("- architecture_diagram: include a simple readable ASCII diagram in one fenced ```text``` block before prose explanation");
+    lines.push("- architecture_sections: after the diagram include **Request Flow Example** and **How I would explain this verbally**");
+    lines.push("- architecture_context_rule: use technologies from runtime resume/project/session context when available; otherwise use generic relevant stack only");
+    lines.push("- architecture_accuracy_rule: do not invent candidate-specific company, project, metric, ownership, or tool claims");
+    lines.push("- architecture_size_rule: keep the diagram interview-friendly with only major components and arrows");
+    lines.push("- architecture_plus_implementation_rule: if the ask includes implementation, put architecture first, then concise implementation approach bullets; do not emit full code unless code is explicitly requested");
+  }
   if (answerIntent === "system_design" || answerIntent === "scenario_based") {
     lines.push("- structure: numbered sections; cover all sub-parts explicitly");
   }
@@ -218,7 +240,7 @@ export function buildRequestScopedPolicy(input: {
     lines.push("- combined_profile_answer_shape: **Experience**, **Skill Set**, **Projects** when all are requested");
     lines.push("- do_not_include_architecture_diagram_unless_explicitly_asked: true");
   }
-  if (answerIntent === "scenario_based" || answerIntent === "system_design") {
+  if (answerIntent === "scenario_based" || (answerIntent === "system_design" && !architectureResponseMode)) {
     lines.push("- answer_shape: bullets/sections for **Diagnosis:**, **Action plan:**, **Production fix:**, **Trade-off:**, **Recommendation:**");
   }
   if (answerIntent === "code_generation") {

@@ -309,6 +309,55 @@ test("live active task instructs scenario answers to use setup", () => {
   assert.ok(task.includes("domain, actors, constraints, numbers, failure symptom, and final ask"));
 });
 
+test("live active task includes request-scoped policy when provided", () => {
+  const task = buildActiveTaskV3({
+    mode: "live_ai_answer",
+    transcriptEvidence: "- interviewer: Can you draw the architecture of this app?",
+    currentQuestionHint: "Can you draw the architecture of this app?",
+    requestPolicy: [
+      "REQUEST-SCOPED POLICY (THIS REQUEST ONLY):",
+      "- architecture_response_mode: true",
+      "- architecture_diagram: include a simple readable ASCII diagram in one fenced ```text``` block before prose explanation",
+      "- architecture_sections: after the diagram include **Request Flow Example** and **How I would explain this verbally**",
+    ].join("\n"),
+    language: "TypeScript",
+    hasCodeFollowupAnchor: false,
+    noCodeFollowupGuidance: false,
+  });
+
+  assert.ok(task.includes("Request Policy:"));
+  assert.ok(task.includes("architecture_response_mode: true"));
+  assert.ok(task.includes("```text```"));
+  assert.ok(task.includes("**Request Flow Example**"));
+  assert.ok(task.includes("**How I would explain this verbally**"));
+});
+
+test("regenerate active task preserves previous answer reference", () => {
+  const task = buildActiveTaskV3({
+    mode: "regenerate_answer",
+    originalQuestion: "Draw an architecture of an ecommerce application.",
+    previousAnswerSummary: "Sure, I would explain it as a simple high-level architecture first.",
+    previousAnswerReference: [
+      "```text",
+      "React Frontend -> API Gateway -> Product Service -> MongoDB",
+      "React Frontend -> API Gateway -> Order Service -> Payment Gateway",
+      "```",
+      "**Request Flow Example**",
+      "A customer browses products and places an order.",
+    ].join("\n"),
+    requestPolicy: "- architecture_response_mode: true",
+    language: "TypeScript",
+    hasCodeFollowupAnchor: false,
+    noCodeFollowupGuidance: false,
+  });
+
+  assert.ok(task.includes("Previous Answer Reference"));
+  assert.ok(task.includes("React Frontend -> API Gateway -> Product Service -> MongoDB"));
+  assert.ok(task.includes("preserve the same question, scenario/domain"));
+  assert.ok(task.includes("Do not switch to a different generic scenario"));
+  assert.ok(task.includes("architecture_response_mode: true"));
+});
+
 test("answer followup active task forbids unrelated prior topics and diagrams", () => {
   const task = buildActiveTaskV3({
     mode: "live_ai_answer",
@@ -391,11 +440,26 @@ test("screen prompts always answer and remain compact", () => {
   assert.ok(system.includes("screenshot is the sole authority"));
   assert.ok(system.includes("Never reuse a previous transcript question"));
   assert.ok(system.includes("If no explicit question is visible"));
+  assert.ok(system.includes("Keep **QUESTION:** concise but not too short"));
+  assert.ok(system.includes("160-220 characters"));
+  assert.ok(system.includes("Find the leftmost pivot index"));
+  assert.ok(system.includes("Use those details only inside **ANSWER:**"));
+  assert.ok(system.includes("Give a direct approach in 1-2 bullets"));
+  assert.ok(system.includes("time/space complexity"));
+  assert.ok(system.includes("architecture response mode"));
+  assert.ok(system.includes("Sure, I would explain it as a simple high-level architecture first."));
+  assert.ok(system.includes("**Request Flow Example**"));
+  assert.ok(system.includes("**How I would explain this verbally**"));
+  assert.ok(system.includes("If it asks only for code, do not force a diagram."));
   assert.equal(system.includes("===NO_NEW_QUESTION==="), false);
   assert.equal(user.includes("===NO_NEW_QUESTION==="), false);
   assert.ok(user.includes("===NEXT_QUESTION==="));
   assert.ok(user.includes("Ignore questions from earlier conversation turns"));
-  assert.ok(system.length < 2400);
-  assert.ok(user.length < 900);
+  assert.ok(user.includes("summarize the display question in one descriptive sentence around 160-220 characters"));
+  assert.ok(user.includes("Keep all required constraints"));
+  assert.ok(user.includes("Architecture response mode means"));
+  assert.ok(user.includes("If a visible task asks only for code or algorithm implementation"));
+  assert.ok(system.length < 3600);
+  assert.ok(user.length < 1600);
   assert.equal(user.includes("Banking Gateway"), false);
 });
