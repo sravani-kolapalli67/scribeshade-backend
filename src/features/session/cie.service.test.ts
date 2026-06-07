@@ -81,6 +81,10 @@ test("CIE routes Parakeet profile and cloud-service experience asks as contextua
     classifyComplexity("How confident are you dealing with data using numpy and pandas?"),
     "simple_contextual",
   );
+  assert.equal(
+    classifyComplexity("What is your education?"),
+    "simple_contextual",
+  );
 });
 
 test("CIE does not treat Spark concepts and architecture as project/scenario by keyword alone", () => {
@@ -179,6 +183,8 @@ test("CIE derives factual total experience from dated work history", () => {
     resumeText: [
       "TUSHAR VAGHELA",
       "R E A C T D E V E L O P E R",
+      "T E C H N I C A L S K I L L S",
+      "JavaScript, ReactJS, Node.js, MongoDB",
       "W O R K E X P E R I E N C E",
       "WebSenor Full Stack Developer Intern Aug 2024 – Oct 2024",
       "WebSenor MERN Stack Developer Nov 2024 – Feb 2025",
@@ -189,9 +195,14 @@ test("CIE derives factual total experience from dated work history", () => {
     targetBudget: 400,
     includeResumeProjects: false,
     currentDate: new Date("2026-06-07T00:00:00.000Z"),
+    query: "What is your educational background and skill set?",
   });
 
   assert.ok(context.includes("Total Experience: 1 year 11 months"));
+  assert.ok(context.includes("Education:"));
+  assert.ok(context.includes("Bachelor of Computer Applications"));
+  assert.ok(context.includes("Skills:"));
+  assert.ok(context.includes("JavaScript, ReactJS, Node.js, MongoDB"));
 });
 
 test("CIE profile digest excludes resume project section when selected projects are active", () => {

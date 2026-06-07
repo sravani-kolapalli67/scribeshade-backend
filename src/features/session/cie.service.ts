@@ -180,6 +180,7 @@ const PERSONAL_CONTEXT_KEYWORDS = [
   // Bare keywords that always need candidate context
   "project", "projects", "resume", "experience", "skills",
   "introduce", "background", "strength", "weakness",
+  "education", "educational", "academic", "degree", "college", "university",
   "qualification", "achievements", "portfolio",
 ];
 
@@ -336,8 +337,36 @@ export function trimResume(resumeText: string, targetBudget = 900): string {
 }
 
 function isResumeSectionHeading(line: string, pattern: RegExp): boolean {
-  const normalized = line.trim().replace(/[:\-]+$/g, "");
-  return normalized.length <= 60 && pattern.test(normalized);
+  const normalized = line
+    .trim()
+    .replace(/[:\-]+$/g, "")
+    .replace(/\s+/g, " ");
+  const compact = normalized.replace(/[^a-z]/gi, "").toLowerCase();
+  const canonicalHeadings: Record<string, string> = {
+    summary: "summary",
+    profile: "profile",
+    objective: "objective",
+    workexperience: "work experience",
+    professionalexperience: "professional experience",
+    employmenthistory: "employment history",
+    internships: "internships",
+    skills: "skills",
+    technicalskills: "technical skills",
+    projects: "projects",
+    projectexperience: "project experience",
+    academicprojects: "academic projects",
+    professionalprojects: "professional projects",
+    education: "education",
+    certifications: "certifications",
+    achievements: "achievements",
+    awards: "awards",
+    languages: "languages",
+    publications: "publications",
+    contact: "contact",
+    personaldetails: "personal details",
+  };
+  const canonical = canonicalHeadings[compact] || normalized;
+  return canonical.length <= 60 && pattern.test(canonical);
 }
 
 function splitResumeLines(resumeText: string): string[] {
@@ -469,6 +498,7 @@ export function extractCandidateProfileContext(input: {
   targetBudget: number;
   includeResumeProjects: boolean;
   currentDate?: Date;
+  query?: string;
 }): string {
   if (!input.resumeText.trim()) return "";
   const lines = splitResumeLines(input.resumeText);
@@ -521,12 +551,14 @@ export function extractCandidateProfileContext(input: {
     .slice(0, 4)
     .join("\n");
 
-  const sections = [
+  const identitySections = [
     "VERIFIED_CANDIDATE_PROFILE",
     name ? `Name: ${name}` : "",
     role ? `Current/Recent Role: ${role}` : "",
     totalExperience ? `Total Experience: ${totalExperience}` : "",
     !name && !role && headerLines ? `Header/Profile lines:\n${compactResumeSection(headerLines, 280)}` : "",
+  ].filter(Boolean);
+  const detailSections = [
     summary ? `Resume Summary:\n${compactResumeSection(summary, 520)}` : "",
     workExperience ? `Work History:\n${compactResumeSection(workExperience, 900)}` : "",
     skills ? `Skills:\n${compactResumeSection(skills, 520)}` : "",
@@ -534,8 +566,34 @@ export function extractCandidateProfileContext(input: {
     certifications ? `Certifications:\n${compactResumeSection(certifications, 320)}` : "",
     resumeProjects ? `Resume Project Summary:\n${compactResumeSection(resumeProjects, 700)}` : "",
   ].filter(Boolean);
+  const queryText = (input.query || "").toLowerCase();
+  const requestedSectionPrefixes = [
+    /\b(education|educational|academic|degree|qualification|college|university)\b/.test(queryText)
+      ? "Education:"
+      : "",
+    /\b(skill|skills|skill set|tech stack|technology|technologies)\b/.test(queryText)
+      ? "Skills:"
+      : "",
+    /\b(certification|certifications|certified)\b/.test(queryText)
+      ? "Certifications:"
+      : "",
+    /\b(project|projects|portfolio|built|developed)\b/.test(queryText)
+      ? "Resume Project Summary:"
+      : "",
+    /\b(experience|work history|employment|company|role|responsibilities)\b/.test(queryText)
+      ? "Work History:"
+      : "",
+  ].filter(Boolean);
+  const prioritizedSections = [
+    ...detailSections.filter((section) =>
+      requestedSectionPrefixes.some((prefix) => section.startsWith(prefix)),
+    ),
+    ...detailSections.filter((section) =>
+      requestedSectionPrefixes.every((prefix) => !section.startsWith(prefix)),
+    ),
+  ];
 
-  const profile = sections.join("\n\n");
+  const profile = [...identitySections, ...prioritizedSections].join("\n\n");
   return trimResume(profile, input.targetBudget);
 }
 
@@ -1199,6 +1257,7 @@ export async function buildOptimizedContext(
           resumeText: resumeRaw,
           targetBudget: resumeBudget,
           includeResumeProjects: !hasSelectedProjects,
+          query,
         }) || trimResume(resumeRaw, resumeBudget)
       : trimResume(resumeRaw, resumeBudget)
     : "";
@@ -1283,6 +1342,7 @@ export async function buildOptimizedContext(
             resumeText: resumeRaw,
             targetBudget: scaledResumeBudget,
             includeResumeProjects: !hasSelectedProjects,
+            query,
           }) || trimResume(resumeRaw, scaledResumeBudget)
         : trimResume(resumeRaw, scaledResumeBudget);
     }

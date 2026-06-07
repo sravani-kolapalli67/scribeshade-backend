@@ -262,6 +262,32 @@ test("ContextRouterV3 keeps resume for simple contextual intro questions", () =>
   assert.equal(runtime.history, "");
 });
 
+test("ContextRouterV3 keeps resume for direct education questions", () => {
+  const routed = routeAnswerContextV3({
+    sanitizedRequest: latestRequest,
+    sessionState: {
+      sessionId: "session-1",
+      activeTopic: "education",
+      latestCleanQuestion: "What is your education?",
+      questionChain: [],
+      askState: "answerable_question",
+      interviewerTone: "neutral",
+      updatedAt: new Date(0).toISOString(),
+      answeredQuestions: [],
+    },
+    cieComplexity: "simple_contextual",
+    answerIntent: "behavioral_project_experience",
+    question: "What is your education?",
+    hasResume: true,
+    hasProjects: false,
+    hasDocument: false,
+  });
+
+  assert.equal(routed.includeResume, true);
+  assert.equal(routed.includeProjects, false);
+  assert.equal(routed.budgets.resume, 550);
+});
+
 test("ContextRouterV3 includes resume and projects for combined profile project questions", () => {
   const routed = routeAnswerContextV3({
     sanitizedRequest: latestRequest,

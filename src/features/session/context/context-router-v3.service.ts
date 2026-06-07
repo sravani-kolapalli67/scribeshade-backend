@@ -113,7 +113,7 @@ export function routeAnswerContextV3(input: {
       questionText,
     );
   const asksProfileContext =
-    /\b(experience|skill set|skills|work experience|professional experience|years? of experience|profile|background|introduce yourself)\b/.test(
+    /\b(experience|skill set|skills|work experience|professional experience|years? of experience|profile|background|introduce yourself|education|educational|academic|degree|qualification|college|university)\b/.test(
       questionText,
     );
   const profileProjectRequest =

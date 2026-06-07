@@ -253,6 +253,16 @@ test("plural introduction STT still uses profile policy", () => {
   );
 });
 
+test("education questions use verified candidate profile context", () => {
+  assert.equal(
+    classifyAnswerIntent({
+      question: "What is your educational background?",
+      cieComplexity: "simple_contextual",
+    }),
+    "behavioral_project_experience",
+  );
+});
+
 test("cloud credential security question stays scoped to secret management", () => {
   const policy = buildRequestScopedPolicy({
     question:
