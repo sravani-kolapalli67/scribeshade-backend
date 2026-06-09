@@ -9,6 +9,8 @@ import path from "path";
 import { AppError } from "../../shared/middleware/error.middleware";
 import * as creditsService from "../credits/credits.service";
 import { creditDeductionQueue } from "../jobs/queue";
+import { enqueueQuestionBankExtraction } from "../jobs/question-bank-extraction.queue";
+import { removeSessionQuestionBankSources } from "../question-bank/question-bank.service";
 import {
   buildActiveTaskV3,
   buildAnswerRuntimeContext,
@@ -1345,6 +1347,7 @@ export async function createSession(data: CreateSessionData) {
       extraContext: data.extraContext || "",
       autoGenerateResponse: data.autoGenerateResponse,
       saveTranscription: data.saveTranscription,
+      questionBankContributionOptIn: data.questionBankContributionOptIn,
       mode: data.mode,
       free: data.free,
       status: SessionStatus.PRE_CHECK,
@@ -1422,6 +1425,7 @@ export async function deleteSession(id: string) {
   if (!DELETABLE_STATUSES.includes(session.status)) {
     throw new AppError(409, "Cannot delete an active or in-progress session. End the session first.");
   }
+  await removeSessionQuestionBankSources(id);
   return prisma.session.delete({
     where: { id },
   });
@@ -1623,6 +1627,14 @@ export async function deactivateSession(
             : {}),
         },
       });
+      if (session.saveTranscription !== false) {
+        await enqueueQuestionBankExtraction(id).catch((error) => {
+          console.warn("[question-bank-extraction] enqueue failed", {
+            sessionId: id,
+            error,
+          });
+        });
+      }
     }
   }
 
@@ -2221,17 +2233,21 @@ function processAIStream(
                   : snapshotId
                     ? crypto.randomUUID()
                     : undefined;
-              await qaService
-                .createQA({
-                  userId: session.userId,
-                  sessionId,
-                  companyId: session.companyId,
-                  ques: question,
-                  answer,
-                  language: mapLanguage(session.language),
-                  industry: mapIndustry(session.jobDescription),
-                })
-                .catch((e) => console.error("Auto-save QA Error:", e));
+              const pairMessageId = crypto.randomUUID();
+              if (!isRegenerate) {
+                await qaService
+                  .createQA({
+                    messageId: pairMessageId,
+                    userId: session.userId,
+                    sessionId,
+                    companyId: session.companyId,
+                    ques: question,
+                    answer,
+                    language: mapLanguage(session.language),
+                    industry: mapIndustry(session.jobDescription),
+                  })
+                  .catch((e) => console.error("Auto-save QA Error:", e));
+              }
 
               if (pairSnapshotId && contextForCall && targetModel && !isRegenerate) {
                 const { createGenerationSnapshot } = require("./cie.service");
@@ -2261,6 +2277,7 @@ function processAIStream(
                   answer,
                   undefined,
                   pairSnapshotId,
+                  pairMessageId,
                 ).catch((e) => console.error("appendMessage Error:", e));
                 if (appendResult && orchestration && validation.updateMemory) {
                   const topicTitle =

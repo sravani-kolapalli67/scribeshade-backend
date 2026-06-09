@@ -36,6 +36,9 @@ export async function createSession(req: Request, res: Response) {
       simpleLanguage: body.simpleLanguage === "true" || body.simpleLanguage === true,
       autoGenerateResponse: body.autoGenerateAI === "true" || body.autoGenerateAI === true,
       saveTranscription: body.saveTranscript === "true" || body.saveTranscript === true,
+      questionBankContributionOptIn:
+        body.questionBankContributionOptIn === "true" ||
+        body.questionBankContributionOptIn === true,
       mode: body.jobInputMode || "manual",
       free: body.free === "true" || body.free === true,
       DocumentId: body.DocumentId || body.documentId || "",

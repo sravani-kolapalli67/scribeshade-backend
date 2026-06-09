@@ -1,10 +1,10 @@
 {
-  "apiBaseUrl": "http://127.0.0.1:3200/api",
-  "startedAt": "2026-06-05T06:10:32.396Z",
-  "endedAt": "2026-06-05T06:11:31.579Z",
-  "sessionId": "7bbfb996-fe85-4f6d-9c87-b071420ba9af",
-  "userId": "6c803fe5-48e9-4daa-ba25-44a66714f775",
-  "resumeId": "02316abc-6447-4122-a4c0-5659b3c56339",
+  "apiBaseUrl": "http://127.0.0.1:3210/api",
+  "startedAt": "2026-06-07T18:23:54.076Z",
+  "endedAt": "2026-06-07T18:25:53.242Z",
+  "sessionId": "f40403c7-4a22-4a6a-aaf6-a6d815999426",
+  "userId": "068a8e51-c92f-4890-8bfc-fc970eb4b99f",
+  "resumeId": "df20365d-abd9-49db-a62b-b30011726dfe",
   "projectIds": [],
   "totalTurns": 8,
   "passedTurns": 8,
@@ -13,7 +13,7 @@
     {
       "id": "intro-project",
       "question": "Before we start coding, introduce yourself and explain your selected project architecture in detail.",
-      "answerPreview": "===QUESTION_META={\"displayQuestion\":\"Before we start coding, introduce yourself and explain your selected project architecture in detail.\",\"intent\":\"EXPERIENCE_QUESTION\",\"confidence\":0.25,\"topic\":\"general\",\"isFollowUp\":false,\"shouldAnswer\":true,\"source\":\"ai_se",
+      "answerPreview": "**QUESTION:**\nIntroduce yourself and explain your selected project architecture in detail.\n\n**ANSWER:**\n**Direct answer:**\nI am a Senior Zuora Developer with over five years of experience specializing in billing, CPQ, and revenue recognition (RevPro) for large",
       "checks": [
         {
           "check": "must_contain:project",
@@ -28,7 +28,7 @@
         {
           "check": "question_block_not_overmerged",
           "pass": true,
-          "details": "question_block_len=100,max=320"
+          "details": "question_block_len=76,max=320"
         },
         {
           "check": "question_block_not_containing_previous_turn",
@@ -46,7 +46,7 @@
     {
       "id": "code-write",
       "question": "Write TypeScript code for a debounce utility function and show practical usage in a React search input.",
-      "answerPreview": "===QUESTION_META={\"displayQuestion\":\"Write TypeScript code for a debounce utility function and show practical usage in a React search input.\",\"intent\":\"NEW_QUESTION\",\"confidence\":0.25,\"topic\":\"react\",\"isFollowUp\":false,\"shouldAnswer\":true,\"source\":\"ai_segmente",
+      "answerPreview": "**QUESTION:**\nWrite TypeScript code for a debounce utility function and show practical usage in a React search input.\n\n**ANSWER:**\n```typescript\n// 1. The Debounce Utility\nfunction debounce<T extends (...args: any[]) => void>(\n  func: T,\n  delay: number\n): (..",
       "checks": [
         {
           "check": "must_contain:debounce",
@@ -66,7 +66,7 @@
         {
           "check": "require_code_block",
           "pass": true,
-          "details": "code_blocks=2"
+          "details": "code_blocks=1"
         }
       ],
       "pass": true
@@ -74,7 +74,7 @@
     {
       "id": "code-followup-explain",
       "question": "Could you explain how the code you used performs and what makes it effective?",
-      "answerPreview": "===QUESTION_META={\"displayQuestion\":\"Could you explain how the code you used performs and what makes it effective?\",\"intent\":\"NEW_QUESTION\",\"confidence\":0.25,\"topic\":\"general\",\"isFollowUp\":false,\"shouldAnswer\":true,\"source\":\"ai_segmenter_fallback\",\"corrections",
+      "answerPreview": "**QUESTION:**\nCould you explain how the code you used performs and what makes it effective?\n\n**ANSWER:**\n**Direct answer:** The `debounce` function is effective because it limits how often a heavy operation, like an API call, runs by ensuring it only triggers ",
       "checks": [
         {
           "check": "must_contain:code",
@@ -107,7 +107,7 @@
     {
       "id": "code-followup-related",
       "question": "How would you test that debounce logic and which edge cases would you cover?",
-      "answerPreview": "===QUESTION_META={\"displayQuestion\":\"How would you test that debounce logic and which edge cases would you cover?\",\"intent\":\"FOLLOW_UP\",\"confidence\":0.25,\"topic\":\"general\",\"isFollowUp\":true,\"shouldAnswer\":true,\"source\":\"ai_segmenter_fallback\",\"corrections\":[{\"",
+      "answerPreview": "**QUESTION:**\nHow would you test that debounce logic and which edge cases would you cover?\n\n**ANSWER:**\n**Testing Approach:**\n- **Unit Testing:** I would use a testing framework like `Jest` and specifically use **fake timers** (`jest.useFakeTimers()`). This al",
       "checks": [
         {
           "check": "must_contain:test",
@@ -135,7 +135,7 @@
     {
       "id": "topic-switch-behavioral",
       "question": "Switching topic now. Tell me about a conflict with a stakeholder and how you resolved it.",
-      "answerPreview": "===QUESTION_META={\"displayQuestion\":\"Switching topic now. Tell me about a conflict with a stakeholder and how you resolved it.\",\"intent\":\"NEW_QUESTION\",\"confidence\":0.25,\"topic\":\"general\",\"isFollowUp\":false,\"shouldAnswer\":true,\"source\":\"ai_segmenter_fallback\",",
+      "answerPreview": "**QUESTION:**\nTell me about a conflict with a stakeholder and how you resolved it.\n\n**ANSWER:**\n- **Problem:** While implementing a revenue recognition workflow for a client in the healthcare industry, I had a conflict with a Finance Manager. They wanted to ma",
       "checks": [
         {
           "check": "must_contain:stakeholder",
@@ -150,7 +150,7 @@
         {
           "check": "question_block_not_overmerged",
           "pass": true,
-          "details": "question_block_len=89,max=320"
+          "details": "question_block_len=68,max=320"
         },
         {
           "check": "question_block_not_containing_previous_turn",
@@ -163,7 +163,7 @@
     {
       "id": "topic-followup-behavioral",
       "question": "Related follow-up: what communication strategy did you use and what was the measurable outcome?",
-      "answerPreview": "===QUESTION_META={\"displayQuestion\":\"Related follow-up: what communication strategy did you use and what was the measurable outcome?\",\"intent\":\"NEW_QUESTION\",\"confidence\":0.25,\"topic\":\"general\",\"isFollowUp\":true,\"shouldAnswer\":true,\"source\":\"ai_segmenter_fallb",
+      "answerPreview": "**QUESTION:**\nWhat communication strategy did you use to resolve the conflict with the Finance Manager, and what was the measurable outcome?\n\n**ANSWER:**\n- **Communication Strategy:**\n  - **Data-Driven Empathy:** Instead of just arguing for the technical workf",
       "checks": [
         {
           "check": "must_contain:communication",
@@ -178,7 +178,7 @@
         {
           "check": "question_block_not_overmerged",
           "pass": true,
-          "details": "question_block_len=95,max=320"
+          "details": "question_block_len=126,max=320"
         },
         {
           "check": "question_block_not_containing_previous_turn",
@@ -191,7 +191,7 @@
     {
       "id": "topic-switch-system-design",
       "question": "New topic: design a notification system for 1 million events per day and explain scaling and reliability.",
-      "answerPreview": "===QUESTION_META={\"displayQuestion\":\"New topic: design a notification system for 1 million events per day and explain scaling and reliability.\",\"intent\":\"NEW_QUESTION\",\"confidence\":0.25,\"topic\":\"general\",\"isFollowUp\":false,\"shouldAnswer\":true,\"source\":\"ai_segm",
+      "answerPreview": "**QUESTION:**\nDesign a notification system capable of handling 1 million events per day, and explain how you would ensure its scaling and reliability.\n\n**ANSWER:**\n**System Goal:**\n- Handle a volume of **1 million events per day** (averaging ~12 events per sec",
       "checks": [
         {
           "check": "must_contain:scal",
@@ -206,7 +206,7 @@
         {
           "check": "question_block_not_overmerged",
           "pass": true,
-          "details": "question_block_len=94,max=320"
+          "details": "question_block_len=136,max=320"
         },
         {
           "check": "question_block_not_containing_previous_turn",
@@ -219,7 +219,7 @@
     {
       "id": "scenario-followup-db",
       "question": "Continue from the database part of that notification design and justify indexing choices.",
-      "answerPreview": "===QUESTION_META={\"displayQuestion\":\"Continue from the database part of that notification design and justify indexing choices.\",\"intent\":\"FOLLOW_UP\",\"confidence\":0.25,\"topic\":\"general\",\"isFollowUp\":true,\"shouldAnswer\":true,\"source\":\"ai_segmenter_fallback\",\"cor",
+      "answerPreview": "**QUESTION:**\nContinuing from the database design for the notification system, how would you justify your indexing choices?\n\n**ANSWER:**\n**Direct answer:**\n- Since we are using `MongoDB` to handle the high write volume, I would focus on indexes that optimize f",
       "checks": [
         {
           "check": "must_contain:database",
@@ -234,7 +234,7 @@
         {
           "check": "question_block_not_overmerged",
           "pass": true,
-          "details": "question_block_len=89,max=320"
+          "details": "question_block_len=109,max=320"
         },
         {
           "check": "question_block_not_containing_previous_turn",

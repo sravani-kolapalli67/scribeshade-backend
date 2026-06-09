@@ -1,6 +1,7 @@
 import { Difficulty, Industry, Language } from "@prisma/client";
 
 export interface CreateQAData {
+  messageId?: string;
   userId?: string;
   sessionId?: string;
   companyId: string;

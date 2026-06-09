@@ -38,6 +38,7 @@ export interface CreateSessionData {
   extraContext: string;
   autoGenerateResponse: boolean;
   saveTranscription: boolean;
+  questionBankContributionOptIn: boolean;
   mode: string;
   free: boolean;
   /** IDs of AI-generated Project records to include as context */

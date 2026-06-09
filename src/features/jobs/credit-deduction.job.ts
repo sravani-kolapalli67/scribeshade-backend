@@ -4,6 +4,7 @@ import { prisma } from "../../shared/lib/prisma";
 import * as creditsService from "../credits/credits.service";
 import { SessionStatus } from "@prisma/client";
 import { Prisma } from "@prisma/client";
+import { enqueueQuestionBankExtraction } from "./question-bank-extraction.queue";
 
 console.log("⚡ [credit-deduction.job.ts] File loaded");
 
@@ -24,6 +25,8 @@ export const creditDeductionWorker = new Worker(
     console.log(
       `[credit-deduction] Starting job ${job.id} for session ${sessionId} (exhausted=${isExhausted}, autoEnded=${isAutoEnded})`,
     );
+
+    let shouldEnqueueQuestionBankExtraction = false;
 
     await prisma.$transaction(async (tx) => {
       const session = await tx.session.findUnique({ where: { id: sessionId } });
@@ -52,6 +55,7 @@ export const creditDeductionWorker = new Worker(
               : {}),
           },
         });
+        shouldEnqueueQuestionBankExtraction = session.saveTranscription !== false;
         return;
       }
 
@@ -93,7 +97,12 @@ export const creditDeductionWorker = new Worker(
             : {}),
         },
       });
+      shouldEnqueueQuestionBankExtraction = session.saveTranscription !== false;
     });
+
+    if (shouldEnqueueQuestionBankExtraction) {
+      await enqueueQuestionBankExtraction(sessionId);
+    }
   },
   { connection: redisConnection, concurrency: 5 },
 );

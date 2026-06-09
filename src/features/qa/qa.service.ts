@@ -7,6 +7,7 @@ import { CreateQAData, UpdateQAData } from "./qa.types";
 export async function createQA(data: CreateQAData) {
   return prisma.qA.create({
     data: {
+      messageId: data.messageId,
       userId: data.userId,
       companyId: data.companyId,
       sessionId: data.sessionId ?? null,

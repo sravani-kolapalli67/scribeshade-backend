@@ -1,6 +1,8 @@
 import { Router } from "express";
 import multer from "multer";
 import * as sessionController from "./session.controller";
+import * as postSessionAnswerController from "./post-session-answer.controller";
+import { requireAuth } from "../auth/auth.middleware";
 
 const router = Router();
 const upload = multer(); // memory storage
@@ -74,6 +76,27 @@ router.post("/:id/ai-answer", sessionController.getAIAnswer);
  */
 router.post("/:id/save-message", sessionController.saveMessage);
 router.patch("/:id/transcript/:messageId", sessionController.patchTranscriptMessage);
+
+router.post(
+  "/:sessionId/answers/:messageId/ai-preview",
+  requireAuth,
+  postSessionAnswerController.previewAnswerEdit,
+);
+router.patch(
+  "/:sessionId/answers/:messageId",
+  requireAuth,
+  postSessionAnswerController.updateAnswer,
+);
+router.get(
+  "/:sessionId/answers/:messageId/revisions",
+  requireAuth,
+  postSessionAnswerController.getAnswerRevisions,
+);
+router.post(
+  "/:sessionId/answers/:messageId/revisions/:revisionId/restore",
+  requireAuth,
+  postSessionAnswerController.restoreRevision,
+);
 
 /**
  * @route GET /session/:id/analytics/existing

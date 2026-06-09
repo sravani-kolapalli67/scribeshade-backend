@@ -1,7 +1,7 @@
 # ScribeShade Backend API Reference
 
-Last updated: 2026-06-06
-Document version: v1.9.1
+Last updated: 2026-06-08
+Document version: v1.11.0
 
 Base URL:
 - Local: `http://localhost:3200/api`
@@ -259,6 +259,8 @@ Request:
   "currency": "INR"
 }
 ```
+
+`questionBankContributionOptIn` is optional and defaults to `false`; when false, any extracted Question Bank items remain private to the user and do not count toward public aggregation thresholds.
 
 Success `201`:
 ```json
@@ -561,6 +563,7 @@ Example request (JSON):
   "simpleLanguage": true,
   "autoGenerateAI": true,
   "saveTranscript": true,
+  "questionBankContributionOptIn": false,
   "jobInputMode": "manual",
   "instructions": "Focus on system design",
   "extraContext": "I have 5 years experience",
@@ -854,6 +857,135 @@ Error examples:
 ```json
 { "error": "role and question are required" }
 ```
+
+### POST /session/:sessionId/answers/:messageId/ai-preview
+Streams a proposed rewrite for an AI answer from an ended, saved session. The
+preview is not persisted and does not consume credits.
+
+Headers:
+- `Authorization: Bearer <token>`
+
+Request:
+```json
+{
+  "mode": "improve",
+  "baseVersion": 2
+}
+```
+
+Supported modes:
+- `improve`
+- `shorten`
+- `expand`
+- `simplify`
+- `regenerate`
+- `custom` (requires `instruction`)
+
+Success `200`:
+- Streamed `text/plain` Markdown answer.
+- `X-AI-Model` identifies the model used.
+
+Error examples:
+- `409` when another preview is already running:
+```json
+{
+  "error": "An AI preview is already running for this answer",
+  "code": "DUPLICATE_IN_FLIGHT"
+}
+```
+- `409` when the submitted version is stale:
+```json
+{
+  "error": "The answer changed after this editor was opened",
+  "code": "STALE_ANSWER_VERSION",
+  "latestAnswer": "Current saved answer",
+  "latestVersion": 3
+}
+```
+
+Notes:
+- Only `AI_ASSISTANT` answers may be edited.
+- The session must belong to the caller, have saved transcription enabled, and
+  be in a terminal status.
+- This endpoint does not invoke live question detection, SSE, transcript
+  segmentation, QA creation, credit deduction, or usage logging.
+
+### PATCH /session/:sessionId/answers/:messageId
+Applies a manual edit or an explicitly accepted AI preview atomically.
+
+Headers:
+- `Authorization: Bearer <token>`
+
+Request:
+```json
+{
+  "answer": "Updated Markdown answer",
+  "baseVersion": 2,
+  "source": "ai_rewrite",
+  "aiMode": "improve",
+  "model": "anthropic/claude-haiku-4-5"
+}
+```
+
+`source` is one of `manual`, `ai_rewrite`, or `ai_regenerate`.
+
+Success `200`:
+```json
+{
+  "success": true,
+  "data": {
+    "answer": "Updated Markdown answer",
+    "currentVersion": 3,
+    "revisionId": "revision-uuid"
+  }
+}
+```
+
+The transaction updates the assistant transcript chunk, session message JSON,
+session transcript JSON, linked legacy QA answer, and revision history. A stale
+`baseVersion` returns `409` without a partial update.
+
+### GET /session/:sessionId/answers/:messageId/revisions
+Returns the current answer/version and immutable revision history.
+
+Headers:
+- `Authorization: Bearer <token>`
+
+Success `200`:
+```json
+{
+  "success": true,
+  "data": {
+    "answer": "Current answer",
+    "currentVersion": 3,
+    "revisions": [
+      {
+        "id": "revision-uuid",
+        "version": 3,
+        "question": "Explain dependency injection.",
+        "answer": "Current answer",
+        "source": "ai_rewrite",
+        "aiMode": "improve",
+        "createdAt": "2026-06-08T12:00:00.000Z"
+      }
+    ]
+  }
+}
+```
+
+### POST /session/:sessionId/answers/:messageId/revisions/:revisionId/restore
+Restores a historical answer by creating a new current revision. Existing
+history is never deleted.
+
+Headers:
+- `Authorization: Bearer <token>`
+
+Request:
+```json
+{ "baseVersion": 3 }
+```
+
+Success `200` has the same shape as the answer `PATCH` endpoint.
 
 ### GET /session/:id/events
 Opens a Server-Sent Events (SSE) stream for real-time session lifecycle notifications.
@@ -1640,6 +1772,200 @@ Success `200`:
 
 ---
 
+## Question Bank APIs
+
+Question Bank 2.0 exposes privacy-safe aggregate interview intelligence. These endpoints do not return `userId`, `sessionId`, `qaId`, transcript text, answer text, resume/document ids, uploaded document content, session messages, or source mappings.
+
+Legacy `/qa` remains the private/session Q&A module. Use `/question-bank` for public-safe aggregated question discovery.
+
+All Question Bank endpoints require Clerk auth unless noted otherwise.
+
+### GET /question-bank/explore/companies
+Lists public-eligible companies with aggregate question counts and difficulty mix.
+
+Query params:
+- `q`, `industry`, `technology`, `role`, `difficulty`
+- `minQuestions`
+- `sort`: `recent`, `questions`, `name`
+- `page`, `limit`
+
+Success `200`:
+```json
+{
+  "success": true,
+  "data": [
+    {
+      "id": "company-id",
+      "name": "Luxoft",
+      "slug": "luxoft",
+      "industry": "Full Stack",
+      "availableRoles": 3,
+      "validQuestions": 24,
+      "topTechnologies": ["React", "Node.js"],
+      "difficultyMix": { "easy": 25, "medium": 55, "hard": 20, "expert": 0 },
+      "lastUpdatedAt": "2026-06-07T10:00:00.000Z"
+    }
+  ],
+  "pagination": { "total": 1, "page": 1, "limit": 20, "pages": 1 }
+}
+```
+
+### GET /question-bank/explore/roles
+Lists public-eligible roles with related companies, technologies, topics, and difficulty mix.
+
+Query params: same as company explore.
+
+Success `200`: `{ "success": true, "data": [ ... ], "pagination": { ... } }`
+
+### GET /question-bank/explore/technologies
+Lists public-eligible technologies with related roles, companies, question types, and difficulty mix.
+
+Query params: same as company explore.
+
+Success `200`: `{ "success": true, "data": [ ... ], "pagination": { ... } }`
+
+### GET /question-bank/companies/:companySlug
+Returns one public-safe company detail page with roles, top technologies, and analytics.
+
+Success `200`:
+```json
+{
+  "success": true,
+  "data": {
+    "company": { "id": "company-id", "name": "Luxoft", "slug": "luxoft" },
+    "roles": [{ "id": "role-id", "name": "MERN Developer", "slug": "mern-developer", "questionCount": 12 }],
+    "topTechnologies": ["React", "Node.js"],
+    "analytics": {
+      "totalValidQuestions": 24,
+      "uniqueTopics": 8,
+      "topTechnologies": ["React"],
+      "topTopics": ["Hooks"],
+      "difficultyMix": { "easy": 25, "medium": 55, "hard": 20, "expert": 0 },
+      "questionTypeDistribution": { "technical_concept": 10 },
+      "mostRepeatedQuestions": []
+    }
+  }
+}
+```
+
+Error examples:
+- `404`
+```json
+{ "error": "Company not found" }
+```
+
+### GET /question-bank/questions
+Searches public-eligible questions.
+
+Query params:
+- `company`, `role`, `technology`, `topic`, `industry`, `questionType`, `difficulty`, `q`
+- `sort`: `recent`, `frequency`, `difficulty`
+- `page`, `limit`
+
+Success `200`:
+```json
+{
+  "success": true,
+  "data": [
+    {
+      "id": "question-id",
+      "title": "Explain event loop in Node.js?",
+      "normalizedQuestion": "Explain event loop in Node.js?",
+      "company": { "name": "Luxoft", "slug": "luxoft" },
+      "role": { "name": "Backend Engineer", "slug": "backend-engineer" },
+      "industry": "Full Stack",
+      "technologies": ["Node.js"],
+      "topics": ["Event Loop"],
+      "questionType": "technical_concept",
+      "difficulty": "medium",
+      "complexityScore": 42,
+      "frequencyCount": 5,
+      "sourceCount": 5,
+      "lastSeenAt": "2026-06-07T10:00:00.000Z",
+      "answerGuideAvailable": false
+    }
+  ],
+  "analytics": {},
+  "pagination": { "total": 1, "page": 1, "limit": 20, "pages": 1 }
+}
+```
+
+### GET /question-bank/questions/:questionId
+Returns one public-safe question, similar public-safe questions, and optional answer guide.
+
+Success `200`: `{ "success": true, "data": { "question": { ... }, "similarQuestions": [], "answerGuide": { ... } } }`
+
+Error examples:
+- `404`
+```json
+{ "error": "Question not found" }
+```
+
+### GET /question-bank/my/questions
+Returns only the authenticated user's sanitized extracted questions.
+
+Success `200`:
+```json
+{
+  "success": true,
+  "data": [
+    {
+      "id": "question-id",
+      "question": "Explain event loop in Node.js?",
+      "title": "Explain event loop in Node.js?",
+      "company": "Luxoft",
+      "role": "Backend Engineer",
+      "sessionDate": "2026-06-07T10:00:00.000Z",
+      "technologies": ["Node.js"],
+      "topics": ["Event Loop"],
+      "difficulty": "medium",
+      "contributionEnabled": false,
+      "visibility": "private"
+    }
+  ],
+  "pagination": { "total": 1, "page": 1, "limit": 20, "pages": 1 }
+}
+```
+
+### POST /question-bank/questions/:questionId/save
+Saves a public question for the authenticated user.
+
+Success `201`:
+```json
+{ "success": true }
+```
+
+### DELETE /question-bank/questions/:questionId/save
+Removes a saved public question.
+
+Success `200`:
+```json
+{ "success": true }
+```
+
+### GET /question-bank/admin/moderation
+Admin only. Requires Clerk claim role `admin` / `question_bank_admin` or `QUESTION_BANK_ADMIN_CLERK_IDS`.
+
+Success `200`: `{ "success": true, "data": [ ... ], "pagination": { ... } }`
+
+### PATCH /question-bank/admin/questions/:questionId/moderation
+Admin only. Updates moderation status and optional aggregation override.
+
+Request:
+```json
+{
+  "moderationStatus": "approved",
+  "adminOverride": true
+}
+```
+
+Success `200`:
+```json
+{ "success": true }
+```
+
+---
+
 ## Company APIs
 
 ### GET /company
@@ -2007,6 +2333,8 @@ Recommended client flow:
 
 | Version | Date | Summary |
 |---|---|---|
+| v1.11.0 | 2026-06-08 | Added authenticated post-session AI answer preview, apply, revision history, and restore endpoints with optimistic concurrency and no credit usage. |
+| v1.10.0 | 2026-06-07 | Added Question Bank 2.0 privacy-safe aggregate APIs, saved questions, admin moderation endpoints, and documented the legacy `/qa` boundary. |
 | v1.9.1 | 2026-06-06 | Clarified `POST /session/:id/ai-answer` transcript authority, mode-scoped context fields, duplicate-request behavior, and single-stream-call semantics. |
 | v1.9.0 | 2026-05-18 | Added 3 Updates API endpoints: `GET /updates/latest.json` (Tauri updater manifest proxy), `GET /updates/download/:filename` (app binary streaming), `GET /updates/health` (updater system diagnostics). All endpoints documented with error handling and architectural notes. |
 | v1.8.0 | 2026-05-07 | Updated `GET /resume/list` to accept optional `search` for resume-name / JD / keyword search across uploaded and built resumes. Documented searchable sources and response `source` field example. |

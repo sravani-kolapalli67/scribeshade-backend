@@ -9,6 +9,7 @@ import { holdExpiryWorker } from "./features/jobs/hold-expiry.job";
 import { candidateDigestWorker } from "./features/jobs/candidate-digest.job";
 import { sessionMemoryWorker } from "./features/jobs/session-memory.job";
 import { sessionRagWorker } from "./features/jobs/session-rag.job";
+import { questionBankExtractionWorker } from "./features/jobs/question-bank-extraction.job";
 import { warmBrowser } from "./features/resume/resume.builder.service";
 import { validateAiConfig } from "./shared/utils/ai-validator";
 
@@ -37,6 +38,7 @@ const startServer = async () => {
     void candidateDigestWorker;
     void sessionMemoryWorker;
     void sessionRagWorker;
+    void questionBankExtractionWorker;
 
     // Schedule the recurring watchdog tick
     scheduleWatchdog().catch((err) =>
@@ -63,6 +65,7 @@ async function closeWorkers(signal: string): Promise<void> {
     candidateDigestWorker.close(),
     sessionMemoryWorker.close(),
     sessionRagWorker.close(),
+    questionBankExtractionWorker.close(),
   ]);
   process.exit(0);
 }

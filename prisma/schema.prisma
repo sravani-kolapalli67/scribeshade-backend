@@ -125,6 +125,87 @@ enum SpeakerType {
   ASSISTANT   @map("assistant")
 }
 
+enum QuestionBankDifficulty {
+  EASY
+  MEDIUM
+  HARD
+  EXPERT
+}
+
+enum QuestionBankQuestionType {
+  CODING
+  DSA
+  SYSTEM_DESIGN
+  ARCHITECTURE
+  TECHNICAL_CONCEPT
+  SCENARIO_BASED
+  DEBUGGING
+  DATABASE
+  CLOUD_DEVOPS
+  BEHAVIORAL
+  PROJECT_DEEP_DIVE
+  CASE_STUDY
+  SQL
+  FRONTEND
+  BACKEND
+  DATA_ENGINEERING
+  SECURITY
+  TESTING
+}
+
+enum QuestionBankVisibility {
+  PRIVATE
+  PUBLIC_CANDIDATE
+  PUBLIC_AGGREGATED
+  ADMIN_HIDDEN
+}
+
+enum QuestionBankVisibilityClass {
+  VALID_INTERVIEW_QUESTION
+  LOW_VALUE_HR_QUESTION
+  PRIVACY_SENSITIVE_QUESTION
+  TRANSCRIPT_NOISE
+  DUPLICATE
+  UNSAFE_TO_PUBLISH
+}
+
+enum QuestionBankSourceType {
+  MANUAL
+  SESSION_EXTRACTED
+  ADMIN_IMPORTED
+  PUBLIC_CONTRIBUTION
+}
+
+enum QuestionBankModerationStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  NEEDS_REVIEW
+  AUTO_APPROVED
+}
+
+enum QuestionBankPrivacyRisk {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+enum QuestionBankExtractionStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+  SKIPPED
+}
+
+enum SessionAnswerRevisionSource {
+  ORIGINAL
+  MANUAL
+  AI_REWRITE
+  AI_REGENERATE
+  RESTORE
+}
+
 
 
 model User {
@@ -154,6 +235,9 @@ model User {
   purchases     CreditPurchase[]
   idempotencyKeys IdempotencyKey[]
   aiGenerationCache AiGenerationCache[]
+  questionBankSources QuestionBankSource[]
+  questionBankSavedQuestions QuestionBankSavedQuestion[]
+  sessionAnswerRevisions SessionAnswerRevision[]
 }
 
 model Resume {
@@ -244,6 +328,7 @@ model Company {
 
   sessions  Session[]
   questions QA[]
+  questionBankCompany QuestionBankCompany?
 }
 
 model Session {
@@ -261,6 +346,7 @@ model Session {
   extraContext         String
   autoGenerateResponse Boolean
   saveTranscription    Boolean
+  questionBankContributionOptIn Boolean @default(false)
   free                 Boolean
   mode                 String
 
@@ -308,15 +394,20 @@ model Session {
   topicMemories    SessionTopicMemory[]
   turnMemories     SessionTurnMemory[]
   candidateDigest  CandidateContextDigest?
+  questionBankSources QuestionBankSource[]
+  questionBankExtractionRun QuestionBankExtractionRun?
+  answerRevisions SessionAnswerRevision[]
 
   @@index([userId, createdAt(sort: Desc)])
   @@index([companyId])
   @@index([status])
+  @@index([questionBankContributionOptIn])
 }
 
 
 model QA {
   id String @id @default(uuid())
+  messageId String? @unique
 
   companyId String
   company   Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
@@ -333,6 +424,8 @@ model QA {
 
   userId String?
   user   User?  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  questionBankSources QuestionBankSource[]
+  answerRevisions SessionAnswerRevision[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -341,6 +434,211 @@ model QA {
   @@index([sessionId])
   @@index([userId])
   @@index([isShared])
+}
+
+model SessionAnswerRevision {
+  id          String                      @id @default(uuid())
+  sessionId   String
+  session     Session                     @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  messageId   String
+  qaId        String?
+  qa          QA?                         @relation(fields: [qaId], references: [id], onDelete: SetNull)
+  userId      String
+  user        User                        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  version     Int
+  question    String                      @db.Text
+  answer      String                      @db.Text
+  source      SessionAnswerRevisionSource
+  aiMode      String?
+  instruction String?                     @db.Text
+  model       String?
+  createdAt   DateTime                    @default(now())
+
+  @@unique([sessionId, messageId, version])
+  @@index([sessionId, messageId, createdAt(sort: Desc)])
+  @@index([qaId])
+  @@index([userId])
+}
+
+model QuestionBankCompany {
+  id                String   @id @default(uuid())
+  existingCompanyId String?  @unique
+  existingCompany   Company? @relation(fields: [existingCompanyId], references: [id], onDelete: SetNull)
+  name              String
+  slug              String   @unique
+  aliases           String[]
+  industry          String?
+  normalizedName    String
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  questions QuestionBankQuestion[]
+  clusters  QuestionBankCluster[]
+
+  @@index([normalizedName])
+  @@index([industry])
+}
+
+model QuestionBankRole {
+  id             String   @id @default(uuid())
+  name           String
+  slug           String   @unique
+  normalizedName String
+  seniority      String?
+  category       String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  questions QuestionBankQuestion[]
+  clusters  QuestionBankCluster[]
+
+  @@index([normalizedName])
+  @@index([category])
+}
+
+model QuestionBankTechnology {
+  id        String   @id @default(uuid())
+  name      String
+  slug      String   @unique
+  aliases   String[]
+  category  String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([category])
+}
+
+model QuestionBankCluster {
+  id                 String   @id @default(uuid())
+  canonicalQuestion  String   @db.Text
+  canonicalHash      String   @unique
+  embeddingVectorId  String?
+  companyId          String?
+  roleId             String?
+  technologies       String[]
+  topics             String[]
+  frequencyCount     Int      @default(0)
+  contributorCount   Int      @default(0)
+  sourceSessionCount Int      @default(0)
+  publicEligible     Boolean  @default(false)
+  publicReason       String?
+  adminOverride      Boolean  @default(false)
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  company  QuestionBankCompany?  @relation(fields: [companyId], references: [id], onDelete: SetNull)
+  role     QuestionBankRole?     @relation(fields: [roleId], references: [id], onDelete: SetNull)
+  questions QuestionBankQuestion[]
+  sources   QuestionBankSource[]
+
+  @@index([companyId])
+  @@index([roleId])
+  @@index([publicEligible])
+  @@index([updatedAt])
+}
+
+model QuestionBankQuestion {
+  id                   String                       @id @default(uuid())
+  normalizedQuestion   String                       @db.Text
+  displayTitle         String
+  canonicalHash        String
+  clusterId            String?
+  companyId            String?
+  roleId               String?
+  industry             String?
+  questionType         QuestionBankQuestionType
+  difficulty           QuestionBankDifficulty
+  complexityScore      Int
+  technologies         String[]
+  topics               String[]
+  visibility           QuestionBankVisibility       @default(PRIVATE)
+  visibilityClass      QuestionBankVisibilityClass
+  privacyRisk          QuestionBankPrivacyRisk      @default(LOW)
+  moderationStatus     QuestionBankModerationStatus @default(PENDING)
+  sourceType           QuestionBankSourceType
+  frequencyCount       Int                          @default(0)
+  sourceCount          Int                          @default(0)
+  contributorCount     Int                          @default(0)
+  lastSeenAt           DateTime                     @default(now())
+  answerGuide          Json?
+  answerGuideAvailable Boolean                      @default(false)
+  createdAt            DateTime                     @default(now())
+  updatedAt            DateTime                     @updatedAt
+
+  cluster QuestionBankCluster? @relation(fields: [clusterId], references: [id], onDelete: SetNull)
+  company QuestionBankCompany? @relation(fields: [companyId], references: [id], onDelete: SetNull)
+  role    QuestionBankRole?    @relation(fields: [roleId], references: [id], onDelete: SetNull)
+  sources QuestionBankSource[]
+  savedBy QuestionBankSavedQuestion[]
+
+  @@unique([canonicalHash, companyId, roleId])
+  @@index([clusterId])
+  @@index([companyId])
+  @@index([roleId])
+  @@index([visibility, moderationStatus])
+  @@index([difficulty])
+  @@index([questionType])
+  @@index([lastSeenAt])
+}
+
+model QuestionBankSource {
+  id                   String                 @id @default(uuid())
+  sourceKey            String                 @unique
+  questionId           String
+  clusterId            String?
+  sourceUserId         String?
+  sourceSessionId      String?
+  sourceQaId           String?
+  sourceType           QuestionBankSourceType
+  extractionConfidence Float
+  sanitizerVersion     String
+  contributionOptIn    Boolean                @default(false)
+  createdAt            DateTime               @default(now())
+
+  question      QuestionBankQuestion @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  cluster       QuestionBankCluster?  @relation(fields: [clusterId], references: [id], onDelete: SetNull)
+  sourceUser    User?                 @relation(fields: [sourceUserId], references: [id], onDelete: Cascade)
+  sourceSession Session?              @relation(fields: [sourceSessionId], references: [id], onDelete: Cascade)
+  sourceQa      QA?                   @relation(fields: [sourceQaId], references: [id], onDelete: SetNull)
+
+  @@index([questionId])
+  @@index([clusterId])
+  @@index([sourceUserId])
+  @@index([sourceSessionId])
+  @@index([sourceQaId])
+  @@index([contributionOptIn])
+}
+
+model QuestionBankSavedQuestion {
+  id         String   @id @default(uuid())
+  userId     String
+  questionId String
+  createdAt  DateTime @default(now())
+
+  user     User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  question QuestionBankQuestion @relation(fields: [questionId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, questionId])
+  @@index([questionId])
+}
+
+model QuestionBankExtractionRun {
+  id             String                       @id @default(uuid())
+  sessionId      String                       @unique
+  status         QuestionBankExtractionStatus @default(PENDING)
+  startedAt      DateTime?
+  completedAt    DateTime?
+  errorMessage   String?                      @db.Text
+  extractedCount Int                          @default(0)
+  acceptedCount  Int                          @default(0)
+  rejectedCount  Int                          @default(0)
+  createdAt      DateTime                     @default(now())
+  updatedAt      DateTime                     @updatedAt
+
+  session Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([status])
+  @@index([updatedAt])
 }
 
 model Project {
