@@ -3,7 +3,7 @@ import { OpenRouter } from "@openrouter/sdk";
 import { CreateSessionData } from "./session.types";
 import * as qaService from "../qa/qa.service";
 import sharp from "sharp";
-import { Language, Industry, SessionStatus, DeductionReason, Prisma, SpeakerType, ChunkType } from "@prisma/client";
+import { Language, Industry, SessionStatus, DeductionReason, Prisma, SpeakerType, ChunkType, SessionAIAnswerStatus } from "@prisma/client";
 import * as documentService from "../document/document.service";
 import path from "path";
 import { AppError } from "../../shared/middleware/error.middleware";
@@ -114,6 +114,22 @@ import type {
 } from "./session-intelligence.types";
 import { toSafeExternalErrorDetails } from "../../shared/lib/error-log";
 import { isProjectExplainQuestion } from "./project-diagram-context";
+import {
+  createAIAnswerLedgerEntry,
+  getLatestSuccessfulAIAnswer,
+  markAIAnswerLedgerSaved,
+  markAIAnswerLedgerStreamedValidSaveFailed,
+  type LatestSuccessfulAnswer,
+} from "./ai-answer-ledger.service";
+import {
+  routeAIAnswerSessionContext,
+  type SessionContextRouterDecision,
+} from "./session-context-router.service";
+import {
+  classifyManualQueryType,
+  getCodeIntentSuppressedReason,
+  isShortFollowupCommand,
+} from "./short-followup";
 
 const ai = new OpenRouter({
   apiKey: process.env.OPENROUTER_API_KEY || "",
@@ -1212,6 +1228,38 @@ async function loadLiveAnswerHistoryMessages(sessionId: string): Promise<
     .filter((entry) => entry.answer.trim().length > 0);
 }
 
+function latestSuccessfulAnswerFromBackendMemory(input: {
+  answerLedger: AnswerLedger;
+  history: ReturnType<typeof toAnswerHistory>;
+}): LatestSuccessfulAnswer | null {
+  const latestLedgerAnswer = input.answerLedger.answers.at(-1);
+  if (latestLedgerAnswer) {
+    const matched = input.history.find((entry) => entry.id === latestLedgerAnswer.answerId);
+    if (matched) {
+      return {
+        id: matched.id,
+        question: matched.question,
+        answer: matched.answer,
+        topic: matched.topic,
+        createdAt: new Date(matched.timestamp),
+        codeBlocks: matched.codeBlocks,
+        source: "redis_ledger",
+      };
+    }
+  }
+  const latestHistory = input.history.at(-1);
+  if (!latestHistory) return null;
+  return {
+    id: latestHistory.id,
+    question: latestHistory.question,
+    answer: latestHistory.answer,
+    topic: latestHistory.topic,
+    createdAt: new Date(latestHistory.timestamp),
+    codeBlocks: latestHistory.codeBlocks,
+    source: "transcript_history",
+  };
+}
+
 /**
  * Maps a session language string to a Prisma Language enum value.
  */
@@ -2225,6 +2273,18 @@ function processAIStream(
                   question,
                   reasons: validation.reasons,
                 });
+                if (!isRegenerate) {
+                  await createAIAnswerLedgerEntry({
+                    sessionId,
+                    question,
+                    answerText: answer,
+                    intent: answerValidationContext?.requestKind || "skipped",
+                    topic: deriveTopicFromAnyText(`${question} ${answer}`),
+                    confidence: 0,
+                    answerStatus: SessionAIAnswerStatus.SKIPPED,
+                    failureReason: validation.reasons.join("; "),
+                  }).catch((e) => console.error("create skipped AI answer ledger Error:", e));
+                }
                 continue;
               }
               const pairSnapshotId =
@@ -2234,8 +2294,27 @@ function processAIStream(
                     ? crypto.randomUUID()
                     : undefined;
               const pairMessageId = crypto.randomUUID();
+              let qaId: string | undefined;
+              let appendFailureReason: string | null = null;
+              const ledgerEntry = !isRegenerate
+                ? await createAIAnswerLedgerEntry({
+                    sessionId,
+                    question,
+                    answerText: answer,
+                    intent: answerValidationContext?.requestKind || "ai_answer",
+                    topic:
+                      orchestration?.questionMeta.topic ||
+                      deriveTopicFromAnyText(`${question} ${answer}`),
+                    confidence: validation.trust === "strong" ? 0.9 : 0.55,
+                    answerStatus: SessionAIAnswerStatus.STREAMED,
+                    messageId: pairMessageId,
+                  }).catch((e) => {
+                    console.error("create streamed AI answer ledger Error:", e);
+                    return undefined;
+                  })
+                : undefined;
               if (!isRegenerate) {
-                await qaService
+                const qa = await qaService
                   .createQA({
                     messageId: pairMessageId,
                     userId: session.userId,
@@ -2246,7 +2325,11 @@ function processAIStream(
                     language: mapLanguage(session.language),
                     industry: mapIndustry(session.jobDescription),
                   })
-                  .catch((e) => console.error("Auto-save QA Error:", e));
+                  .catch((e) => {
+                    console.error("Auto-save QA Error:", e);
+                    return undefined;
+                  });
+                qaId = qa?.id;
               }
 
               if (pairSnapshotId && contextForCall && targetModel && !isRegenerate) {
@@ -2278,7 +2361,27 @@ function processAIStream(
                   undefined,
                   pairSnapshotId,
                   pairMessageId,
-                ).catch((e) => console.error("appendMessage Error:", e));
+                ).catch((e) => {
+                  appendFailureReason = e instanceof Error ? e.message : String(e);
+                  console.error("appendMessage Error:", e);
+                  return undefined;
+                });
+                if (ledgerEntry?.id) {
+                  if (appendResult?.saved) {
+                    await markAIAnswerLedgerSaved({
+                      id: ledgerEntry.id,
+                      messageId: appendResult.messageId || pairMessageId,
+                      qaId,
+                    }).catch((e) => console.error("mark AI answer ledger saved Error:", e));
+                  } else {
+                    await markAIAnswerLedgerStreamedValidSaveFailed({
+                      id: ledgerEntry.id,
+                      failureReason:
+                        appendFailureReason ||
+                        "valid streamed answer could not be persisted as an answer card",
+                    }).catch((e) => console.error("mark AI answer ledger save failed Error:", e));
+                  }
+                }
                 if (appendResult && orchestration && validation.updateMemory) {
                   const topicTitle =
                     orchestration.questionMeta.topic ||
@@ -2312,7 +2415,7 @@ function processAIStream(
               }
               if (validation.updateMemory) {
                 const answerId =
-                  pairSnapshotId || snapshotId || crypto.randomUUID();
+                  pairSnapshotId || snapshotId || pairMessageId;
                 await recordAnswerInLedgers({
                   sessionId,
                   answerId,
@@ -2654,20 +2757,37 @@ export async function getAIAnswer(
   let sanitizedLiveRequest: SanitizedLiveRequest | undefined;
   let sessionStateV3: SessionStateV3 | undefined;
   let routedAnswerContext: RoutedAnswerContext | undefined;
+  let latestSuccessfulAnswer: LatestSuccessfulAnswer | null = null;
+  let routerDecision: SessionContextRouterDecision | undefined;
   const contextBuildStartedAt = Date.now();
   let detection =
     !isRegenerate && liveContextMetadata?.activeQuestionDetection
       ? liveContextMetadata.activeQuestionDetection
       : undefined;
   let metadataSanitization: LiveAnswerMetadataSanitization | undefined;
+  const liveHistoryPromise = loadLiveAnswerHistoryMessages(id).catch((error) => {
+    console.warn("[AI Answer Debug] failed loading live transcript chunk history", {
+      sessionId: id,
+      error,
+    });
+    return [];
+  });
 
   if (!isRegenerate) {
-    const [initialIntentLedger, initialAnswerLedger] = await Promise.all([
+    const [initialIntentLedger, initialAnswerLedger, initialLatestSuccessfulAnswer] = await Promise.all([
       readIntentLedger(id),
       readAnswerLedger(id),
+      getLatestSuccessfulAIAnswer(id).catch((error) => {
+        console.warn("[AI Answer] latest successful answer lookup failed", {
+          sessionId: id,
+          error,
+        });
+        return null;
+      }),
     ]);
     intentLedger = initialIntentLedger;
     answerLedger = initialAnswerLedger;
+    latestSuccessfulAnswer = initialLatestSuccessfulAnswer;
     if (intentLedger.intents.length === 0 && answerLedger.answers.length === 0) {
       const rebuiltLedgers = await rebuildLedgersFromDurableState(id).catch((error) => {
         console.warn("[AI Answer] durable ledger rebuild failed", { sessionId: id, error });
@@ -2747,6 +2867,71 @@ export async function getAIAnswer(
   }
 
   finalTranscript = normalizeTranscriptForQuestionDetection(finalTranscript);
+  if (!isRegenerate && transcriptEvidence) {
+    const liveHistoryMessagesForRouter = await liveHistoryPromise;
+    const historyForRouter = toAnswerHistory(
+      liveHistoryMessagesForRouter.length > 0
+        ? liveHistoryMessagesForRouter
+        : session.messages,
+    );
+    latestSuccessfulAnswer =
+      latestSuccessfulAnswer ||
+      latestSuccessfulAnswerFromBackendMemory({
+        answerLedger,
+        history: historyForRouter,
+      });
+    routerDecision = routeAIAnswerSessionContext({
+      rawInput: transcript,
+      normalizedInput: finalTranscript,
+      isCustomQuery,
+      metadata: liveContextMetadata,
+      sanitizedRequest: sanitizedLiveRequest,
+      transcriptEvidence,
+      history: historyForRouter,
+      latestSuccessfulAnswer,
+    });
+    if (routerDecision.shortFollowupDetected) {
+      finalTranscript = routerDecision.targetQuestion || finalTranscript;
+      if (routerDecision.boundTarget) {
+        liveContextMetadata = {
+          ...(liveContextMetadata || {}),
+          previousAiAnswer: routerDecision.boundTarget.answer,
+          previousCodeBlocks:
+            routerDecision.boundTarget.codeBlocks.length > 0
+              ? routerDecision.boundTarget.codeBlocks
+              : liveContextMetadata?.previousCodeBlocks,
+        };
+      }
+    }
+    console.log("[AI Answer][SessionRouter]", {
+      sessionId: id,
+      rawInput: transcript,
+      normalizedInput: finalTranscript,
+      latestTranscriptQuestion: routerDecision.latestTranscriptQuestion,
+      latestSuccessfulAnswerId: latestSuccessfulAnswer?.id || null,
+      latestSuccessfulAnswerQuestion: latestSuccessfulAnswer?.question || null,
+      selectedAnswerId: liveContextMetadata?.selectedAnswerId || null,
+      shortFollowupDetected: routerDecision.shortFollowupDetected,
+      routerRequestType: routerDecision.requestType,
+      bindingSource: routerDecision.bindingSource,
+      finalTargetQuestion: routerDecision.targetQuestion,
+      codeIntentDetected: routerDecision.codeIntentDetected,
+      codeIntentSuppressedReason: routerDecision.codeIntentSuppressedReason,
+      contextIncluded: {
+        resume: routerDecision.shouldUseResume,
+        projects: routerDecision.shouldUseProjects,
+        previousAnswer: routerDecision.shouldUsePreviousAnswer,
+        transcriptWindow: routerDecision.shouldUseTranscriptWindow,
+        codeMemory: routerDecision.shouldUseCodeMemory,
+      },
+      manualQueryType: routerDecision.manualQueryType,
+      segmentation: routerDecision.segmentation,
+      oldQuestionMergeBlocked: routerDecision.oldQuestionMergeBlocked,
+      finalPromptPreview: routerDecision.targetQuestion.slice(0, 240),
+      reason: routerDecision.reason,
+      confidence: routerDecision.confidence,
+    });
+  }
   if (!isRegenerate && sanitizedLiveRequest) {
     const storedSessionState = await readSessionStateV3(id);
     const requestSessionState =
@@ -2775,14 +2960,6 @@ export async function getAIAnswer(
       hasDocument: Boolean(session.documentId),
     });
   }
-  const liveHistoryPromise = loadLiveAnswerHistoryMessages(id).catch((error) => {
-    console.warn("[AI Answer Debug] failed loading live transcript chunk history", {
-      sessionId: id,
-      error,
-    });
-    return [];
-  });
-
   if (isRegenerate && snapshotId) {
     const snapshot = await prisma.answerGenerationSnapshot.findUnique({
       where: { id: snapshotId },
@@ -2943,6 +3120,7 @@ export async function getAIAnswer(
     const referencedTarget = detection?.referencedHistoryTurnId
       ? history.find((h) => h.id === detection.referencedHistoryTurnId) || null
       : null;
+    const routerBoundTarget = routerDecision?.boundTarget || null;
     const topicChanged = !!detection?.topicChanged;
     const aiDecisionTarget = aiDecision.targetAnswerId
       ? history.find((h) => h.id === aiDecision.targetAnswerId) || null
@@ -2999,6 +3177,8 @@ export async function getAIAnswer(
       ? followup.target
       : !shouldUseFollowupContext || effectiveTopicChanged
       ? null
+      : routerBoundTarget
+      ? routerBoundTarget
       : aiDecisionAuthoritative && aiDecisionTarget
       ? aiDecisionTarget
       : aiDecisionLatestCodeTarget
@@ -3107,6 +3287,10 @@ export async function getAIAnswer(
     const followupBindingSource =
       strictSelectedFollowup && selectedTargetForRequest
         ? "selected_answer"
+        : routerDecision?.bindingSource === "latest_successful_answer" && selectedTargetForRequest
+          ? "latest_successful_answer"
+        : routerDecision?.bindingSource === "transcript_latest_question"
+          ? "transcript_latest_question"
         : selectedTargetForRequest
           ? "history_fallback"
           : "none";
@@ -3170,7 +3354,12 @@ export async function getAIAnswer(
           history: contextForCall?.history || "",
         };
     const includeHistoryMemory = !routedAnswerContext || routedAnswerContext.includeHistory;
-    const recentQaMemorySummary = includeHistoryMemory ? compactRecentQaMemory(history) : "";
+    // When the topic has definitively changed, wipe cross-topic Q&A memory to
+    // prevent old answers from leaking into the new question's context.
+    const recentQaMemorySummary =
+      includeHistoryMemory && !effectiveTopicChanged
+        ? compactRecentQaMemory(history)
+        : "";
     const candidateProfileDigest = buildCandidateProfileDigest({
       resumeDigest: routedRuntimeContext.resume,
       projectDigest: routedRuntimeContext.projects,
@@ -3208,6 +3397,7 @@ export async function getAIAnswer(
           ? routedRuntimeContext.document
           : "",
       historySummary:
+        !effectiveTopicChanged &&
         routedRuntimeContext.history &&
         routedRuntimeContext.history !== "No previous interactions in this session."
           ? routedRuntimeContext.history
@@ -3216,8 +3406,8 @@ export async function getAIAnswer(
         sessionStateMemorySummary,
         ...ragRetrieval.evidence.slice(0, 5),
         recentQaMemorySummary,
-        includeHistoryMemory ? composerMemorySummary : "",
-        includeHistoryMemory ? memorySummary : "",
+        includeHistoryMemory && !effectiveTopicChanged ? composerMemorySummary : "",
+        includeHistoryMemory && !effectiveTopicChanged ? memorySummary : "",
       ].filter(Boolean).join("\n"),
       instructions:
         contextForCall?.instructions && contextForCall.instructions !== "None."
@@ -3244,6 +3434,19 @@ export async function getAIAnswer(
         : undefined;
     const userMessage = buildActiveTaskV3({
       mode: isRegenerate ? "regenerate_answer" : isCustomQuery ? "manual_query" : "live_ai_answer",
+      targetQuestion: routerDecision?.targetQuestion || effectiveQuestionForPolicy,
+      boundPreviousAnswer: selectedTargetForRequest
+        ? {
+            answerId: selectedTargetForRequest.id,
+            question: selectedTargetForRequest.question,
+            answer: selectedTargetForRequest.answer,
+            topic: selectedTargetForRequest.topic,
+          }
+        : undefined,
+      evidenceOnlyTranscript:
+        transcriptEvidence?.text ||
+        transcriptEvidence?.recentTranscriptContext ||
+        "",
       transcriptEvidence:
         transcriptEvidence?.text ||
         compactTranscriptExcerpt({
@@ -3310,6 +3513,37 @@ export async function getAIAnswer(
         selectedAnswerIgnoredReason: followup.selectedAnswerIgnoredReason || null,
         previousAiAnswerIgnoredReason,
         answerMemoryCount: history.length,
+        latestTranscriptQuestion:
+          routerDecision?.latestTranscriptQuestion || null,
+        latestSuccessfulAnswerId: latestSuccessfulAnswer?.id || null,
+        latestSuccessfulAnswerQuestion:
+          latestSuccessfulAnswer?.question || null,
+        shortFollowupDetected:
+          routerDecision?.shortFollowupDetected ||
+          isShortFollowupCommand(effectiveQuestionForPolicy),
+        routerRequestType: routerDecision?.requestType || null,
+        bindingSource: routerDecision?.bindingSource || followupBindingSource,
+        finalTargetQuestion:
+          routerDecision?.targetQuestion || effectiveQuestionForPolicy,
+        codeIntentDetected:
+          routerDecision?.codeIntentDetected ||
+          (policy.answerIntent === "code_generation"),
+        codeIntentSuppressedReason:
+          routerDecision?.codeIntentSuppressedReason ||
+          getCodeIntentSuppressedReason(effectiveQuestionForPolicy),
+        contextIncluded: routedAnswerContext
+          ? {
+              resume: routedAnswerContext.includeResume,
+              projects: routedAnswerContext.includeProjects,
+              history: routedAnswerContext.includeHistory,
+              codeMemory: routedAnswerContext.includeCodeMemory,
+              documents: routedAnswerContext.includeDocuments,
+            }
+          : null,
+        oldQuestionMergeBlocked:
+          routerDecision?.oldQuestionMergeBlocked || false,
+        finalPromptQuestion: effectiveQuestionForPolicy,
+        finalPromptPreview: userMessage.slice(0, 500),
         selectedFollowupTargetId: selectedTargetForRequest?.id || null,
         followupTargetId: selectedTargetForRequest?.id || null,
         selectedFollowupTopic: selectedTargetForRequest?.topic || null,

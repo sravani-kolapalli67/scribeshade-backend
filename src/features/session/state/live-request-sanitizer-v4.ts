@@ -7,6 +7,11 @@ import type {
   LiveRequestKind,
   SanitizedLiveRequest,
 } from "../session-intelligence.types";
+import {
+  getCodeIntentSuppressedReason,
+  hasExplicitCodeRequest,
+  isShortFollowupCommand,
+} from "../short-followup";
 
 const CODE_FOLLOWUP_RE =
   /\b(this code|the code|previous code|code you wrote|that code|this function|that function|the query|that query|same query|same code|explain (?:it|this|that)|optimi[sz]e|debug|edge cases?|test it|lag|row_number|window function)\b/i;
@@ -21,11 +26,11 @@ const PROVISIONAL_RE =
 const TOPIC_CONTINUATION_RE =
   /^(?:(?:and|yeah)[\s,.]+){0,2}what about [a-z0-9 .+#/_-]{2,50}(?: then)?\??$/i;
 const FRESH_CODE_GENERATION_RE =
-  /\b(write|implement|create|build|develop|show|give|provide)\b.{0,80}\b(code|snippet|component|hook|function|class|query|api|example)\b/i;
+  /\b(write|implement|create|build|develop|show|give|provide)\b.{0,80}\b(code|snippet|component|hook|function|class|query|api|algorithm|program)\b/i;
 const FRAMEWORK_CODE_RE =
   /\b(?:code\s+in\s+(?:react|vue|angular|node(?:\.js)?|python|javascript|typescript|java|sql|pyspark)|(?:react|vue|angular|node(?:\.js)?|python|javascript|typescript|java|sql|pyspark)\s+(?:code|component|hook|function|snippet|query))\b/i;
 const REACT_CODE_CONCEPT_RE =
-  /(?=.*\b(write|implement|create|build|code|component|example|snippet)\b)(?=.*\b(useeffect|usecontext|context api|react context)\b)/i;
+  /(?=.*\b(write|implement|create|build|code|component|snippet|program)\b)(?=.*\b(useeffect|usecontext|context api|react context)\b)/i;
 const URGENCY_RE =
   /\b(quickly|fast|immediately|right now|urgent|asap|within \d+\s*(?:minutes?|hours?|seconds?))\b/i;
 const SKEPTICAL_RE =
@@ -56,7 +61,9 @@ function normalizeSpaces(text: string): string {
 }
 
 function isCodeGenerationRequest(text: string): boolean {
+  if (getCodeIntentSuppressedReason(text)) return false;
   return (
+    hasExplicitCodeRequest(text) ||
     FRESH_CODE_GENERATION_RE.test(text) ||
     FRAMEWORK_CODE_RE.test(text) ||
     REACT_CODE_CONCEPT_RE.test(text)
@@ -238,6 +245,7 @@ export function sanitizeLiveRequestContextV4(input: {
     evidenceText;
   const scenarioDetected = input.transcriptEvidence?.scenarioDetected === true;
   const codeGeneration = isCodeGenerationRequest(classificationText);
+  const shortFollowupDetected = isShortFollowupCommand(classificationText);
   const codeFollowup = CODE_FOLLOWUP_RE.test(classificationText);
   const challengeDetected = CHALLENGE_RE.test(classificationText);
   const projectQuestion = PROJECT_RE.test(classificationText);
@@ -257,7 +265,9 @@ export function sanitizeLiveRequestContextV4(input: {
     Boolean(metadata.selectedAnswerId?.trim());
   const trueFollowup =
     metadata.activeQuestionDetection?.isFollowUp === true ||
-    TOPIC_CONTINUATION_RE.test(latestQuestionHint);
+    TOPIC_CONTINUATION_RE.test(latestQuestionHint) ||
+    shortFollowupDetected ||
+    metadata.manualQueryType === "short_followup";
   const interviewerTone = inferInterviewerTone({
     text: classificationText,
     scenarioDetected,

@@ -33,7 +33,7 @@ const terminalStatuses: SessionStatus[] = [
   SessionStatus.CREDIT_EXHAUSTED,
 ];
 
-const extractedQuestionSchema = z.object({
+export const extractedQuestionSchema = z.object({
   rawDetectedQuestion: z.string().min(1),
   normalizedQuestion: z.string().min(1),
   visibilityClass: z.nativeEnum(QuestionBankVisibilityClass),
@@ -41,8 +41,8 @@ const extractedQuestionSchema = z.object({
   questionType: z.nativeEnum(QuestionBankQuestionType),
   difficulty: z.nativeEnum(QuestionBankDifficulty),
   complexityScore: z.number().int().min(0).max(100),
-  technologies: z.array(z.string()).max(12),
-  topics: z.array(z.string()).max(12),
+  technologies: z.array(z.string()).max(12).default([]),
+  topics: z.array(z.string()).max(12).default([]),
   industry: z.string().optional(),
   roleGuess: z.string().optional(),
   companyGuess: z.string().optional(),
@@ -50,7 +50,7 @@ const extractedQuestionSchema = z.object({
   rejectReason: z.string().optional(),
 });
 
-const extractionResponseSchema = z.object({
+export const extractionResponseSchema = z.object({
   questions: z.array(extractedQuestionSchema).max(30),
 });
 
@@ -114,19 +114,26 @@ function buildExtractionPrompt(input: {
 }): string {
   return [
     "Extract privacy-safe interview questions for ScribeShade Question Bank 2.0.",
-    "Return only JSON with a top-level questions array.",
-    "Use the enum values exactly as provided.",
+    "Return ONLY a JSON object with a single top-level key \"questions\" whose value is an array.",
+    "Use the enum values exactly as listed below — do not invent other values.",
     "Reject meeting noise, personal eligibility, salary, notice-period, relocation, camera/audio checks, and candidate-specific resume/project context.",
     "Generalize only when the question can be made candidate-safe without changing its meaning.",
     "",
-    "Allowed visibilityClass values:",
-    Object.values(QuestionBankVisibilityClass).join(", "),
-    "Allowed privacyRisk values:",
-    Object.values(QuestionBankPrivacyRisk).join(", "),
-    "Allowed questionType values:",
-    Object.values(QuestionBankQuestionType).join(", "),
-    "Allowed difficulty values:",
-    Object.values(QuestionBankDifficulty).join(", "),
+    "Each object in the questions array MUST contain exactly these fields (no other field names are allowed):",
+    "  rawDetectedQuestion   (string)  — verbatim question text as detected in the source",
+    "  normalizedQuestion    (string)  — cleaned, candidate-safe, generalised version",
+    "  visibilityClass       (string)  — one of: " + Object.values(QuestionBankVisibilityClass).join(", "),
+    "  privacyRisk           (string)  — one of: " + Object.values(QuestionBankPrivacyRisk).join(", "),
+    "  questionType          (string)  — one of: " + Object.values(QuestionBankQuestionType).join(", "),
+    "  difficulty            (string)  — one of: " + Object.values(QuestionBankDifficulty).join(", "),
+    "  complexityScore       (integer 0–100) — technical complexity",
+    "  technologies          (array of strings, max 12) — specific technologies; use [] if none",
+    "  topics                (array of strings, max 12) — conceptual topics; use [] if none",
+    "  industry              (string, optional) — inferred industry; omit if unknown",
+    "  roleGuess             (string, optional) — inferred role title; omit if unknown",
+    "  companyGuess          (string, optional) — guessed company; omit if not identifiable",
+    "  confidence            (number 0–1) — your confidence this is a real interview question",
+    "  rejectReason          (string, optional) — reason not to publish; omit if publishable",
     "",
     `Company hint: ${input.companyName}`,
     `Role/JD hint: ${input.jobDescription}`,
@@ -220,19 +227,8 @@ async function callExtractionModel(input: {
 
   const result = ai.callModel({
     model: EXTRACTION_MODEL,
-    input: [
-      {
-        role: "system",
-        type: "message",
-        content:
-          "You extract anonymized interview questions. You must return valid JSON only.",
-      },
-      {
-        role: "user",
-        type: "message",
-        content: buildExtractionPrompt(input),
-      },
-    ],
+    instructions: "You extract anonymized interview questions. You must return valid JSON only.",
+    input: buildExtractionPrompt(input),
     text: {
       format: { type: "json_object" },
     },
@@ -243,7 +239,20 @@ async function callExtractionModel(input: {
     throw new Error("AI extraction returned empty content");
   }
 
-  const parsed = extractionResponseSchema.parse(extractJsonObject(content));
+  const rawParsed = extractJsonObject(content);
+  const questionsRaw = Array.isArray((rawParsed as Record<string, unknown>)?.questions)
+    ? (rawParsed as Record<string, unknown>).questions
+    : null;
+  console.info("[question-bank-extraction] raw extraction shape", {
+    topLevelKeys: rawParsed && typeof rawParsed === "object" ? Object.keys(rawParsed as object) : "not-an-object",
+    questionCount: Array.isArray(questionsRaw) ? questionsRaw.length : "not-an-array",
+    firstQuestionKeys:
+      Array.isArray(questionsRaw) && questionsRaw.length > 0 && typeof questionsRaw[0] === "object" && questionsRaw[0]
+        ? Object.keys(questionsRaw[0] as object)
+        : "none",
+  });
+
+  const parsed = extractionResponseSchema.parse(rawParsed);
   return parsed.questions;
 }
 

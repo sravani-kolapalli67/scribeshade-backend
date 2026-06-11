@@ -7,6 +7,7 @@ import {
   toAnswerHistory,
   shouldSuppressExperienceForQuestion,
   classifyConversationIntent,
+  deriveTopicFromAnyText,
   isFollowupConversationIntent,
   normalizeTranscriptForQuestionDetection,
 } from "./answer-quality";
@@ -24,6 +25,12 @@ test("guards polluted joined question without over-truncating multipart", () => 
   });
   assert.equal(multi.questionPollutionDetected, false);
   assert.match(multi.resolvedCurrentQuestion, /ACID/i);
+});
+
+test("React hook names derive react topic", () => {
+  for (const hook of ["useEffect", "useRef", "useState", "useMemo", "useCallback"]) {
+    assert.equal(deriveTopicFromAnyText(`What is ${hook}?`), "react");
+  }
 });
 
 test("reconstructs weak backend deictic followup from transcript window", () => {
@@ -330,7 +337,7 @@ test("fresh React code generation does not bind stale previous React history", (
     selectedAnswerId: "old-react",
   });
 
-  assert.equal(classifyConversationIntent("Write a code in React."), "NEW_QUESTION");
+  assert.equal(classifyConversationIntent("Write a code in React."), "EXPLAIN_CODE");
   assert.equal(target.target, null);
   assert.equal(target.source, "none");
   assert.equal(target.isExplicitFollowupReference, false);

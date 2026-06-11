@@ -59,6 +59,14 @@ export type AnswerPlan = {
 
 export type ActiveTaskV3 = {
   mode: "live_ai_answer" | "manual_query" | "regenerate_answer";
+  targetQuestion?: string;
+  boundPreviousAnswer?: {
+    answerId?: string;
+    question?: string;
+    answer: string;
+    topic?: string;
+  };
+  evidenceOnlyTranscript?: string;
   transcriptEvidence?: string;
   recentTranscriptContext?: string;
   clickRawTranscript?: string;
@@ -236,8 +244,8 @@ const MARKDOWN_ANSWER_CONTRACT_LINES = [
   "- Use proper Markdown list syntax only: one bullet per line. Never use inline bullets like '• a • b • c'.",
   "- For sub-points, use nested bullets with two-space indentation: '  - '.",
   "- Put one blank line between top-level project bullets or major answer groups. Do not add extra blank lines inside nested bullet groups.",
-  "- Use short bold labels inside bullets, e.g. **Main Answer:**, **Direct answer:**, **Problem:**, **Fix:**, **Impact:**, **Example:**.",
-  "- Bold short labels and high-signal keywords only: project names, business domains, exact metrics/numbers, role ownership, and major outcomes. Never bold full sentences or full paragraphs.",
+  "- Bold specific facts directly inside bullets: company names, role titles, tech names, years of experience, and exact metrics — e.g. **5.9 years of experience**, **Azure Data Factory**, **1TB+ daily data**, **40% improvement**. Do NOT use generic intro labels like **Direct answer:**, **Context:**, or **Next point:**: start each bullet with the actual content.",
+  "- Bold high-signal keywords only: project names, business domains, exact metrics/numbers, role ownership, and major outcomes. Never bold full sentences or full paragraphs.",
   "- Use inline code for explicit tools, APIs, commands, file paths, database objects, and technical keywords, e.g. `Databricks`, `Azure Data Factory`, `PySpark`, `React`.",
   "- Highlight exact numbers and measurable values with bold, e.g. **438 days**, **1TB+**, **40%**, but never create numbers that are not in context.",
   "- Use fenced code blocks only when the question asks for code, syntax, query, implementation, debugging, optimization, or an ASCII/text architecture diagram.",
@@ -274,6 +282,8 @@ function buildSharedBehaviorRules(context: any): string[] {
     "- Answer directly first, then add only the context needed. Short answer first; explanation second; technical depth only when useful.",
     "- Use natural spoken rhythm with varied sentence length. Avoid robotic phrasing, theory lectures, resume dumping, motivational speeches, buzzwords, and overly polished corporate language.",
     "- Do not explain like a tutor. Answer like the candidate is speaking about work they did: what problem existed, what I did, how it worked, and what improved.",
+    "- When CANDIDATE_PROFILE contains resume data, lead with it aggressively — use exact company names, role titles, years of experience, tech stack, and metrics from the profile in every relevant bullet.",
+    "- NEVER write fallback phrases like 'my specific background details aren't available', 'context not available', 'I don't have access to your resume', or 'while my background isn't immediately clear'. If candidate profile is present, use it. If unavailable, answer confidently in first person as a strong candidate in this role would.",
     "- Inject resume, project, document, company, job, or memory details only when they help answer the exact active question.",
     "- Candidate speech may contain the question they want help answering. Treat candidate-spoken question-like text as a valid AI-answer request.",
     "- Never ask clarifying questions. If input is fragmented, infer the most likely interview ask from the active input plus runtime context and answer it directly.",
@@ -307,6 +317,7 @@ export function buildSystemMessage(context: any): string {
     "- Never invent candidate-specific experience, company names, project names, tools, exact numbers, certifications, or metrics.",
     "- Use general knowledge only for concepts, implementation reasoning, or examples that are not claimed as the candidate's personal experience.",
     "- Preserve numeric precision from runtime context exactly.",
+    "- CANDIDATE PROFILE USAGE: When CANDIDATE_PROFILE is present in runtime context, extract and use the exact facts it contains — years of experience, company names, technologies, metrics, education — in every answer about the candidate's background. This is not optional; it is the primary evidence for personal experience questions.",
     "",
     "TRANSCRIPT CORRECTION",
     "- The interview transcript may contain speech-to-text recognition errors. Correct obvious intent silently before answering.",
@@ -337,6 +348,14 @@ export function buildSystemMessage(context: any): string {
     "- Project/experience answers: one lead line plus structured bullets, rich enough to speak in under 60 seconds.",
     "- Scenario/system-design answers: 2-4 short sections with practical diagnosis, action, trade-offs, and recommendation.",
     "- Multi-question mode: use the short end of the budget for every answer.",
+    "",
+    "ANSWER QUALITY RULES",
+    "- NEVER open with 'sure', 'great question', 'certainly', 'of course', 'absolutely', or any other filler preamble. Start immediately with the answer.",
+    "- For technical/conceptual questions: lead with a direct 1-sentence answer, then elaborate with WHY and TRADE-OFFS.",
+    "- For behavioral questions: use explicit STAR structure. Label each section: **Situation:** / **Task:** / **Action:** / **Result:**",
+    "- For coding/algorithm questions: always include working code with inline comments on key lines, followed by time and space complexity.",
+    "- Every technical answer must include a concrete real-world use-case example in at most one sentence.",
+    "- For system design: open with a 2-sentence high-level approach, then drill into components, data flow, and trade-offs.",
     "",
     MARKDOWN_ANSWER_CONTRACT,
     "",
@@ -533,6 +552,9 @@ function buildActiveTaskInstruction(input: ActiveTaskV3): string[] {
         : "Infer the clean interview question(s) from Transcript Evidence. Then answer as the candidate.",
     "If multiple independent questions exist, separate with ===NEXT_QUESTION===.",
     "Output only **QUESTION:** / **ANSWER:** blocks.",
+    "Use TARGET_QUESTION as the only question to answer.",
+    "Use BOUND_PREVIOUS_ANSWER only for follow-up continuity; do not merge it into TARGET_QUESTION.",
+    "Use EVIDENCE_ONLY_TRANSCRIPT only as supporting evidence, never as a merged question.",
     "Do not use placeholders like [Candidate Name]. If a name is unavailable, omit the name.",
     `If the active input explicitly asks for code, syntax, query, implementation, debugging, or optimization, provide a working implementation in ${input.language}.`,
     "If it does not ask for code, do not add code just because the role is technical.",
@@ -595,6 +617,44 @@ export function buildActiveTaskV3(input: ActiveTaskV3): string {
   if (input.answerClickMode) {
     lines.push(`Answer Click Mode: ${clipTokens(input.answerClickMode, 20)}`);
   }
+
+  lines.push(
+    "",
+    "TARGET_QUESTION:",
+    clipTokens(
+      input.targetQuestion ||
+        input.manualRequest ||
+        input.originalQuestion ||
+        input.currentQuestionHint ||
+        "",
+      220,
+    ) || "none",
+    "",
+    "BOUND_PREVIOUS_ANSWER:",
+    input.boundPreviousAnswer?.answer?.trim()
+      ? [
+          input.boundPreviousAnswer.answerId
+            ? `Answer ID: ${clipTokens(input.boundPreviousAnswer.answerId, 30)}`
+            : "",
+          input.boundPreviousAnswer.topic
+            ? `Topic: ${clipTokens(input.boundPreviousAnswer.topic, 30)}`
+            : "",
+          input.boundPreviousAnswer.question
+            ? `Question: ${clipTokens(input.boundPreviousAnswer.question, 160)}`
+            : "",
+          `Answer: ${clipMultilineTokens(input.boundPreviousAnswer.answer, 420)}`,
+        ].filter(Boolean).join("\n")
+      : "none",
+    "",
+    "EVIDENCE_ONLY_TRANSCRIPT:",
+    clipMultilineTokens(
+      input.evidenceOnlyTranscript ||
+        input.transcriptEvidence ||
+        input.recentTranscriptContext ||
+        "",
+      280,
+    ) || "none",
+  );
 
   if (input.mode === "manual_query") {
     lines.push(

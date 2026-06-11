@@ -19,7 +19,7 @@ test("classifies concept explanation and suppresses experience", () => {
   assert.equal(policy.experienceSuppressed, true);
   assert.equal(policy.policyBlock.includes("output_format: markdown_only_under_answer_marker"), false);
   assert.equal(policy.policyBlock.includes("candidate_voice_rule"), false);
-  assert.ok(policy.policyBlock.includes("**Core idea:**"));
+  assert.ok(policy.policyBlock.includes("- concept_policy: explain concept first"));
 });
 
 test("classifies code followup when previous code blocks exist", () => {
@@ -36,7 +36,7 @@ test("classifies code followup when previous code blocks exist", () => {
   assert.equal(policy.isCodeFollowup, true);
   assert.equal(policy.codeBlocksInjectedCount, 1);
   assert.ok(policy.codeContextBlock.includes("FOLLOW-UP CODE CONTEXT"));
-  assert.ok(policy.policyBlock.includes("**Referenced code:**"));
+  assert.ok(policy.policyBlock.includes("- followup_code_policy: prioritize referenced previous code context"));
 });
 
 test("fresh React code request overrides stale followup decision", () => {
@@ -72,6 +72,30 @@ test("fresh React Context API component request allows code generation", () => {
   assert.equal(
     classifyAnswerIntent({
       question: "Create a React component using useEffect and Context API.",
+      cieComplexity: "simple_atomic",
+    }),
+    "code_generation",
+  );
+});
+
+test("short example followup is not classified as code generation", () => {
+  assert.equal(
+    classifyAnswerIntent({
+      question: "example",
+      cieComplexity: "followup",
+    }),
+    "general_followup",
+  );
+  assert.equal(
+    classifyAnswerIntent({
+      question: "give me example",
+      cieComplexity: "followup",
+    }),
+    "general_followup",
+  );
+  assert.equal(
+    classifyAnswerIntent({
+      question: "write code for useEffect and useRef",
       cieComplexity: "simple_atomic",
     }),
     "code_generation",
@@ -160,7 +184,7 @@ test("classifies optimize code followup from natural phrase", () => {
   });
   assert.equal(policy.answerIntent, "code_optimization_followup");
   assert.equal(policy.isCodeFollowup, true);
-  assert.ok(policy.policyBlock.includes("**Edge case/performance:**"));
+  assert.ok(policy.policyBlock.includes("cover edge cases and performance inline"));
 });
 
 test("classifies PySpark row_number and lag questions as code followups", () => {
@@ -200,8 +224,8 @@ test("classifies years of experience as project experience", () => {
     question: "How many years of experience do you have?",
     metadata: { transcript: "How many years of experience do you have?" } as any,
   });
-  assert.ok(policy.policyBlock.includes("**Experience/project:**"));
-  assert.ok(policy.policyBlock.includes("**Impact:**"));
+  assert.ok(policy.policyBlock.includes("- years_rule: state exact years/work experience only if present"));
+  assert.ok(policy.policyBlock.includes("- include_resume_or_project_backed_examples: true"));
 });
 
 test("classifies Parakeet replay experience and Spark concept asks", () => {

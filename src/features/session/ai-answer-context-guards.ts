@@ -2,6 +2,10 @@ import type { AIAnswerLiveContextMetadata } from "./ai-answer.dto";
 import {
   sanitizeLiveRequestContextV4,
 } from "./state/live-request-sanitizer-v4";
+import {
+  getCodeIntentSuppressedReason,
+  hasExplicitCodeRequest,
+} from "./short-followup";
 import type {
   InterviewerTone,
   LiveRequestKind,
@@ -66,11 +70,11 @@ const SCENARIO_ASK_RE =
 const SCENARIO_FAILURE_RE =
   /\b(issue|problem|bug|failure|failed|fails|left|remaining|available|buying|purchase|orders?|negative|oversell|oversold|race condition|concurrent|high traffic|outage|incident|production issue)\b/i;
 const FRESH_CODE_GENERATION_RE =
-  /\b(write|implement|create|build|develop|show|give|provide)\b.{0,80}\b(code|snippet|component|hook|function|class|query|api|example)\b/i;
+  /\b(write|implement|create|build|develop|show|give|provide)\b.{0,80}\b(code|snippet|component|hook|function|class|query|api|algorithm|program)\b/i;
 const FRAMEWORK_CODE_RE =
   /\b(?:code\s+in\s+(?:react|vue|angular|node(?:\.js)?|python|javascript|typescript|java|sql|pyspark)|(?:react|vue|angular|node(?:\.js)?|python|javascript|typescript|java|sql|pyspark)\s+(?:code|component|hook|function|snippet|query))\b/i;
 const REACT_CODE_CONCEPT_RE =
-  /(?=.*\b(write|implement|create|build|code|component|example|snippet)\b)(?=.*\b(useeffect|usecontext|context api|react context)\b)/i;
+  /(?=.*\b(write|implement|create|build|code|component|snippet|program)\b)(?=.*\b(useeffect|usecontext|context api|react context)\b)/i;
 const FILLER_RE =
   /^(hi|hello|hey|okay|ok|yeah|yes|no|right|fine|hmm|um|uh|thanks|thank you|can you hear me|am i audible)$/i;
 const URGENCY_RE = /\b(quickly|fast|immediately|right now|urgent|asap|within \d+\s*(?:minutes?|hours?|seconds?))\b/i;
@@ -184,10 +188,12 @@ function isScenarioEvidenceText(text: string): boolean {
 export function isFreshCodeGenerationRequest(text: string): boolean {
   const normalized = normalizeSpaces(text);
   if (!normalized) return false;
+  if (getCodeIntentSuppressedReason(normalized)) return false;
   if (/\b(this code|the code|previous code|code you wrote|that code|above code)\b/i.test(normalized)) {
     return false;
   }
   return (
+    hasExplicitCodeRequest(normalized) ||
     FRESH_CODE_GENERATION_RE.test(normalized) ||
     FRAMEWORK_CODE_RE.test(normalized) ||
     REACT_CODE_CONCEPT_RE.test(normalized)

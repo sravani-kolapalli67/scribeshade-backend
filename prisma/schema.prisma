@@ -206,6 +206,14 @@ enum SessionAnswerRevisionSource {
   RESTORE
 }
 
+enum SessionAIAnswerStatus {
+  STREAMED
+  SAVED
+  SKIPPED
+  FAILED
+  STREAMED_VALID_SAVE_FAILED
+}
+
 
 
 model User {
@@ -397,6 +405,7 @@ model Session {
   questionBankSources QuestionBankSource[]
   questionBankExtractionRun QuestionBankExtractionRun?
   answerRevisions SessionAnswerRevision[]
+  aiAnswerLedger SessionAIAnswerLedger[]
 
   @@index([userId, createdAt(sort: Desc)])
   @@index([companyId])
@@ -434,6 +443,29 @@ model QA {
   @@index([sessionId])
   @@index([userId])
   @@index([isShared])
+}
+
+model SessionAIAnswerLedger {
+  id                    String                @id @default(uuid())
+  sessionId             String
+  session               Session               @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  question              String                @db.Text
+  answerText            String                @db.Text
+  topic                 String
+  intent                String
+  sourceTranscriptRange Json?
+  answerStatus          SessionAIAnswerStatus @default(STREAMED)
+  hasCode               Boolean               @default(false)
+  confidence            Float                 @default(0)
+  messageId             String?
+  qaId                  String?
+  failureReason         String?               @db.Text
+  createdAt             DateTime              @default(now())
+  updatedAt             DateTime              @updatedAt
+
+  @@index([sessionId, answerStatus, createdAt(sort: Desc)])
+  @@index([sessionId, createdAt(sort: Desc)])
+  @@index([messageId])
 }
 
 model SessionAnswerRevision {

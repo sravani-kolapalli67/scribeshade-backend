@@ -1,5 +1,6 @@
 import type { AIAnswerLiveContextMetadata } from "./ai-answer.dto";
 import { isFreshCodeGenerationRequest } from "./ai-answer-context-guards";
+import { isShortFollowupCommand } from "./short-followup";
 
 type FollowupTargetSource =
   | "selected_answer"
@@ -70,6 +71,10 @@ const DATA_PROCESSING_SCENARIO_RE =
   /(?=.*\b(1\s*tb|tb|s3|cluster size|nodes?|cores?|monitor(?:ing)?|throughput|daily data|fixed time window|process(?:ing)?)\b)(?=.*\b(how (?:would|will|do) you (?:define|decide|monitor|process|handle|tackle|solve|approach)|what (?:should|would|will|do) (?:be|you|we)|number of nodes|cluster size)\b)/i;
 const SQL_JOIN_CONCEPT_RE =
   /\b(inner join|left join|right join|full join|join count|output rows?|output records?|records? (?:will|would) (?:come|appear)|table1|table2)\b/i;
+// Control/demo speech uttered by the candidate while operating the app — must
+// never be treated as interview content.
+const CONTROL_SPEECH_RE =
+  /\b(click\s+ai\s+answer|clear\s+transcript|enable\s+automation|disable\s+automation|next\s+question|stop\s+recording|start\s+recording|open\s+overlay|close\s+overlay)\b/i;
 const INTERVIEW_INSTRUCTION_RE =
   /\b(answer this|give me an answer|how should i answer|what should i say|interviewer is asking|define this|explain this for interview)\b/i;
 const TECH_CONCEPT_RE =
@@ -192,8 +197,12 @@ export function classifyConversationIntent(question: string): ConversationIntent
   const n = normLoose(strippedQ);
   if (!n) return "UNKNOWN";
   if (FILLER_ONLY_RE.test(strippedQ)) return "UNKNOWN";
+  if (CONTROL_SPEECH_RE.test(strippedQ)) return "INTERVIEW_INSTRUCTION";
+  if (isShortFollowupCommand(strippedQ)) return "FOLLOW_UP";
   if (SCENARIO_SETUP_QUERY_RE.test(strippedQ) || DATA_PROCESSING_SCENARIO_RE.test(strippedQ)) return "SCENARIO_QUESTION";
-  if (isFreshCodeGenerationRequest(strippedQ)) return "NEW_QUESTION";
+  // Fresh code-generation requests ("write a function", "implement X") must be
+  // classified as EXPLAIN_CODE so the context router allocates a code budget.
+  if (isFreshCodeGenerationRequest(strippedQ)) return "EXPLAIN_CODE";
   if (CODE_REF_RE.test(strippedQ)) {
     if (DEBUG_FOLLOWUP_RE.test(strippedQ)) return "DEBUG_CODE";
     if (OPTIMIZE_FOLLOWUP_RE.test(strippedQ)) return "OPTIMIZE_CODE";
@@ -533,7 +542,7 @@ function deriveTopicFromText(text: string): string {
   const t = normLoose(text);
   if (/\b(mongoose|mongodb|mongo|aggregation|pipeline|nosql|collection|schema|event logs?|user events?)\b/.test(t)) return "mongodb";
   if (/\b(sql|postgres|postgresql|select|query|join|table|index)\b/.test(t)) return "sql";
-  if (/\b(react|jsx|hooks|component)\b/.test(t)) return "react";
+  if (/\b(react|jsx|hooks|hook|component|useeffect|useref|usestate|usememo|usecallback)\b/.test(t)) return "react";
   if (/\b(pyspark|spark|datalake|databricks|dataframe|row_number|row number|lag|lead|window function|collect_list|withcolumn)\b/.test(t)) return "pyspark";
   if (/\b(node|express|api|backend)\b/.test(t)) return "backend";
   return "general";
@@ -609,11 +618,12 @@ export function resolveFollowupTarget(input: {
   }
   const isExplicitFollowupReference =
     !!input.strictSelectedAnswer ||
+    isShortFollowupCommand(q) ||
     CODE_REF_RE.test(q) ||
     FOLLOWUP_RE.test(q) ||
     VAGUE_DEICTIC_RE.test(q) ||
     EXAMPLE_FOLLOWUP_RE.test(q);
-  const isVagueDeictic = VAGUE_DEICTIC_RE.test(q);
+  const isVagueDeictic = VAGUE_DEICTIC_RE.test(q) || isShortFollowupCommand(q);
   const isExampleFollowup = EXAMPLE_FOLLOWUP_RE.test(q);
   const isCorrectionFollowup = CORRECTION_FOLLOWUP_RE.test(q);
   const history = input.history;
@@ -842,12 +852,29 @@ export function buildEffectiveLiveContextMetadata(input: {
   const base = { ...(input.metadata || {}) };
   const codeContext = selectTargetCodeContext(input.selectedTarget);
   const wantsCodeFollowup = CODE_REF_RE.test(input.question);
+  const wantsAnswerFollowup =
+    wantsCodeFollowup ||
+    isShortFollowupCommand(input.question) ||
+    FOLLOWUP_RE.test(input.question) ||
+    VAGUE_DEICTIC_RE.test(input.question) ||
+    EXAMPLE_FOLLOWUP_RE.test(input.question);
 
   if (wantsCodeFollowup && codeContext.codeBlocks.length > 0) {
     return {
       ...base,
       previousAiAnswer: codeContext.previousAiAnswer,
       previousCodeBlocks: codeContext.codeBlocks,
+    };
+  }
+
+  if (wantsAnswerFollowup && input.selectedTarget?.answer?.trim()) {
+    return {
+      ...base,
+      previousAiAnswer: input.selectedTarget.answer,
+      previousCodeBlocks:
+        input.selectedTarget.codeBlocks.length > 0
+          ? input.selectedTarget.codeBlocks
+          : base.previousCodeBlocks,
     };
   }
 

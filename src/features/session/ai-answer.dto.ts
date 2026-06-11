@@ -5,13 +5,14 @@ import type { QuestionQualityResult } from "./question-quality.service";
 export const AI_ANSWER_LIMITS = {
   recentTranscriptWindowMax: 60,
   previousAiAnswerMaxChars: 3000,
-  previousAiAnswersMax: 2,
+  previousAiAnswersMax: 3,
   previousAiAnswerQuestionMaxChars: 500,
   previousCodeBlocksMax: 2,
   previousCodeBlockMaxChars: 1500,
   selectedAnswerQuestionMaxChars: 500,
   selectedAnswerTextMaxChars: 3000,
   selectedAnswerTopicMaxChars: 80,
+  latestAnswerIdMaxChars: 120,
 } as const;
 
 const speakerTypeSchema = z.enum([
@@ -31,6 +32,12 @@ const answerModeSchema = z.enum([
 ]);
 
 const sourcePlatformSchema = z.enum(["web", "tauri"]);
+const manualQueryTypeSchema = z.enum([
+  "full_question",
+  "short_followup",
+  "command",
+  "unknown",
+]);
 
 const answerClickModeSchema = z.enum([
   "answer_latest_unanswered",
@@ -121,11 +128,31 @@ export const aiAnswerRequestSchema = z.object({
     .string()
     .max(AI_ANSWER_LIMITS.selectedAnswerTopicMaxChars)
     .optional(),
+  latestAnswerId: z
+    .string()
+    .trim()
+    .min(1)
+    .max(AI_ANSWER_LIMITS.latestAnswerIdMaxChars)
+    .optional(),
+  latestAnswerQuestion: z
+    .string()
+    .max(AI_ANSWER_LIMITS.selectedAnswerQuestionMaxChars)
+    .optional(),
+  latestAnswerText: z
+    .string()
+    .max(AI_ANSWER_LIMITS.selectedAnswerTextMaxChars)
+    .optional(),
+  latestAnswerTopic: z
+    .string()
+    .max(AI_ANSWER_LIMITS.selectedAnswerTopicMaxChars)
+    .optional(),
   selectedIntentId: z.string().trim().min(1).max(120).optional(),
   selectedAnswerIntentId: z.string().trim().min(1).max(120).optional(),
   answerClickMode: answerClickModeSchema.optional(),
   answerMode: answerModeSchema.optional(),
   sourcePlatform: sourcePlatformSchema.optional(),
+  activeInterviewMode: z.string().trim().min(1).max(120).optional(),
+  manualQueryType: manualQueryTypeSchema.optional(),
   isCustomQuery: z.boolean().optional(),
   isRegenerate: z.boolean().optional(),
   regenerate: z.boolean().optional(),
@@ -221,6 +248,22 @@ export function normalizeAIAnswerRequestBody(
       typeof body.selectedAnswerTopic === "string"
         ? body.selectedAnswerTopic.slice(0, AI_ANSWER_LIMITS.selectedAnswerTopicMaxChars)
         : body.selectedAnswerTopic,
+    latestAnswerId:
+      typeof body.latestAnswerId === "string"
+        ? body.latestAnswerId.slice(0, AI_ANSWER_LIMITS.latestAnswerIdMaxChars)
+        : body.latestAnswerId,
+    latestAnswerQuestion:
+      typeof body.latestAnswerQuestion === "string"
+        ? body.latestAnswerQuestion.slice(0, AI_ANSWER_LIMITS.selectedAnswerQuestionMaxChars)
+        : body.latestAnswerQuestion,
+    latestAnswerText:
+      typeof body.latestAnswerText === "string"
+        ? body.latestAnswerText.slice(0, AI_ANSWER_LIMITS.selectedAnswerTextMaxChars)
+        : body.latestAnswerText,
+    latestAnswerTopic:
+      typeof body.latestAnswerTopic === "string"
+        ? body.latestAnswerTopic.slice(0, AI_ANSWER_LIMITS.selectedAnswerTopicMaxChars)
+        : body.latestAnswerTopic,
     selectedAnswerCodeBlocks: Array.isArray(body.selectedAnswerCodeBlocks)
       ? body.selectedAnswerCodeBlocks
           .slice(0, AI_ANSWER_LIMITS.previousCodeBlocksMax)

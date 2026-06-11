@@ -1,6 +1,7 @@
 import type { AIAnswerLiveContextMetadata } from "./ai-answer.dto";
 import type { AISessionDecision } from "./ai-session-decision";
 import { isFreshCodeGenerationRequest } from "./ai-answer-context-guards";
+import { getCodeIntentSuppressedReason } from "./short-followup";
 
 export type AnswerIntent =
   | "concept_explanation"
@@ -61,11 +62,15 @@ export function classifyAnswerIntent(input: {
   const q = (input.question || "").toLowerCase().trim();
   const hasPrevCode = !!(input.previousCodeBlocks && input.previousCodeBlocks.length > 0);
   const architectureResponseMode = shouldUseArchitectureResponseMode(input.question);
+  const codeIntentSuppressedReason = getCodeIntentSuppressedReason(input.question);
   const isFreshCodeGeneration =
-    input.answerMode === "code_required" ||
-    input.answerMode === "minimal_code" ||
-    CODE_GEN_RE.test(q) ||
-    isFreshCodeGenerationRequest(input.question);
+    !codeIntentSuppressedReason &&
+    (
+      input.answerMode === "code_required" ||
+      input.answerMode === "minimal_code" ||
+      CODE_GEN_RE.test(q) ||
+      isFreshCodeGenerationRequest(input.question)
+    );
 
   if (architectureResponseMode) {
     return "system_design";
@@ -232,10 +237,10 @@ export function buildRequestScopedPolicy(input: {
     answerIntent === "code_optimization_followup"
   ) {
     lines.push("- followup_code_policy: prioritize referenced previous code context");
-    lines.push("- answer_shape: bullets for **Direct answer:**, **Referenced code:**, **Why it works:**, **Edge case/performance:**");
+    lines.push("- answer_shape: direct explanation bullets — explain what the referenced code does and why, bold key technical terms; include updated/corrected code when the question implies a fix or change; cover edge cases and performance inline");
   }
   if (answerIntent === "behavioral_project_experience") {
-    lines.push("- answer_shape: bullets for **Direct answer:**, **Experience/project:**, **Stack/responsibilities:**, **Impact:**, **Closing line:**");
+    lines.push("- answer_shape: 3-5 direct bullets — each bullet starts with the actual content (company, role, tech, metric, achievement); bold key terms like **years of experience**, **company name**, **tech name**, **metric**; no generic intro labels");
     lines.push("- project_answer_structure: brief_intro; project_or_work_item; my_role; tech_used; what_i_built; challenge_or_decision; result_or_learning");
     lines.push("- combined_profile_answer_shape: **Experience**, **Skill Set**, **Projects** when all are requested");
     lines.push("- do_not_include_architecture_diagram_unless_explicitly_asked: true");
@@ -247,10 +252,10 @@ export function buildRequestScopedPolicy(input: {
     lines.push("- answer_shape: bullets for **Approach:**, fenced code block, **Reasoning:**, **Complexity/edge cases:**");
   }
   if (answerIntent === "concept_explanation") {
-    lines.push("- answer_shape: bullets for **Core idea:**, **Where it is used:**, **Trade-off/example:** when more than 2 sentences are needed");
+    lines.push("- answer_shape: lead with a 1-sentence core definition, then 2-4 direct bullets covering usage, trade-offs, and a concrete example; bold technical terms inline");
   }
   if (answerIntent === "general_followup") {
-    lines.push("- answer_shape: bullets for **Direct answer:**, **Context:**, **Next point:** when more than 2 sentences are needed");
+    lines.push("- answer_shape: direct bullets starting with actual content — bold key terms, facts, and outcomes; no generic intro labels like Direct answer/Context/Next point");
   }
   if (answerIntent === "general_followup" && Array.isArray(metadata.previousCodeBlocks) && metadata.previousCodeBlocks.length > 0) {
     lines.push("- technical_context: previous answer included code; maintain technical depth, show updated/modified code when the question implies a code change or scenario extension");
