@@ -48,7 +48,9 @@ export class EmbeddingService {
           method: "POST",
           headers: {
             "Authorization": `Bearer ${this.apiKey}`,
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://scribeshade.com",
+            "X-Title": "ScribeShade",
           },
           body: JSON.stringify({ model, input })
         });

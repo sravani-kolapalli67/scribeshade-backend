@@ -94,9 +94,13 @@ export function routeAnswerContextV3(input: {
   const regenerate = kind === "regenerate";
   const scenario =
     !coding &&
-    (kind === "scenario" || input.cieComplexity === "scenario_based");
+    (kind === "scenario" ||
+      input.cieComplexity === "scenario_based" ||
+      input.answerIntent === "scenario_based");
   const systemDesign =
-    !coding && input.cieComplexity === "system_design";
+    !coding &&
+    (input.cieComplexity === "system_design" ||
+      input.answerIntent === "system_design");
   const followup =
     kind === "true_followup" ||
     kind === "code_followup" ||
@@ -211,9 +215,11 @@ export function routeAnswerContextV3(input: {
     excludeTypes: allMemoryTypes().filter(
       (type) => !retrieveTypeSet.has(type),
     ),
-    topicFilters: input.sessionState.activeTopic
-      ? [input.sessionState.activeTopic]
-      : [],
+    // Empty topic filter = search all session documents by cosine similarity.
+    // A single-topic filter was hiding earlier Q&A turns from different topics
+    // (e.g. "give me a solution including both scenarios" couldn't find the
+    // first scenario because it belonged to a different activeTopic).
+    topicFilters: [],
     trustFilter:
       input.sanitizedRequest.answerTrust === "strong"
         ? ["strong"]

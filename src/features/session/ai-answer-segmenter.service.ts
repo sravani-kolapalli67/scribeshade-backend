@@ -467,10 +467,35 @@ function fallbackIntent(input: {
 function buildDecisionFromSegmenter(result: AIAnswerSegmenterResult): AISessionDecision {
   const topic = deriveTopicFromAnyText(result.questionForDisplay);
   const isFollowUp = /follow|continue|previous|that|this|explain more|why/i.test(result.questionForDisplay);
+  const intent = result.detectedIntent as AISessionDecision["intent"];
+  const requestIntent: AISessionDecision["requestIntent"] =
+    intent === "EXPERIENCE_QUESTION"
+      ? "resume_experience_question"
+      : intent === "SCENARIO_QUESTION"
+        ? "behavioral_scenario_question"
+        : intent === "DEBUG_CODE"
+          ? "debugging_question"
+          : intent === "OPTIMIZE_CODE" || intent === "EXPLAIN_CODE"
+            ? "code_explanation_question"
+            : isFollowUp
+              ? "latest_followup"
+              : "standalone_question";
   return {
-    intent: result.detectedIntent as AISessionDecision["intent"],
+    intent,
     isFollowUp,
     targetAnswerId: null,
+    boundPreviousAnswerId: null,
+    resolvedTargetQuestion: result.questionForDisplay,
+    requestIntent,
+    segmentation: isFollowUp ? "follow_up" : "single_question",
+    evidenceSpan: {
+      source: "recent_transcript",
+      text: result.questionForDisplay.slice(0, 700),
+      startIndex: null,
+      endIndex: null,
+    },
+    contextSourcesNeeded: ["recent_transcript"],
+    shouldAnswerPartial: result.source !== "ai" && result.confidence < 0.72,
     requiresPreviousCode: /\b(code|query|debug|optimi[sz]e|fix)\b/i.test(result.questionForDisplay),
     answerMode: "auto",
     topic: topic || "general",

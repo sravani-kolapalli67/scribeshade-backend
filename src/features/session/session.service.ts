@@ -35,7 +35,11 @@ import {
 } from "./ai-answer.dto";
 import { buildRequestScopedPolicy } from "./answer-policy";
 import {
+  decideAISessionState,
   fallbackAISessionDecision,
+  shouldUseAISessionDecision,
+  toDecisionContextTargets,
+  type AISessionDecision,
 } from "./ai-session-decision";
 import {
   buildEffectiveLiveContextMetadata,
@@ -195,6 +199,23 @@ type AppendMessageResult = {
   messageId?: string;
   transcriptChunkId?: string;
   saved: boolean;
+};
+
+type AIAnswerStreamObservability = {
+  requestId: string | null;
+  triggerSource: string | null;
+  manualQueryType: string | null;
+  resolvedTargetQuestion: string;
+  requestIntent: string;
+  segmentation: string;
+  aiDecisionUsed: boolean;
+  aiDecisionMs: number;
+  contextBuildMs: number;
+  preModelMs: number;
+  tokenEstimate: number;
+  contextSourcesUsed: string[];
+  followupBindingSource: string;
+  boundPreviousAnswerId: string | null;
 };
 
 const SESSION_LIST_SELECT = {
@@ -2132,6 +2153,7 @@ function processAIStream(
     requestedTrust?: SanitizedLiveRequest["answerTrust"];
     requestKind?: SanitizedLiveRequest["kind"];
   },
+  observability?: AIAnswerStreamObservability,
 ) {
   const segmentMarker = /\n?={3,}NEXT_QUESTION={3,}\n?/i;
   const rewriteFirstQuestionBlock = (text: string): string => {
@@ -2195,7 +2217,16 @@ function processAIStream(
           const firstTokenMs = Date.now() - modelCallStartedAt;
           console.log("[AI Stream][Timing][BE]", {
             sessionId,
+            requestId: observability?.requestId || null,
             firstTokenMs,
+            preModelMs: observability?.preModelMs ?? null,
+            contextBuildMs: observability?.contextBuildMs ?? null,
+            tokenEstimate: observability?.tokenEstimate ?? null,
+            requestIntent: observability?.requestIntent || null,
+            segmentation: observability?.segmentation || null,
+            contextSourcesUsed: observability?.contextSourcesUsed || [],
+            followupBindingSource: observability?.followupBindingSource || null,
+            boundPreviousAnswerId: observability?.boundPreviousAnswerId || null,
             model: targetModel || "default",
             retryAttempted: false,
           });
@@ -2848,8 +2879,16 @@ export async function getAIAnswer(
         requestKind: metadataSanitization.kind || null,
       });
     }
+    // Always-answer contract: an explicit AI Answer click must produce a
+    // useful answer even when static detection classifies the window as
+    // noise or the question is still forming. Only auto-triggered requests
+    // (and legacy clients that send no triggerSource) may be suppressed.
+    const explicitAnswerClick =
+      !!liveContextMetadata?.triggerSource &&
+      liveContextMetadata.triggerSource !== "auto";
     if (
       !isCustomQuery &&
+      !explicitAnswerClick &&
       (
         sanitizedLiveRequest.kind === "noise" ||
         (transcriptEvidence.lines.length === 0 && !transcriptEvidence.currentQuestionHint)
@@ -2864,6 +2903,21 @@ export async function getAIAnswer(
       isCustomQuery,
       isRegenerate,
     });
+    if (explicitAnswerClick && !finalTranscript.trim()) {
+      // Best-effort target for explicit clicks with weak evidence: nearest
+      // question hint, then raw click transcript, then last tracked intent.
+      finalTranscript =
+        transcriptEvidence.currentQuestionHint ||
+        sanitizedLiveRequest.latestQuestionHint ||
+        transcript ||
+        intentLedger.intents.at(-1)?.question ||
+        "";
+      console.log("[AI Answer] explicit click weak-evidence fallback", {
+        sessionId: id,
+        triggerSource: liveContextMetadata?.triggerSource,
+        fallbackQuestionPreview: finalTranscript.slice(0, 160),
+      });
+    }
   }
 
   finalTranscript = normalizeTranscriptForQuestionDetection(finalTranscript);
@@ -3056,8 +3110,8 @@ export async function getAIAnswer(
       recentTranscriptWindow: liveContextMetadata?.recentTranscriptWindow,
     });
     const originalResolvedQuestion = guard.originalResolvedQuestion;
-    const effectiveQuestionForPolicy = guard.resolvedCurrentQuestion;
-    const questionForAnswerModel = effectiveQuestionForPolicy;
+    let effectiveQuestionForPolicy = guard.resolvedCurrentQuestion;
+    let resolvedTargetQuestionSource = "guarded_question";
     const liveHistoryMessages = await liveHistoryPromise;
     const history = toAnswerHistory(
       liveHistoryMessages.length > 0 ? liveHistoryMessages : (session as any).messages,
@@ -3079,19 +3133,72 @@ export async function getAIAnswer(
       followup,
     });
     const decisionStartedAt = Date.now();
-    const shouldUseDeterministicDecision = true;
-    const aiDecisionResult = {
-      decision: fallbackDecision,
-      fallbackDecisionUsed: true,
-      error: "deterministic_live_decision",
-    };
+    const aiDecisionGateReason = shouldUseAISessionDecision({
+      isCustomQuery,
+      isRegenerate,
+      question: effectiveQuestionForPolicy,
+      routerConfidence: routerDecision?.confidence,
+      routerRequestType: routerDecision?.requestType,
+      routerSegmentation: routerDecision?.segmentation,
+      routerHasBoundTarget: !!routerDecision?.boundTarget,
+      shortFollowupDetected: routerDecision?.shortFollowupDetected,
+      sanitizedKind: sanitizedLiveRequest?.kind,
+    });
+    const shouldUseDeterministicDecision = !aiDecisionGateReason;
+    const aiDecisionResult = shouldUseDeterministicDecision
+      ? {
+          decision: fallbackDecision,
+          fallbackDecisionUsed: true,
+          error: "deterministic_live_decision",
+        }
+      : await decideAISessionState({
+          ai,
+          model: undefined,
+          provider: latencyOptimizedProvider,
+          input: {
+            currentQuestion: effectiveQuestionForPolicy,
+            recentTranscriptWindow: liveContextMetadata?.recentTranscriptWindow,
+            speakerSeparatedTranscript:
+              liveContextMetadata?.speakerSeparatedTranscript,
+            activeQuestionDetection: detection,
+            previousAiAnswer: liveContextMetadata?.previousAiAnswer,
+            previousAiAnswers: liveContextMetadata?.previousAiAnswers,
+            previousCodeBlocks: liveContextMetadata?.previousCodeBlocks,
+            selectedAnswerId: liveContextMetadata?.selectedAnswerId,
+            selectedAnswerQuestion: liveContextMetadata?.selectedAnswerQuestion,
+            selectedAnswerText: liveContextMetadata?.selectedAnswerText,
+            selectedAnswerTopic: liveContextMetadata?.selectedAnswerTopic,
+            answerHistory: toDecisionContextTargets(history),
+            deterministic: {
+              conversationIntent,
+              isExplicitFollowupReference: followup.isExplicitFollowupReference,
+              fallbackTargetId: followup.target?.id || null,
+              fallbackTargetHasCode: !!followup.target?.codeBlocks?.length,
+              fallbackTargetTopic: followup.target?.topic || null,
+              reasonForNoTarget: followup.reasonForNoTarget,
+            },
+          },
+          fallback: fallbackDecision,
+        });
+    const aiDecisionMs = Date.now() - decisionStartedAt;
     console.log("[AI Answer Debug] decision timing:", {
       sessionId: id,
-      decisionMs: Date.now() - decisionStartedAt,
+      decisionMs: aiDecisionMs,
       deterministic: shouldUseDeterministicDecision,
+      gateReason: aiDecisionGateReason || null,
+      fallbackDecisionUsed: aiDecisionResult.fallbackDecisionUsed,
       error: aiDecisionResult.error || null,
     });
     const aiDecision = aiDecisionResult.decision;
+    const aiDecisionUsed = !shouldUseDeterministicDecision && !aiDecisionResult.fallbackDecisionUsed;
+    const aiResolvedTargetQuestion = aiDecision.resolvedTargetQuestion?.trim() || "";
+    if (!isRegenerate && aiResolvedTargetQuestion) {
+      effectiveQuestionForPolicy = normalizeTranscriptForQuestionDetection(aiResolvedTargetQuestion);
+      resolvedTargetQuestionSource = aiDecisionUsed
+        ? "ai_decision_resolved_target"
+        : "deterministic_fallback_resolved_target";
+      finalTranscript = effectiveQuestionForPolicy;
+    }
     const aiDecisionAuthoritative = true;
     const aiDetectedFollowup =
       aiDecision.isFollowUp ||
@@ -3240,21 +3347,57 @@ export async function getAIAnswer(
         transcriptEvidence,
         fallbackTopic: questionTopic,
       });
-    routedAnswerContext = routeAnswerContextV3({
-      sanitizedRequest: effectiveSanitizedRequest,
-      sessionState: sessionStateV3,
-      cieComplexity: contextForCall?.complexity,
-      answerIntent: policy.answerIntent,
+	    routedAnswerContext = routeAnswerContextV3({
+	      sanitizedRequest: effectiveSanitizedRequest,
+	      sessionState: sessionStateV3,
+	      cieComplexity: contextForCall?.complexity,
+	      answerIntent: policy.answerIntent,
       question: effectiveQuestionForPolicy,
       hasResume:
         !!contextForCall?.resume &&
         !String(contextForCall.resume).startsWith("No resume provided."),
       hasProjects: hasUsableProjectContextForPrompt(contextForCall?.projects),
-      hasDocument:
-        !!contextForCall?.document &&
-        !String(contextForCall.document).startsWith("None provided."),
-    });
-    const ragRetrieval = await retrieveSessionSupportingEvidence({
+	      hasDocument:
+	        !!contextForCall?.document &&
+	        !String(contextForCall.document).startsWith("None provided."),
+	    });
+	    const shouldRefreshContextForResolvedRoute =
+	      !isRegenerate &&
+	      (
+	        (routedAnswerContext.includeResume && isUnavailableProfileText(String(contextForCall?.resume || ""))) ||
+	        (routedAnswerContext.includeProjects && !hasUsableProjectContextForPrompt(contextForCall?.projects)) ||
+	        (routedAnswerContext.includeDocuments && !String(contextForCall?.document || "").trim())
+	      );
+	    if (shouldRefreshContextForResolvedRoute) {
+	      const refreshedContext = await buildOptimizedContext(
+	        id,
+	        effectiveQuestionForPolicy,
+	        undefined,
+	        session,
+	        {
+	          contextMode: "live",
+	          sourcePolicy: {
+	            includeResume: routedAnswerContext.includeResume,
+	            includeProjects: routedAnswerContext.includeProjects,
+	            includeHistory: routedAnswerContext.includeHistory,
+	            includeDocuments: routedAnswerContext.includeDocuments,
+	            includeVector: false,
+	          },
+	        },
+	      );
+	      if (refreshedContext) {
+	        contextForCall = refreshedContext;
+	        console.log("[AI Answer][ContextRefresh]", {
+	          sessionId: id,
+	          requestId: liveContextMetadata?.requestId || null,
+	          requestIntent: aiDecision.requestIntent,
+	          includeResume: routedAnswerContext.includeResume,
+	          includeProjects: routedAnswerContext.includeProjects,
+	          includeDocuments: routedAnswerContext.includeDocuments,
+	        });
+	      }
+	    }
+	    const ragRetrieval = await retrieveSessionSupportingEvidence({
       sessionId: id,
       userId: session.userId,
       question: effectiveQuestionForPolicy,
@@ -3432,9 +3575,13 @@ export async function getAIAnswer(
           liveContextMetadata?.previousAiAnswer ||
           ""
         : undefined;
+    const finalPromptQuestion =
+      routerDecision?.requestType === "followup"
+        ? routerDecision.targetQuestion || effectiveQuestionForPolicy
+        : effectiveQuestionForPolicy;
     const userMessage = buildActiveTaskV3({
       mode: isRegenerate ? "regenerate_answer" : isCustomQuery ? "manual_query" : "live_ai_answer",
-      targetQuestion: routerDecision?.targetQuestion || effectiveQuestionForPolicy,
+      targetQuestion: finalPromptQuestion,
       boundPreviousAnswer: selectedTargetForRequest
         ? {
             answerId: selectedTargetForRequest.id,
@@ -3452,14 +3599,14 @@ export async function getAIAnswer(
         compactTranscriptExcerpt({
           segmenterResult,
           metadata: liveContextMetadata,
-          fallbackQuestion: effectiveQuestionForPolicy,
+          fallbackQuestion: finalPromptQuestion,
           includeCandidate: true,
         }),
       recentTranscriptContext: transcriptEvidence?.recentTranscriptContext,
       clickRawTranscript: transcriptEvidence?.clickRawTranscript,
       currentQuestionHint: transcriptEvidence?.currentQuestionHint,
       manualRequest: isCustomQuery ? transcript : undefined,
-      originalQuestion: isRegenerate ? effectiveQuestionForPolicy : undefined,
+      originalQuestion: isRegenerate ? finalPromptQuestion : undefined,
       previousAnswerSummary: isRegenerate ? previousAnswerSummary : undefined,
       previousAnswerReference,
       memoryAnchor,
@@ -3476,25 +3623,41 @@ export async function getAIAnswer(
     const questionMetaForStream: QuestionMeta | undefined = isRegenerate
       ? orchestration?.questionMeta
       : undefined;
-    const systemTokens = estimatePromptTokensForLog(systemPrompt);
-    const runtimeTokens = estimatePromptTokensForLog(runtimeContextMessage);
-    const userTokens = estimatePromptTokensForLog(userMessage);
-    console.log(`[CIE] Prompt breakdown | system: ${systemTokens}t | runtime: ${runtimeTokens}t | user: ${userTokens}t | total: ${systemTokens + runtimeTokens + userTokens}t | complexity: ${contextForCall?.complexity || 'unknown'}`);
-    if (process.env.NODE_ENV !== "production") {
-      console.log("[AI Answer Policy][BE]", {
-        resolvedCurrentQuestion: effectiveQuestionForPolicy,
-        originalResolvedQuestion: guard.originalResolvedQuestion,
-        reconstructedResolvedQuestion: guard.reconstructedResolvedQuestion,
-        weakQuestionReconstructedBackend: guard.weakQuestionReconstructedBackend,
-        questionPollutionDetected: guard.questionPollutionDetected,
-        conversationIntent,
-        aiDecisionIntent: aiDecision.intent,
-        aiDecisionConfidence: aiDecision.confidence,
-        aiDecisionTargetAnswerId: aiDecision.targetAnswerId,
-        aiDecisionReason: aiDecision.reason,
-        aiDecisionContextToUse: aiDecision.contextToUse,
-        fallbackDecisionUsed: aiDecisionResult.fallbackDecisionUsed,
-        aiDecisionError: aiDecisionResult.error || null,
+	    const systemTokens = estimatePromptTokensForLog(systemPrompt);
+	    const runtimeTokens = estimatePromptTokensForLog(runtimeContextMessage);
+	    const userTokens = estimatePromptTokensForLog(userMessage);
+	    const tokenEstimate = systemTokens + runtimeTokens + userTokens;
+	    const totalContextBuildMs = Date.now() - contextBuildStartedAt;
+	    console.log(`[CIE] Prompt breakdown | system: ${systemTokens}t | runtime: ${runtimeTokens}t | user: ${userTokens}t | total: ${tokenEstimate}t | complexity: ${contextForCall?.complexity || 'unknown'}`);
+	    if (process.env.NODE_ENV !== "production") {
+	      console.log("[AI Answer Policy][BE]", {
+	        requestId: liveContextMetadata?.requestId || null,
+	        triggerSource: liveContextMetadata?.triggerSource || null,
+	        manualQueryType: liveContextMetadata?.manualQueryType || null,
+	        resolvedCurrentQuestion: effectiveQuestionForPolicy,
+	        resolvedTargetQuestion: finalPromptQuestion,
+	        resolvedTargetQuestionSource,
+	        originalResolvedQuestion: guard.originalResolvedQuestion,
+	        reconstructedResolvedQuestion: guard.reconstructedResolvedQuestion,
+	        weakQuestionReconstructedBackend: guard.weakQuestionReconstructedBackend,
+	        questionPollutionDetected: guard.questionPollutionDetected,
+	        conversationIntent,
+	        aiDecisionIntent: aiDecision.intent,
+	        aiDecisionRequestIntent: aiDecision.requestIntent,
+	        aiDecisionSegmentation: aiDecision.segmentation,
+	        aiDecisionEvidenceSpan: aiDecision.evidenceSpan,
+	        aiDecisionContextSourcesNeeded: aiDecision.contextSourcesNeeded,
+	        aiDecisionShouldAnswerPartial: aiDecision.shouldAnswerPartial,
+	        aiDecisionConfidence: aiDecision.confidence,
+	        aiDecisionTargetAnswerId: aiDecision.targetAnswerId,
+	        aiDecisionBoundPreviousAnswerId: aiDecision.boundPreviousAnswerId,
+	        aiDecisionReason: aiDecision.reason,
+	        aiDecisionContextToUse: aiDecision.contextToUse,
+	        aiDecisionUsed,
+	        aiDecisionMs,
+	        tokenEstimate,
+	        fallbackDecisionUsed: aiDecisionResult.fallbackDecisionUsed,
+	        aiDecisionError: aiDecisionResult.error || null,
         contextBindingSource: aiDecisionAuthoritative && aiDecisionTarget
           ? "ai_decision"
           : aiDecisionLatestCodeTarget
@@ -3522,9 +3685,9 @@ export async function getAIAnswer(
           routerDecision?.shortFollowupDetected ||
           isShortFollowupCommand(effectiveQuestionForPolicy),
         routerRequestType: routerDecision?.requestType || null,
-        bindingSource: routerDecision?.bindingSource || followupBindingSource,
-        finalTargetQuestion:
-          routerDecision?.targetQuestion || effectiveQuestionForPolicy,
+	        bindingSource: routerDecision?.bindingSource || followupBindingSource,
+	        finalTargetQuestion:
+	          finalPromptQuestion,
         codeIntentDetected:
           routerDecision?.codeIntentDetected ||
           (policy.answerIntent === "code_generation"),
@@ -3540,10 +3703,10 @@ export async function getAIAnswer(
               documents: routedAnswerContext.includeDocuments,
             }
           : null,
-        oldQuestionMergeBlocked:
-          routerDecision?.oldQuestionMergeBlocked || false,
-        finalPromptQuestion: effectiveQuestionForPolicy,
-        finalPromptPreview: userMessage.slice(0, 500),
+	        oldQuestionMergeBlocked:
+	          routerDecision?.oldQuestionMergeBlocked || false,
+	        finalPromptQuestion,
+	        finalPromptPreview: userMessage.slice(0, 500),
         selectedFollowupTargetId: selectedTargetForRequest?.id || null,
         followupTargetId: selectedTargetForRequest?.id || null,
         selectedFollowupTopic: selectedTargetForRequest?.topic || null,
@@ -3587,16 +3750,43 @@ export async function getAIAnswer(
         reconstructionCorrections:
           liveContextMetadata?.backendQuestionCorrections ||
           [],
-      });
-    }
+	      });
+	    }
+	    console.log("[AI Answer][RequestSummary]", {
+	      sessionId: id,
+	      requestId: liveContextMetadata?.requestId || null,
+	      triggerSource: liveContextMetadata?.triggerSource || null,
+	      manualQueryType: liveContextMetadata?.manualQueryType || null,
+	      resolvedTargetQuestionPreview: finalPromptQuestion.slice(0, 180),
+	      resolvedTargetQuestionSource,
+	      requestIntent: aiDecision.requestIntent,
+	      segmentation: aiDecision.segmentation,
+	      aiDecisionUsed,
+	      aiDecisionMs,
+	      contextBuildMs: totalContextBuildMs,
+	      tokenEstimate,
+	      contextSourcesUsed: aiDecision.contextSourcesNeeded,
+	      routedContextIncluded: routedAnswerContext
+	        ? {
+	            resume: routedAnswerContext.includeResume,
+	            projects: routedAnswerContext.includeProjects,
+	            history: routedAnswerContext.includeHistory,
+	            codeMemory: routedAnswerContext.includeCodeMemory,
+	            documents: routedAnswerContext.includeDocuments,
+	          }
+	        : null,
+	      followupBindingSource,
+	      boundPreviousAnswerId: aiDecision.boundPreviousAnswerId,
+	    });
 
-    const maxOutputTokens = resolveAnswerMaxOutputTokens({
-      complexity: contextForCall?.complexity,
-      question: effectiveQuestionForPolicy,
-      isRegenerate,
-      hasProjects: !!contextForCall?.hasSelectedProjects,
-    });
-    const result = ai.callModel({
+	    const maxOutputTokens = resolveAnswerMaxOutputTokens({
+	      complexity: contextForCall?.complexity,
+	      question: finalPromptQuestion,
+	      isRegenerate,
+	      hasProjects: !!contextForCall?.hasSelectedProjects,
+	    });
+	    const preModelMs = Date.now() - contextBuildStartedAt;
+	    const result = ai.callModel({
       model: targetModel,
       maxOutputTokens,
       provider: latencyOptimizedProvider as any,
@@ -3623,18 +3813,18 @@ export async function getAIAnswer(
 
     return processAIStream(
       result,
-      session,
-      id,
-      isCustomQuery ? finalTranscript : finalTranscript.slice(0, 300),
-      promptContextForCall,
-      targetModel,
-      finalSnapshotId,
-      isRegenerate,
-      isCustomQuery || isRegenerate ? effectiveQuestionForPolicy : undefined,
-      questionMetaForStream,
-      orchestration,
-      segmenterResult,
-      transcriptEvidence?.compactQuery || finalTranscript,
+	      session,
+	      id,
+	      isCustomQuery ? finalPromptQuestion : finalPromptQuestion.slice(0, 300),
+	      promptContextForCall,
+	      targetModel,
+	      finalSnapshotId,
+	      isRegenerate,
+	      finalPromptQuestion,
+	      questionMetaForStream,
+	      orchestration,
+	      segmenterResult,
+	      transcriptEvidence?.compactQuery || finalTranscript,
       {
         questionAllowsCode:
           policy.isCodeFollowup ||
@@ -3643,11 +3833,27 @@ export async function getAIAnswer(
           policy.effectiveAnswerMode === "explain_existing_code",
         allowFencedBlocks: shouldForceDiagram,
         staleContextCleared: !!metadataSanitization?.clearReason,
-        scenarioNumbers: transcriptEvidence?.scenarioPacket?.numbers || [],
-        requestedTrust: effectiveSanitizedRequest.answerTrust,
-        requestKind: effectiveSanitizedRequest.kind,
-      },
-    );
+	        scenarioNumbers: transcriptEvidence?.scenarioPacket?.numbers || [],
+	        requestedTrust: effectiveSanitizedRequest.answerTrust,
+	        requestKind: effectiveSanitizedRequest.kind,
+	      },
+	      {
+	        requestId: liveContextMetadata?.requestId || null,
+	        triggerSource: liveContextMetadata?.triggerSource || null,
+	        manualQueryType: liveContextMetadata?.manualQueryType || null,
+	        resolvedTargetQuestion: finalPromptQuestion,
+	        requestIntent: aiDecision.requestIntent,
+	        segmentation: aiDecision.segmentation,
+	        aiDecisionUsed,
+	        aiDecisionMs,
+	        contextBuildMs: totalContextBuildMs,
+	        preModelMs,
+	        tokenEstimate,
+	        contextSourcesUsed: aiDecision.contextSourcesNeeded,
+	        followupBindingSource,
+	        boundPreviousAnswerId: aiDecision.boundPreviousAnswerId,
+	      },
+	    );
   } catch (err: any) {
     console.error("OpenRouter Streaming Error (getAIAnswer):", err);
     if (err.status === 429 || err.statusCode === 429) {

@@ -4,6 +4,7 @@ import {
   buildAISessionDecisionMessages,
   fallbackAISessionDecision,
   normalizeAISessionDecision,
+  shouldUseAISessionDecision,
   toDecisionContextTargets,
 } from "./ai-session-decision";
 import { resolveFollowupTarget, toAnswerHistory } from "./answer-quality";
@@ -47,9 +48,77 @@ test("normalizes AI decision for slow SQL query followup", () => {
   );
 
   assert.equal(decision?.intent, "OPTIMIZE_CODE");
-  assert.equal(decision?.targetAnswerId, "salary-sql");
-  assert.equal(decision?.requiresPreviousCode, true);
-  assert.equal(decision?.answerMode, "explain_existing_code");
+	  assert.equal(decision?.targetAnswerId, "salary-sql");
+	  assert.equal(decision?.boundPreviousAnswerId, "salary-sql");
+	  assert.equal(
+	    decision?.resolvedTargetQuestion,
+	    "What if the same query takes 2 seconds while fetching records?",
+	  );
+	  assert.equal(decision?.requestIntent, "code_explanation_question");
+	  assert.equal(decision?.segmentation, "follow_up");
+	  assert.deepEqual(decision?.contextSourcesNeeded, ["previous_code"]);
+	  assert.equal(decision?.requiresPreviousCode, true);
+	  assert.equal(decision?.answerMode, "explain_existing_code");
+	});
+
+test("normalizes AI decision resolved target and evidence span for partial transcript", () => {
+  const input = {
+    currentQuestion: "data lake migration approach",
+    recentTranscriptWindow: [
+      "Interviewer: in your current migration from legacy pipelines",
+      "Interviewer: data lake migration approach",
+    ],
+    answerHistory: [],
+    deterministic: {
+      conversationIntent: "UNKNOWN" as const,
+      isExplicitFollowupReference: false,
+      fallbackTargetId: null,
+      fallbackTargetHasCode: false,
+      fallbackTargetTopic: null,
+    },
+  };
+
+  const decision = normalizeAISessionDecision(
+    {
+      intent: "NEW_QUESTION",
+      isFollowUp: false,
+      targetAnswerId: null,
+      boundPreviousAnswerId: null,
+      resolvedTargetQuestion:
+        "How would you approach migrating legacy pipelines into a data lake?",
+      requestIntent: "partial_evolving_question",
+      segmentation: "partial_evolving",
+      evidenceSpan: {
+        source: "recent_transcript",
+        text: "data lake migration approach",
+        startIndex: 1,
+        endIndex: 1,
+      },
+      contextSourcesNeeded: ["recent_transcript", "resume", "projects"],
+      shouldAnswerPartial: true,
+      requiresPreviousCode: false,
+      answerMode: "auto",
+      topic: "data engineering",
+      confidence: 0.74,
+      reason: "Partial interviewer wording resolves to a migration approach question.",
+      contextToUse: "recent_transcript",
+    },
+    input,
+  );
+
+  assert.equal(
+    decision?.resolvedTargetQuestion,
+    "How would you approach migrating legacy pipelines into a data lake?",
+  );
+  assert.equal(decision?.requestIntent, "partial_evolving_question");
+  assert.equal(decision?.segmentation, "partial_evolving");
+  assert.equal(decision?.shouldAnswerPartial, true);
+  assert.equal(decision?.evidenceSpan?.source, "recent_transcript");
+  assert.deepEqual(decision?.contextSourcesNeeded, [
+    "recent_transcript",
+    "resume",
+    "projects",
+  ]);
 });
 
 test("rejects decision that points to missing answer id", () => {
@@ -218,9 +287,11 @@ test("decision prompt asks model to prefer semantic context over keyword matchin
     },
   });
 
-  assert.ok(messages.system.includes("Prefer semantic context over keyword matching"));
-  assert.ok(messages.system.includes("same query/code being slow"));
-});
+	  assert.ok(messages.system.includes("Prefer semantic context over keyword matching"));
+	  assert.ok(messages.system.includes("same query/code being slow"));
+	  assert.ok(messages.user.includes("resolvedTargetQuestion"));
+	  assert.ok(messages.user.includes("evidenceSpan"));
+	});
 
 test("realistic session replay uses AI decisions for code, scenario, theory, experience, and unrelated turns", () => {
   const history = toAnswerHistory([
@@ -435,4 +506,133 @@ test("realistic session replay uses AI decisions for code, scenario, theory, exp
   );
   assert.equal(unrelatedDecision?.isFollowUp, false);
   assert.equal(unrelatedDecision?.contextToUse, "none");
+});
+
+test("decision gate: clear question-shaped new question stays on deterministic fast path", () => {
+  const reason = shouldUseAISessionDecision({
+    isCustomQuery: false,
+    isRegenerate: false,
+    question: "How would you design a rate limiter for a public API?",
+    routerConfidence: 0.72,
+    routerRequestType: "new_question",
+    routerSegmentation: "single_question",
+    routerHasBoundTarget: false,
+    shortFollowupDetected: false,
+    sanitizedKind: "latest_question",
+  });
+  assert.equal(reason, null);
+});
+
+test("decision gate: explicit click classified as noise escalates to AI decision", () => {
+  const reason = shouldUseAISessionDecision({
+    isCustomQuery: false,
+    isRegenerate: false,
+    question: "so yeah the thing about",
+    routerConfidence: 0.72,
+    routerRequestType: "new_question",
+    routerSegmentation: "single_question",
+    routerHasBoundTarget: false,
+    shortFollowupDetected: false,
+    sanitizedKind: "noise",
+  });
+  assert.equal(reason, "static_noise_or_provisional");
+});
+
+test("decision gate: unbound short follow-up escalates to AI decision", () => {
+  const reason = shouldUseAISessionDecision({
+    isCustomQuery: true,
+    isRegenerate: false,
+    question: "explain",
+    routerConfidence: 0.2,
+    routerRequestType: "followup",
+    routerSegmentation: "follow_up",
+    routerHasBoundTarget: false,
+    shortFollowupDetected: true,
+    sanitizedKind: "true_followup",
+  });
+  assert.equal(reason, "unbound_followup");
+});
+
+test("decision gate: bound follow-up stays deterministic", () => {
+  const reason = shouldUseAISessionDecision({
+    isCustomQuery: true,
+    isRegenerate: false,
+    question: "give me an example",
+    routerConfidence: 0.9,
+    routerRequestType: "followup",
+    routerSegmentation: "follow_up",
+    routerHasBoundTarget: true,
+    shortFollowupDetected: true,
+    sanitizedKind: "true_followup",
+  });
+  assert.equal(reason, null);
+});
+
+test("decision gate: multi-question window escalates", () => {
+  const reason = shouldUseAISessionDecision({
+    isCustomQuery: false,
+    isRegenerate: false,
+    question: "what is spark and how does shuffle work and why does skew happen",
+    routerConfidence: 0.72,
+    routerRequestType: "new_question",
+    routerSegmentation: "multiple_questions",
+    routerHasBoundTarget: false,
+    shortFollowupDetected: false,
+    sanitizedKind: "latest_question",
+  });
+  assert.equal(reason, "multi_question_window");
+});
+
+test("decision gate: low router confidence escalates", () => {
+  const reason = shouldUseAISessionDecision({
+    isCustomQuery: false,
+    isRegenerate: false,
+    question: "the broadcast join thing again",
+    routerConfidence: 0.4,
+    routerRequestType: "new_question",
+    routerSegmentation: "single_question",
+    routerHasBoundTarget: false,
+    shortFollowupDetected: false,
+    sanitizedKind: "latest_question",
+  });
+  assert.equal(reason, "low_router_confidence");
+});
+
+test("decision gate: short non-question partial window escalates", () => {
+  const reason = shouldUseAISessionDecision({
+    isCustomQuery: false,
+    isRegenerate: false,
+    question: "data lake migration approach",
+    routerConfidence: 0.72,
+    routerRequestType: "new_question",
+    routerSegmentation: "single_question",
+    routerHasBoundTarget: false,
+    shortFollowupDetected: false,
+    sanitizedKind: "latest_question",
+  });
+  assert.equal(reason, "partial_or_ambiguous_question");
+});
+
+test("decision gate: regenerate always stays deterministic", () => {
+  const reason = shouldUseAISessionDecision({
+    isCustomQuery: false,
+    isRegenerate: true,
+    question: "anything",
+    routerConfidence: 0.1,
+    routerRequestType: "followup",
+    routerSegmentation: "multiple_questions",
+    routerHasBoundTarget: false,
+    shortFollowupDetected: true,
+    sanitizedKind: "noise",
+  });
+  assert.equal(reason, null);
+});
+
+test("decision gate: empty resolved question escalates", () => {
+  const reason = shouldUseAISessionDecision({
+    isCustomQuery: false,
+    isRegenerate: false,
+    question: "   ",
+  });
+  assert.equal(reason, "empty_resolved_question");
 });

@@ -47,6 +47,13 @@ const answerClickModeSchema = z.enum([
   "answer_followup",
 ]);
 
+const triggerSourceSchema = z.enum([
+  "auto",
+  "manual_click",
+  "overlay_click",
+  "custom_query",
+]);
+
 const speakerEntrySchema = z.object({
   speakerType: speakerTypeSchema,
   content: z.string().trim().min(1),
@@ -150,6 +157,7 @@ export const aiAnswerRequestSchema = z.object({
   selectedAnswerIntentId: z.string().trim().min(1).max(120).optional(),
   answerClickMode: answerClickModeSchema.optional(),
   answerMode: answerModeSchema.optional(),
+  triggerSource: triggerSourceSchema.optional(),
   sourcePlatform: sourcePlatformSchema.optional(),
   activeInterviewMode: z.string().trim().min(1).max(120).optional(),
   manualQueryType: manualQueryTypeSchema.optional(),

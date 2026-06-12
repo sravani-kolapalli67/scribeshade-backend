@@ -1213,6 +1213,81 @@ export async function recordAnswerInLedgers(input: {
   }
 }
 
+/**
+ * Token-overlap similarity of two already-normalized question strings.
+ * Returns a 0..1 Jaccard ratio over word sets. Pure and allocation-light so
+ * it is safe on the live pre-model path.
+ */
+function questionTokenSimilarity(a: string, b: string): number {
+  const tokensA = new Set(a.split(" ").filter(Boolean));
+  const tokensB = new Set(b.split(" ").filter(Boolean));
+  if (tokensA.size === 0 || tokensB.size === 0) return 0;
+  let intersection = 0;
+  for (const token of tokensA) if (tokensB.has(token)) intersection += 1;
+  const union = tokensA.size + tokensB.size - intersection;
+  return union === 0 ? 0 : intersection / union;
+}
+
+export type RecentlyAnsweredMatch = {
+  isSame: boolean;
+  matchedAnswerId: string | null;
+  matchedQuestion: string | null;
+  similarity: number;
+  reason: "exact_normalized" | "high_similarity" | "no_match";
+};
+
+/**
+ * Detects whether a resolved target question is effectively the same as a
+ * question that was just answered in this session. Used as an auto-trigger
+ * safety net so a still-evolving interviewer question does not spawn
+ * duplicate/conflicting answer cards. Explicit AI Answer clicks must NOT use
+ * this to suppress output (always-answer contract); callers gate on that.
+ */
+export function matchRecentlyAnsweredQuestion(input: {
+  question: string;
+  answerLedger: AnswerLedger;
+  lookback?: number;
+  similarityThreshold?: number;
+}): RecentlyAnsweredMatch {
+  const normalized = normalizeQuestion(input.question);
+  const none: RecentlyAnsweredMatch = {
+    isSame: false,
+    matchedAnswerId: null,
+    matchedQuestion: null,
+    similarity: 0,
+    reason: "no_match",
+  };
+  if (!normalized) return none;
+  const lookback = input.lookback ?? 3;
+  const threshold = input.similarityThreshold ?? 0.82;
+  const recent = [...(input.answerLedger.answers || [])].slice(-lookback).reverse();
+  let best = none;
+  for (const answer of recent) {
+    const candidate = normalizeQuestion(answer.question);
+    if (!candidate) continue;
+    if (candidate === normalized) {
+      return {
+        isSame: true,
+        matchedAnswerId: answer.answerId,
+        matchedQuestion: answer.question,
+        similarity: 1,
+        reason: "exact_normalized",
+      };
+    }
+    const similarity = questionTokenSimilarity(normalized, candidate);
+    if (similarity > best.similarity) {
+      best = {
+        isSame: similarity >= threshold,
+        matchedAnswerId: answer.answerId,
+        matchedQuestion: answer.question,
+        similarity,
+        reason: similarity >= threshold ? "high_similarity" : "no_match",
+      };
+    }
+  }
+  return best;
+}
+
 export async function rebuildLedgersFromDurableState(sessionId: string): Promise<{
   intentLedger: IntentLedger;
   answerLedger: AnswerLedger;

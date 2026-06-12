@@ -108,3 +108,40 @@ test("short followup uses transcript fallback only when transcript question is n
   assert.equal(decision.bindingSource, "latest_successful_answer");
   assert.equal(decision.targetAnswerId, "hooks-answer");
 });
+
+test("router classifies expanded live AI answer request intents", () => {
+  const cases = [
+    {
+      input: "Design a notification system for one million events per day",
+      expected: "system_design",
+    },
+    {
+      input: "Debug why this code is failing in production",
+      expected: "debugging",
+    },
+    {
+      input: "Tell me about your selected project architecture",
+      expected: "project_question",
+    },
+    {
+      input: "Walk me through your experience and skill set",
+      expected: "resume_question",
+    },
+    {
+      input: "data lake migration approach",
+      expected: "partial_evolving",
+    },
+  ] as const;
+
+  for (const item of cases) {
+    const decision = routeAIAnswerSessionContext({
+      rawInput: item.input,
+      normalizedInput: item.input,
+      isCustomQuery: false,
+      history: [],
+      latestSuccessfulAnswer: null,
+    });
+
+    assert.equal(decision.requestType, item.expected);
+  }
+});

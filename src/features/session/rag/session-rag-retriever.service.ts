@@ -1,10 +1,11 @@
 import { AI_CONFIG } from "../../../config/ai.config";
+import { EmbeddingService } from "../../ask-ai/embedding.service";
 import type { RoutedAnswerContext } from "../session-intelligence.types";
 import {
   readQuestionVector,
   searchMemoryDocuments,
 } from "./redis-vector-store.service";
-import { hashRagQuestion } from "./session-rag-indexer.service";
+import { hashRagQuestion, normalizeRagQuestion } from "./session-rag-indexer.service";
 
 export type SessionRagRetrievalResult = {
   evidence: string[];
@@ -28,17 +29,29 @@ export async function retrieveSessionSupportingEvidence(input: {
       skipReason: "no_allowed_types",
     };
   }
-  const queryEmbedding = await readQuestionVector({
+
+  // Try to read a pre-indexed question vector. If missing (async race, or question
+  // came from the candidate side not the interviewer), generate on-demand so the
+  // RAG search always runs rather than silently returning no evidence.
+  let queryEmbedding = await readQuestionVector({
     sessionId: input.sessionId,
     questionHash: hashRagQuestion(input.question),
   });
   if (!queryEmbedding) {
-    return {
-      evidence: [],
-      count: 0,
-      latencyMs: Date.now() - startedAt,
-      skipReason: "no_query_vector",
-    };
+    try {
+      const embeddingService = new EmbeddingService();
+      const result = await embeddingService.generateEmbedding(
+        normalizeRagQuestion(input.question),
+      );
+      queryEmbedding = result.embedding;
+    } catch {
+      return {
+        evidence: [],
+        count: 0,
+        latencyMs: Date.now() - startedAt,
+        skipReason: "no_query_vector",
+      };
+    }
   }
   const matches = await searchMemoryDocuments({
     sessionId: input.sessionId,

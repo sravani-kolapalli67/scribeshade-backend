@@ -21,9 +21,15 @@ export type SessionRouterRequestType =
   | "followup"
   | "clarification"
   | "code_request"
+  | "code_explanation"
+  | "debugging"
+  | "system_design"
   | "scenario"
+  | "behavioral_scenario"
   | "resume_question"
   | "project_question"
+  | "screen_analysis"
+  | "partial_evolving"
   | "unknown";
 
 export type SessionRouterBindingSource =
@@ -102,6 +108,13 @@ function countQuestionLikeSegments(text: string): number {
   if (matches && matches.length > 1) return matches.length;
   const starts = normalizeSpaces(text).match(/\b(what|why|how|when|where|which|who|can|could|would|should|is|are|do|does|did)\b/gi);
   return starts?.length || 0;
+}
+
+function isPartialEvolvingQuestion(text: string): boolean {
+  const normalized = normalizeSpaces(text);
+  if (!normalized) return true;
+  const wordCount = normalized.split(/\s+/).filter(Boolean).length;
+  return wordCount <= 9 && !isQuestionLike(normalized);
 }
 
 function buildTargetFromLatestAnswer(
@@ -230,12 +243,24 @@ export function routeAIAnswerSessionContext(input: {
     requestType = "followup";
   } else if (codeIntentDetected) {
     requestType = "code_request";
-  } else if (input.transcriptEvidence?.scenarioDetected || /\b(scenario|suppose|imagine|production|outage)\b/i.test(normalizedInput)) {
-    requestType = "scenario";
-  } else if (/\b(resume|profile|experience|skill set|education|background)\b/i.test(normalizedInput)) {
-    requestType = "resume_question";
+  } else if (/\b(debug|fix|bug|error|issue|failing|not working)\b/i.test(normalizedInput)) {
+    requestType = "debugging";
+  } else if (/\b(this code|that code|previous code|the code|this query|that query|previous query|explain.*(?:code|query|function|snippet))\b/i.test(normalizedInput)) {
+    requestType = "code_explanation";
   } else if (/\b(projects?|project work|things you built|worked on)\b/i.test(normalizedInput)) {
     requestType = "project_question";
+  } else if (/\b(resume|profile|experience|skill set|education|background)\b/i.test(normalizedInput)) {
+    requestType = "resume_question";
+  } else if (/\b(system design|design a|architect|architecture|scalab|throughput|latency|distributed|microservice)\b/i.test(normalizedInput)) {
+    requestType = "system_design";
+  } else if (input.transcriptEvidence?.scenarioDetected || /\b(scenario|suppose|imagine|production|outage)\b/i.test(normalizedInput)) {
+    requestType = "scenario";
+  } else if (/\b(behavioral|stakeholder|conflict|challenge|critical situation|how did you handle)\b/i.test(normalizedInput)) {
+    requestType = "behavioral_scenario";
+  } else if (/\b(screen|screenshot|visible code|on the screen)\b/i.test(normalizedInput)) {
+    requestType = "screen_analysis";
+  } else if (isPartialEvolvingQuestion(normalizedInput)) {
+    requestType = "partial_evolving";
   } else if (!normalizedInput) {
     requestType = "unknown";
   }

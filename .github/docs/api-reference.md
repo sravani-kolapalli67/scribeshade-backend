@@ -792,17 +792,25 @@ Request:
     "ignoredNoise": false
   },
   "answerClickMode": "answer_latest_unanswered",
+  "latestAnswerId": "latest successful AI answer id",
+  "latestAnswerQuestion": "latest successful AI answer question",
+  "latestAnswerText": "latest successful AI answer text",
+  "latestAnswerTopic": "react",
+  "manualQueryType": "full_question",
+  "triggerSource": "manual_click",
   "isCustomQuery": false,
   "aiModel": "Gemini 2.0 Flash"
 }
 ```
 
 Context rules:
-- Normal latest-question clicks must not send selected-answer or previous-answer fields.
+- Clients may send `previousAiAnswer`, `previousAiAnswers` (last 3), `previousCodeBlocks`, and `latestAnswer*` on every request so the backend can recover from async persistence races.
 - `selectedAnswer*` fields are accepted only for `answer_followup`, regenerate, or re-answer flows.
-- `previousAiAnswer`, `previousAiAnswers`, and `previousCodeBlocks` are used only for explicit follow-up or regenerate flows.
+- Backend `SessionAIAnswerLedger` is the authoritative previous-answer source; frontend `latestAnswer*` metadata is fallback only.
+- Bare short commands such as `example`, `explain`, `more`, `why`, and `how` bind to exactly one latest successful answer when no selected answer exists.
 - The transcript is authoritative. Request metadata cannot override a newly detected scenario, code task, or topic switch.
 - A request performs one chunked OpenRouter answer stream. The server does not retry a `===NO_NEW_QUESTION===` result with another model call.
+- Only one `/ai-answer` stream may be active for a session. Concurrent requests return `409 DUPLICATE_IN_FLIGHT`.
 
 Success `200`:
 - Streamed `text/plain` chunks.

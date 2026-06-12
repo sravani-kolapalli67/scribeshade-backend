@@ -81,6 +81,33 @@ export function classifyAnswerIntent(input: {
   }
 
   if (input.aiDecision && input.aiDecision.confidence >= 0.62) {
+    switch (input.aiDecision.requestIntent) {
+      case "project_question":
+      case "resume_experience_question":
+        return "behavioral_project_experience";
+      case "system_design_question":
+        return "system_design";
+      case "code_generation_question":
+        return "code_generation";
+      case "code_explanation_question":
+        if (input.aiDecision.intent === "OPTIMIZE_CODE") {
+          return "code_optimization_followup";
+        }
+        if (input.aiDecision.intent === "DEBUG_CODE") {
+          return "code_debug_followup";
+        }
+        return "code_explanation_followup";
+      case "debugging_question":
+        return "code_debug_followup";
+      case "behavioral_scenario_question":
+        return "scenario_based";
+      case "latest_followup":
+      case "selected_answer_followup":
+      case "clarification_question":
+        return "general_followup";
+      default:
+        break;
+    }
     switch (input.aiDecision.intent) {
       case "EXPLAIN_CODE":
         return "code_explanation_followup";
@@ -245,8 +272,13 @@ export function buildRequestScopedPolicy(input: {
     lines.push("- combined_profile_answer_shape: **Experience**, **Skill Set**, **Projects** when all are requested");
     lines.push("- do_not_include_architecture_diagram_unless_explicitly_asked: true");
   }
-  if (answerIntent === "scenario_based" || (answerIntent === "system_design" && !architectureResponseMode)) {
+  if (answerIntent === "scenario_based") {
     lines.push("- answer_shape: bullets/sections for **Diagnosis:**, **Action plan:**, **Production fix:**, **Trade-off:**, **Recommendation:**");
+  }
+  if (answerIntent === "system_design" && !architectureResponseMode) {
+    lines.push("- system_design_shape: direct candidate-style opener; 1-2 sentence high-level approach; include one simple ASCII diagram in a fenced ```text``` block; then cover request/data flow, component responsibilities, API/backend design, database choice, cache strategy, queue/background jobs, storage when relevant, scaling, failure handling, observability/logging, security, and trade-offs");
+    lines.push("- system_design_numbers_rule: when the ask includes sizing or capacity (data volume, cluster/node count, throughput, SLA), show explicit back-of-envelope math with stated assumptions (e.g. throughput per hour, cores per node, 20-30% overhead buffer)");
+    lines.push("- system_design_close: end with one short candidate-voice summary of how you would explain the design verbally");
   }
   if (answerIntent === "code_generation") {
     lines.push("- answer_shape: bullets for **Approach:**, fenced code block, **Reasoning:**, **Complexity/edge cases:**");
