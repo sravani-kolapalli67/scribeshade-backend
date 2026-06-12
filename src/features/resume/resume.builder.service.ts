@@ -590,6 +590,69 @@ function parseJsonResponse<T>(text: string): T | null {
   }
 }
 
+function stripSingleMarkdownFence(text: string): string {
+  const trimmed = text.trim();
+  const fenceMatch = trimmed.match(/^```(?:html)?\s*([\s\S]*?)\s*```$/i);
+  return (fenceMatch?.[1] ?? trimmed).trim();
+}
+
+function extractHtmlDocument(text: string): string {
+  const withoutFence = stripSingleMarkdownFence(text);
+  const documentMatch =
+    withoutFence.match(/<!doctype[\s\S]*<\/html>/i) ??
+    withoutFence.match(/<html\b[\s\S]*<\/html>/i);
+  if (documentMatch) {
+    return documentMatch[0].trim();
+  }
+
+  const bodyMatch = withoutFence.match(/<body\b[\s\S]*<\/body>/i);
+  if (bodyMatch) {
+    return `<!doctype html><html><head><meta charset="utf-8"></head>${bodyMatch[0]}</html>`;
+  }
+
+  return withoutFence.trim();
+}
+
+export function sanitizeGeneratedResumeHtml(rawHtml: string): string {
+  const html = extractHtmlDocument(rawHtml);
+
+  if (!html) {
+    throw new AppError(502, "AI returned an empty resume HTML response");
+  }
+
+  if (html.includes("```")) {
+    throw new AppError(502, "AI returned resume HTML wrapped in markdown fences");
+  }
+
+  if (!/<\/?(html|body)\b/i.test(html)) {
+    throw new AppError(502, "AI resume generation did not return a complete HTML document");
+  }
+
+  if (!/<\/?(div|section|article|main|body)\b/i.test(html)) {
+    throw new AppError(502, "AI resume generation returned HTML without resume content structure");
+  }
+
+  return html;
+}
+
+async function assertBuiltResumeOwner(
+  resumeId: string,
+  userId: string,
+): Promise<void> {
+  const resume = await prisma.builtResume.findUnique({
+    where: { id: resumeId },
+    select: { userId: true },
+  });
+
+  if (!resume) {
+    throw new AppError(404, "Resume not found");
+  }
+
+  if (resume.userId !== userId) {
+    throw new AppError(403, "Forbidden");
+  }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // CRUD — Built Resume
 // ─────────────────────────────────────────────────────────────────────────────
@@ -604,6 +667,9 @@ export async function saveBuiltResume(input: SaveBuiltResumeInput) {
     const existing = await prisma.builtResume.findUnique({ where: { id: resumeId } });
     if (!existing) {
       throw new AppError(404, "Resume not found");
+    }
+    if (existing.userId !== userId) {
+      throw new AppError(403, "Forbidden");
     }
 
     return prisma.builtResume.update({
@@ -672,10 +738,16 @@ export async function listBuiltResumes(userId: string) {
  * Returns a single built resume including all fields (used when re-opening the editor).
  * Also resolves templateCode from ResumeTemplate so the editor has the HTML immediately.
  */
-export async function getBuiltResume(id: string) {
+export async function getBuiltResume(
+  id: string,
+  userId: string,
+) {
   const resume = await prisma.builtResume.findUnique({ where: { id } });
   if (!resume) {
     throw new AppError(404, "Resume not found");
+  }
+  if (resume.userId !== userId) {
+    throw new AppError(403, "Forbidden");
   }
 
   // Resolve template HTML — templateId is either a UUID (from DB) or a slug
@@ -699,10 +771,16 @@ export async function getBuiltResume(id: string) {
 /**
  * Deletes a built resume record.
  */
-export async function deleteBuiltResume(id: string): Promise<void> {
+export async function deleteBuiltResume(
+  id: string,
+  userId: string,
+): Promise<void> {
   const resume = await prisma.builtResume.findUnique({ where: { id } });
   if (!resume) {
     throw new AppError(404, "Resume not found");
+  }
+  if (resume.userId !== userId) {
+    throw new AppError(403, "Forbidden");
   }
   await prisma.builtResume.delete({ where: { id } });
 }
@@ -710,12 +788,14 @@ export async function deleteBuiltResume(id: string): Promise<void> {
 export async function renameBuiltResume(
   id: string,
   title: string,
+  userId: string,
 ): Promise<{ id: string; filename: string }> {
   const trimmed = title.trim();
   if (!trimmed) throw new AppError(400, "Title cannot be empty");
 
   const resume = await prisma.builtResume.findUnique({ where: { id } });
   if (!resume) throw new AppError(404, "Resume not found");
+  if (resume.userId !== userId) throw new AppError(403, "Forbidden");
 
   const updated = await prisma.builtResume.update({
     where: { id },
@@ -813,10 +893,11 @@ ${templateCode}
         },
       });
 
-      const populatedHtml = response.choices[0]?.message?.content?.trim() ?? "";
-      if (!populatedHtml) {
+      const rawPopulatedHtml = response.choices[0]?.message?.content?.trim() ?? "";
+      if (!rawPopulatedHtml) {
         throw new AppError(502, "AI returned an empty response");
       }
+      const populatedHtml = sanitizeGeneratedResumeHtml(rawPopulatedHtml);
 
       return {
         populatedHtml,
@@ -855,6 +936,10 @@ export async function enhanceSection(input: EnhanceSectionInput): Promise<{
 
   if (!(VALID_SECTION_IDS as readonly string[]).includes(sectionId)) {
     throw new AppError(400, "Invalid sectionId");
+  }
+
+  if (input.resumeId) {
+    await assertBuiltResumeOwner(input.resumeId, userId);
   }
 
   const cost = await getFeatureCost(RESUME_FEATURE_KEYS.ENHANCE, DEFAULT_COST_ENHANCE);
@@ -1095,6 +1180,9 @@ export async function tailorResume(input: TailorResumeInput): Promise<{
     const resume = await prisma.builtResume.findUnique({ where: { id: resumeId } });
     if (!resume) {
       throw new AppError(404, "Resume not found");
+    }
+    if (resume.userId !== userId) {
+      throw new AppError(403, "Forbidden");
     }
     currentFields = resume.fields as unknown as ResumeFields;
   } else {
@@ -1804,15 +1892,29 @@ async function _exportResumeHtmlInner(
   let suggestedName = input.suggestedFilename?.trim() || "resume";
   log("phase1_start");
 
+  const resume = input.resumeId
+    ? await prisma.builtResume.findUnique({
+        where: { id: input.resumeId },
+        select: { fields: true, title: true, userId: true },
+      })
+    : null;
+
+  if (input.resumeId && !resume) {
+    throw new AppError(404, "Resume not found");
+  }
+
+  if (resume && input.userId && resume.userId !== input.userId) {
+    throw new AppError(403, "Forbidden");
+  }
+
+  if (resume) {
+    suggestedName = input.suggestedFilename?.trim() || resume.title || suggestedName;
+  }
+
   if (input.populatedHtml) {
     html = input.populatedHtml;
   } else if (input.resumeId) {
-    const resume = await prisma.builtResume.findUnique({ where: { id: input.resumeId } });
-    if (!resume) {
-      throw new AppError(404, "Resume not found");
-    }
-    suggestedName = input.suggestedFilename?.trim() || resume.title || suggestedName;
-    html = `<html><body><pre>${JSON.stringify(resume.fields, null, 2)}</pre></body></html>`;
+    html = `<html><body><pre>${JSON.stringify(resume!.fields, null, 2)}</pre></body></html>`;
   } else {
     throw new AppError(400, "resumeId or populatedHtml is required");
   }
@@ -2337,11 +2439,14 @@ export async function scoreBuilderAts(input: {
   resumeId: string;
   jobDescription?: string;
 }): Promise<BuilderAtsResult> {
-  const { resumeId, jobDescription: providedJd } = input;
+  const { userId, resumeId, jobDescription: providedJd } = input;
 
   const resume = await prisma.builtResume.findUnique({ where: { id: resumeId } });
   if (!resume) {
     throw new AppError(404, "Resume not found");
+  }
+  if (resume.userId !== userId) {
+    throw new AppError(403, "Forbidden");
   }
 
   const fields = resume.fields as unknown as ResumeFields;
@@ -2451,10 +2556,9 @@ export async function rewriteResume(input: RewriteResumeInput): Promise<{
   let resolvedResumeId: string | undefined;
 
   if (resumeId) {
-    const resume = await prisma.builtResume.findFirst({
-      where: { id: resumeId, userId: { not: undefined } },
-    });
+    const resume = await prisma.builtResume.findUnique({ where: { id: resumeId } });
     if (!resume) throw new AppError(404, "Resume not found");
+    if (resume.userId !== userId) throw new AppError(403, "Forbidden");
     currentFields = resume.fields as unknown as ResumeFields;
     resolvedResumeId = resumeId;
   } else {
@@ -2560,6 +2664,9 @@ export async function injectSkills(input: InjectSkillsInput): Promise<{
   cached: boolean;
 }> {
   const { userId, jobDescription, jobTitle, fields } = input;
+  if (input.resumeId) {
+    await assertBuiltResumeOwner(input.resumeId, userId);
+  }
 
   const cost = await getFeatureCost(RESUME_FEATURE_KEYS.INJECT_SKILLS, new Prisma.Decimal("1"));
   const cacheKey = hashInput("inject_skills_v2", jobTitle ?? "", (jobDescription ?? "").substring(0, 500), fields.skillsLanguages ?? "", fields.skillsFrameworks ?? "");
@@ -2736,6 +2843,9 @@ export async function injectKeywords(input: InjectKeywordsInput): Promise<{
   cached: boolean;
 }> {
   const { userId, jobDescription, fields, selectedKeywords } = input;
+  if (input.resumeId) {
+    await assertBuiltResumeOwner(input.resumeId, userId);
+  }
 
   // Injection is free if analysis was already paid for, or very cheap.
   // We'll use 0 cost here assuming the Analysis step was the primary charge.

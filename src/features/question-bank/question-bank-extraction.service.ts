@@ -33,6 +33,28 @@ const terminalStatuses: SessionStatus[] = [
   SessionStatus.CREDIT_EXHAUSTED,
 ];
 
+// LLMs frequently emit `null` for fields they could simply omit. Zod's
+// `.optional()` accepts `undefined` but NOT `null`, and `.default([])` only
+// fills in for `undefined` — so a literal `null` from the model throws. These
+// helpers coerce null → the expected empty value so a stray null never sinks an
+// otherwise-valid question.
+const optionalString = z
+  .union([z.string(), z.null()])
+  .optional()
+  .transform((value) => (typeof value === "string" && value.trim() ? value.trim() : undefined));
+
+const optionalStringArray = z
+  .array(z.union([z.string(), z.null()]))
+  .nullish()
+  .transform((value) =>
+    Array.isArray(value)
+      ? value
+          .filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+          .map((item) => item.trim())
+          .slice(0, 12)
+      : [],
+  );
+
 export const extractedQuestionSchema = z.object({
   rawDetectedQuestion: z.string().min(1),
   normalizedQuestion: z.string().min(1),
@@ -41,13 +63,13 @@ export const extractedQuestionSchema = z.object({
   questionType: z.nativeEnum(QuestionBankQuestionType),
   difficulty: z.nativeEnum(QuestionBankDifficulty),
   complexityScore: z.number().int().min(0).max(100),
-  technologies: z.array(z.string()).max(12).default([]),
-  topics: z.array(z.string()).max(12).default([]),
-  industry: z.string().optional(),
-  roleGuess: z.string().optional(),
-  companyGuess: z.string().optional(),
+  technologies: optionalStringArray,
+  topics: optionalStringArray,
+  industry: optionalString,
+  roleGuess: optionalString,
+  companyGuess: optionalString,
   confidence: z.number().min(0).max(1),
-  rejectReason: z.string().optional(),
+  rejectReason: optionalString,
 });
 
 export const extractionResponseSchema = z.object({
@@ -252,11 +274,65 @@ async function callExtractionModel(input: {
         : "none",
   });
 
-  const parsed = extractionResponseSchema.parse(rawParsed);
-  return parsed.questions;
+  // Parse each question independently so a single malformed entry (bad enum,
+  // missing required text, etc.) is dropped instead of discarding the whole
+  // batch. The null-tolerant field helpers above already absorb stray nulls.
+  const candidateArray = Array.isArray(questionsRaw) ? questionsRaw : [];
+  const parsedQuestions: ExtractedInterviewQuestion[] = [];
+  let droppedCount = 0;
+  for (const candidate of candidateArray.slice(0, 30)) {
+    const result = extractedQuestionSchema.safeParse(candidate);
+    if (result.success) {
+      parsedQuestions.push(result.data);
+    } else {
+      droppedCount += 1;
+      console.warn("[question-bank-extraction] dropped invalid question", {
+        issues: result.error.issues.map((issue) => ({
+          path: issue.path.join("."),
+          message: issue.message,
+        })),
+      });
+    }
+  }
+  if (droppedCount > 0) {
+    console.warn("[question-bank-extraction] dropped questions during parse", {
+      droppedCount,
+      keptCount: parsedQuestions.length,
+    });
+  }
+  return parsedQuestions;
 }
 
 export async function runQuestionBankExtractionForSession(sessionId: string): Promise<void> {
+  // Fetch the session BEFORE marking the run as PROCESSING. The extraction-run
+  // row has a non-nullable FK to Session with onDelete: Cascade, so if the
+  // session was already deleted the run row is gone too and markRun() would
+  // throw an FK violation. A deleted session is permanent and unprocessable —
+  // return cleanly (no throw) so BullMQ does not retry it 3× with noisy logs.
+  const session = await prisma.session.findUnique({
+    where: { id: sessionId },
+    select: {
+      id: true,
+      userId: true,
+      companyName: true,
+      jobDescription: true,
+      saveTranscription: true,
+      questionBankContributionOptIn: true,
+      status: true,
+      transcript: true,
+      messages: true,
+      questions: {
+        select: { id: true, ques: true },
+        orderBy: { createdAt: "asc" },
+      },
+    },
+  });
+
+  if (!session) {
+    console.warn("[question-bank-extraction] session not found, skipping", { sessionId });
+    return;
+  }
+
   await markRun({
     sessionId,
     status: QuestionBankExtractionStatus.PROCESSING,
@@ -266,29 +342,6 @@ export async function runQuestionBankExtractionForSession(sessionId: string): Pr
   });
 
   try {
-    const session = await prisma.session.findUnique({
-      where: { id: sessionId },
-      select: {
-        id: true,
-        userId: true,
-        companyName: true,
-        jobDescription: true,
-        saveTranscription: true,
-        questionBankContributionOptIn: true,
-        status: true,
-        transcript: true,
-        messages: true,
-        questions: {
-          select: { id: true, ques: true },
-          orderBy: { createdAt: "asc" },
-        },
-      },
-    });
-
-    if (!session) {
-      throw new AppError(404, "Session not found for question bank extraction");
-    }
-
     if (!terminalStatuses.includes(session.status)) {
       await markRun({
         sessionId,
@@ -339,6 +392,7 @@ export async function runQuestionBankExtractionForSession(sessionId: string): Pr
 
     let acceptedCount = 0;
     let rejectedCount = 0;
+    let failedCount = 0;
 
     for (const extracted of extractedQuestions) {
       const sanitizedQuestion = buildSanitizedQuestion({
@@ -346,20 +400,40 @@ export async function runQuestionBankExtractionForSession(sessionId: string): Pr
         hardRejectReason: findHardRejectReason(extracted),
       });
 
-      const stored = await storeExtractedQuestion({
-        question: sanitizedQuestion,
-        companyName: session.companyName,
-        roleName: session.jobDescription,
-        sourceUserId: session.userId,
-        sourceSessionId: session.id,
-        contributionOptIn: session.questionBankContributionOptIn,
-      });
+      // Isolate each question: a single un-storable entry (e.g. neither the
+      // session nor the AI provided a company/role, or a transient DB error)
+      // must not abort the whole batch and fail the job. Count and continue.
+      try {
+        const stored = await storeExtractedQuestion({
+          question: sanitizedQuestion,
+          companyName: session.companyName,
+          roleName: session.jobDescription,
+          sourceUserId: session.userId,
+          sourceSessionId: session.id,
+          contributionOptIn: session.questionBankContributionOptIn,
+        });
 
-      if (stored.acceptedForPublicPool) {
-        acceptedCount += 1;
-      } else {
-        rejectedCount += 1;
+        if (stored.acceptedForPublicPool) {
+          acceptedCount += 1;
+        } else {
+          rejectedCount += 1;
+        }
+      } catch (storeError) {
+        failedCount += 1;
+        console.warn("[question-bank-extraction] skipped question that could not be stored", {
+          sessionId,
+          reason: storeError instanceof Error ? storeError.message : String(storeError),
+        });
       }
+    }
+
+    if (failedCount > 0) {
+      console.warn("[question-bank-extraction] some questions were not stored", {
+        sessionId,
+        failedCount,
+        acceptedCount,
+        rejectedCount,
+      });
     }
 
     await markRun({

@@ -32,10 +32,14 @@ export async function generateProjects(
 
   try {
     const { resumeId, resumeText, position, jobDescription, industry, experienceLevel, generationMode } =
-      req.body as Omit<GenerateProjectRequest, "userId">
+      req.body as Omit<GenerateProjectRequest, "userId">;
+    const persistGeneratedRecord =
+      (req.body as { persistGeneratedRecord?: unknown }).persistGeneratedRecord;
+    const shouldPersistGeneratedRecord =
+      persistGeneratedRecord !== false && persistGeneratedRecord !== "false";
 
     console.log(`\n[projects.controller] ══════════ NEW GENERATION REQUEST ══════════`);
-    console.log(`[projects.controller]   position="${position}" mode=${generationMode || "new"} industry=${industry || "n/a"} exp=${experienceLevel || "n/a"}`);
+    console.log(`[projects.controller]   position="${position}" mode=${generationMode || "new"} industry=${industry || "n/a"} exp=${experienceLevel || "n/a"} persist=${shouldPersistGeneratedRecord}`);
     console.log(`[projects.controller]   resumeId=${resumeId || "none"} hasResumeText=${!!resumeText} hasFile=${!!req.file}`);
 
     // ── Resolve caller's identity — Clerk token preferred, body.userId fallback ─
@@ -142,15 +146,16 @@ export async function generateProjects(
               .replace(/\n?```$/, "")
               .trim();
 
-            // Send the full project JSON to the client with the unique delimiter
-            res.write(cleanProject + DELIMITER);
-
-            // Parse for DB save
+            // Parse/repair first, then stream canonical JSON. The backend parser
+            // is more tolerant than the frontend; streaming raw model text can
+            // make the frontend report "No projects returned" even when DB save
+            // succeeds after repair.
             const parsedProject =
               projectsService.parseJsonResponse<any>(cleanProject);
             if (parsedProject) {
               const title = parsedProject?.projectHeader?.title ?? "(unknown)";
               const expectedCount = projectsService.getProjectsPerRequest();
+              res.write(JSON.stringify(parsedProject) + DELIMITER);
               console.log(`[projects.controller]   ✓ Streamed project ${allProjects.length + 1}/${expectedCount}: "${title}" (+${Date.now() - reqStart}ms)`);
               allProjects.push(parsedProject);
             } else {
@@ -180,24 +185,30 @@ export async function generateProjects(
           // Generation already streamed; log and continue to save.
         }
 
-        console.log(`[projects.controller]   Saving batch of ${allProjects.length} projects to DB…`);
-        try {
-          await projectsService.saveProjectBatch(
-            userId,
-            position,
-            jobDescription,
-            allProjects,
-            resumeId,
-            industry,
-            experienceLevel,
-          );
+        if (shouldPersistGeneratedRecord) {
+          console.log(`[projects.controller]   Saving batch of ${allProjects.length} projects to DB…`);
+          try {
+            await projectsService.saveProjectBatch(
+              userId,
+              position,
+              jobDescription,
+              allProjects,
+              resumeId,
+              industry,
+              experienceLevel,
+            );
+            console.log(
+              `[projects.controller]   DB save OK — ${allProjects.length} projects persisted (+${Date.now() - reqStart}ms total)`,
+            );
+          } catch (saveErr) {
+            console.error(
+              "[projects.controller]   Failed to save project batch:",
+              saveErr,
+            );
+          }
+        } else {
           console.log(
-            `[projects.controller]   DB save OK — ${allProjects.length} projects persisted (+${Date.now() - reqStart}ms total)`,
-          );
-        } catch (saveErr) {
-          console.error(
-            "[projects.controller]   Failed to save project batch:",
-            saveErr,
+            `[projects.controller]   DB save skipped by request — streamed ${allProjects.length} project(s) for replacement (+${Date.now() - reqStart}ms total)`,
           );
         }
       }

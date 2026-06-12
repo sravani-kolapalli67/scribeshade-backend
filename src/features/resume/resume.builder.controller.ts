@@ -1,6 +1,8 @@
 import { Request, Response, NextFunction } from "express";
 
 import { getCurrentUserId } from "../auth/auth.middleware";
+import { prisma } from "../../shared/lib/prisma";
+import { AppError } from "../../shared/middleware/error.middleware";
 import {
   saveBuiltResume,
   listBuiltResumes,
@@ -30,7 +32,6 @@ import type {
   TailorResumeInput,
   ExportPdfInput,
   ExtractFieldsInput,
-  MarkBuiltResumeCompleteInput,
   ValidateSectionInput,
   RewriteResumeInput,
   InjectSkillsInput,
@@ -38,6 +39,33 @@ import type {
   AnalyzeKeywordsInput,
   KeywordMatchInput,
 } from "./resume.types";
+
+async function resolveDbUserId(candidateUserId: string): Promise<string> {
+  if (!candidateUserId) {
+    throw new AppError(401, "Authenticated user id is missing");
+  }
+
+  if (!candidateUserId.startsWith("user_")) {
+    return candidateUserId;
+  }
+
+  const user = await prisma.user.findUnique({
+    where: { clerkId: candidateUserId },
+    select: { id: true },
+  });
+
+  if (!user) {
+    throw new AppError(401, "Authenticated user was not found in the database");
+  }
+
+  return user.id;
+}
+
+async function resolveAuthenticatedBuilderUserId(
+  req: Request,
+): Promise<string> {
+  return resolveDbUserId(getCurrentUserId(req).trim());
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Builder CRUD
@@ -53,13 +81,14 @@ export async function saveBuiltResumeHandler(
   next: NextFunction,
 ): Promise<void> {
   try {
-    const { userId, resumeId, title, templateId, fields, sections, jobDescription, jobTitle, company } =
+    const { resumeId, title, templateId, fields, sections, jobDescription, jobTitle, company } =
       req.body as Partial<SaveBuiltResumeInput>;
+    const userId = await resolveAuthenticatedBuilderUserId(req);
 
-    if (!userId || !title || !templateId || !fields || !sections) {
+    if (!title || !templateId || !fields || !sections) {
       res
         .status(400)
-        .json({ error: "userId, title, templateId, fields and sections are required" });
+        .json({ error: "title, templateId, fields and sections are required" });
       return;
     }
 
@@ -84,7 +113,7 @@ export async function saveBuiltResumeHandler(
 
 /**
  * GET /resume/builder/list?userId=<id>
- * Lists all built resumes for a user. Accepts Clerk ID or DB UUID.
+ * Lists all built resumes for the authenticated user.
  */
 export async function listBuiltResumesHandler(
   req: Request,
@@ -92,12 +121,7 @@ export async function listBuiltResumesHandler(
   next: NextFunction,
 ): Promise<void> {
   try {
-    const { userId } = req.query as { userId?: string };
-
-    if (!userId) {
-      res.status(400).json({ error: "userId query parameter is required" });
-      return;
-    }
+    const userId = await resolveAuthenticatedBuilderUserId(req);
 
     const resumes = await listBuiltResumes(userId);
     res.json({ resumes });
@@ -117,7 +141,8 @@ export async function getBuiltResumeHandler(
 ): Promise<void> {
   try {
     const { id } = req.params;
-    const resume = await getBuiltResume(String(id));
+    const userId = await resolveAuthenticatedBuilderUserId(req);
+    const resume = await getBuiltResume(String(id), userId);
     res.json(resume);
   } catch (err) {
     next(err);
@@ -135,7 +160,8 @@ export async function deleteBuiltResumeHandler(
 ): Promise<void> {
   try {
     const { id } = req.params;
-    await deleteBuiltResume(String(id));
+    const userId = await resolveAuthenticatedBuilderUserId(req);
+    await deleteBuiltResume(String(id), userId);
     res.json({ message: "Built resume deleted successfully" });
   } catch (err) {
     next(err);
@@ -156,11 +182,12 @@ export async function generateResumeHtmlHandler(
   next: NextFunction,
 ): Promise<void> {
   try {
-    const { userId, templateCode, fields, jobDescription, jobTitle, company } =
+    const { templateCode, fields, jobDescription, jobTitle, company } =
       req.body as Partial<GenerateResumeHtmlInput>;
+    const userId = await resolveAuthenticatedBuilderUserId(req);
 
-    if (!userId || !templateCode || !fields) {
-      res.status(400).json({ error: "userId, templateCode, and fields are required" });
+    if (!templateCode || !fields) {
+      res.status(400).json({ error: "templateCode and fields are required" });
       return;
     }
 
@@ -191,7 +218,6 @@ export async function enhanceSectionHandler(
 ): Promise<void> {
   try {
     const {
-      userId: bodyUserId,
       sectionId,
       currentText,
       jobDescription,
@@ -202,10 +228,7 @@ export async function enhanceSectionHandler(
     } =
       req.body as Partial<EnhanceSectionInput>;
 
-    // userId is preferred from the resolved body (resolveUserId middleware converts
-    // Clerk IDs → DB UUIDs transparently). Fall back to the Clerk auth identity so
-    // the endpoint works even when the frontend omits userId from the body.
-    const userId = bodyUserId || getCurrentUserId(req);
+    const userId = await resolveAuthenticatedBuilderUserId(req);
 
     if (!sectionId || !currentText) {
       res.status(400).json({ error: "sectionId and currentText are required" });
@@ -241,11 +264,9 @@ export async function tailorResumeHandler(
   next: NextFunction,
 ): Promise<void> {
   try {
-    const { userId: bodyUserId, resumeId, jobDescription, jobTitle, company, fields } =
+    const { resumeId, jobDescription, jobTitle, company, fields } =
       req.body as Partial<TailorResumeInput>;
-    // userId is preferred from the resolved body (resolveUserId middleware converts
-    // Clerk IDs to DB UUIDs). Fall back to Clerk auth for resilience.
-    const userId = bodyUserId || getCurrentUserId(req);
+    const userId = await resolveAuthenticatedBuilderUserId(req);
 
     // ── Request audit log ─────────────────────────────────────────────────────
     // This is the definitive ground truth of what the frontend sent. If jobTitle
@@ -260,8 +281,8 @@ export async function tailorResumeHandler(
       jdPreview: (jobDescription ?? "").substring(0, 80),
     });
 
-    if (!userId || !jobDescription) {
-      res.status(400).json({ error: "userId and jobDescription are required" });
+    if (!jobDescription) {
+      res.status(400).json({ error: "jobDescription is required" });
       return;
     }
 
@@ -303,7 +324,8 @@ export async function exportPdfHandler(
 ): Promise<void> {
   const _ct0 = Date.now();
   try {
-    const { userId, resumeId, populatedHtml, suggestedFilename } = req.body as Partial<ExportPdfInput>;
+    const { resumeId, populatedHtml, suggestedFilename } = req.body as Partial<ExportPdfInput>;
+    const userId = await resolveAuthenticatedBuilderUserId(req);
     console.info(JSON.stringify({ event: "pdf_handler_start", resumeId: resumeId ?? null, htmlBytes: populatedHtml?.length ?? 0 }));
 
     if (!resumeId && !populatedHtml) {
@@ -311,7 +333,7 @@ export async function exportPdfHandler(
       return;
     }
 
-    const result = await exportResumeHtml({ userId: userId ?? "", resumeId, populatedHtml, suggestedFilename });
+    const result = await exportResumeHtml({ userId, resumeId, populatedHtml, suggestedFilename });
 
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader("Content-Disposition", `attachment; filename="${result.filename}"`);
@@ -348,14 +370,12 @@ export async function extractFieldsHandler(
   next: NextFunction,
 ): Promise<void> {
   try {
-    const { userId: bodyUserId, resumeContext, jobDescription, jobTitle, company } =
+    const { resumeContext, jobDescription, jobTitle, company } =
       req.body as Partial<ExtractFieldsInput>;
-    // userId is preferred from the resolved body (resolveUserId middleware converts
-    // Clerk IDs to DB UUIDs). Fall back to Clerk auth for resilience.
-    const userId = bodyUserId || getCurrentUserId(req);
+    const userId = await resolveAuthenticatedBuilderUserId(req);
 
-    if (!userId || !resumeContext) {
-      res.status(400).json({ error: "userId and resumeContext are required" });
+    if (!resumeContext) {
+      res.status(400).json({ error: "resumeContext is required" });
       return;
     }
 
@@ -385,12 +405,7 @@ export async function markBuiltResumeCompleteHandler(
 ): Promise<void> {
   try {
     const { id } = req.params;
-    const { userId } = req.body as Partial<MarkBuiltResumeCompleteInput>;
-
-    if (!userId) {
-      res.status(400).json({ error: "userId is required" });
-      return;
-    }
+    const userId = await resolveAuthenticatedBuilderUserId(req);
 
     const result = await markBuiltResumeComplete({ resumeId: String(id), userId });
     res.json({ success: true, data: result });
@@ -450,7 +465,8 @@ export async function renameBuiltResumeHandler(
       return;
     }
 
-    const updated = await renameBuiltResume(id, title.trim());
+    const userId = await resolveAuthenticatedBuilderUserId(req);
+    const updated = await renameBuiltResume(id, title.trim(), userId);
     res.json({ success: true, data: updated });
   } catch (err) {
     next(err);
@@ -467,11 +483,7 @@ export async function builderAtsScoreHandler(
   next: NextFunction,
 ): Promise<void> {
   try {
-    const userId = getCurrentUserId(req);
-    if (!userId) {
-      res.status(401).json({ error: "Unauthorized" });
-      return;
-    }
+    const userId = await resolveAuthenticatedBuilderUserId(req);
 
     const { resumeId, jobDescription } = req.body as { resumeId?: string; jobDescription?: string };
     if (!resumeId) {
@@ -496,12 +508,7 @@ export async function rewriteResumeHandler(
   next: NextFunction,
 ): Promise<void> {
   try {
-    const bodyUserId = (req.body as Record<string, unknown>).userId as string | undefined;
-    const userId = bodyUserId || getCurrentUserId(req);
-    if (!userId) {
-      res.status(401).json({ error: "Unauthorized" });
-      return;
-    }
+    const userId = await resolveAuthenticatedBuilderUserId(req);
 
     const { resumeId, jobTitle, company, targetLevel, fields } = req.body as RewriteResumeInput;
     if (!jobTitle?.trim()) {
@@ -535,12 +542,7 @@ export async function injectSkillsHandler(
   next: NextFunction,
 ): Promise<void> {
   try {
-    const bodyUserId = (req.body as Record<string, unknown>).userId as string | undefined;
-    const userId = bodyUserId || getCurrentUserId(req);
-    if (!userId) {
-      res.status(401).json({ error: "Unauthorized" });
-      return;
-    }
+    const userId = await resolveAuthenticatedBuilderUserId(req);
 
     const { resumeId, jobDescription, jobTitle, fields } = req.body as InjectSkillsInput;
     if (!fields) {
@@ -573,12 +575,7 @@ export async function injectKeywordsHandler(
   next: NextFunction,
 ): Promise<void> {
   try {
-    const bodyUserId = (req.body as Record<string, unknown>).userId as string | undefined;
-    const userId = bodyUserId || getCurrentUserId(req);
-    if (!userId) {
-      res.status(401).json({ error: "Unauthorized" });
-      return;
-    }
+    const userId = await resolveAuthenticatedBuilderUserId(req);
 
     const { resumeId, jobDescription, fields, selectedKeywords } = req.body as InjectKeywordsInput;
     if (!jobDescription || jobDescription.trim().length < 50) {
@@ -615,12 +612,7 @@ export async function analyzeKeywordsHandler(
   next: NextFunction,
 ): Promise<void> {
   try {
-    const bodyUserId = (req.body as Record<string, unknown>).userId as string | undefined;
-    const userId = bodyUserId || getCurrentUserId(req);
-    if (!userId) {
-      res.status(401).json({ error: "Unauthorized" });
-      return;
-    }
+    const userId = await resolveAuthenticatedBuilderUserId(req);
 
     const { jobDescription, fields } = req.body as AnalyzeKeywordsInput;
     if (!jobDescription || jobDescription.trim().length < 50) {

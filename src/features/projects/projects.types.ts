@@ -14,6 +14,11 @@ export interface GenerateProjectRequest {
    * Defaults to "new" when omitted.
    */
   generationMode?: "new" | "resume_enhanced";
+  /**
+   * When false, stream and charge for generated projects but do not create a new
+   * Project row. Used by regeneration flows that replace an existing record.
+   */
+  persistGeneratedRecord?: boolean;
 }
 
 // ── Dynamic Section System ────────────────────────────────────────────────

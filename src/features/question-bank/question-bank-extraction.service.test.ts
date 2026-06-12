@@ -151,3 +151,45 @@ test("invalid difficulty enum value throws ZodError", () => {
     ZodError,
   );
 });
+
+// ── Null-tolerance: LLMs emit `null` instead of omitting optional fields ──────
+
+test("rejectReason null is accepted and coerced to undefined", () => {
+  const result = extractedQuestionSchema.parse({ ...VALID_QUESTION, rejectReason: null });
+  assert.equal(result.rejectReason, undefined);
+});
+
+test("optional string guess fields accept null and coerce to undefined", () => {
+  const result = extractedQuestionSchema.parse({
+    ...VALID_QUESTION,
+    industry: null,
+    roleGuess: null,
+    companyGuess: null,
+  });
+  assert.equal(result.industry, undefined);
+  assert.equal(result.roleGuess, undefined);
+  assert.equal(result.companyGuess, undefined);
+});
+
+test("blank optional string fields coerce to undefined", () => {
+  const result = extractedQuestionSchema.parse({ ...VALID_QUESTION, industry: "   " });
+  assert.equal(result.industry, undefined);
+});
+
+test("null technologies and topics arrays coerce to []", () => {
+  const result = extractedQuestionSchema.parse({
+    ...VALID_QUESTION,
+    technologies: null,
+    topics: null,
+  });
+  assert.deepEqual(result.technologies, []);
+  assert.deepEqual(result.topics, []);
+});
+
+test("null and blank elements inside arrays are filtered out", () => {
+  const result = extractedQuestionSchema.parse({
+    ...VALID_QUESTION,
+    technologies: ["Go", null, "  ", "Rust"],
+  });
+  assert.deepEqual(result.technologies, ["Go", "Rust"]);
+});
