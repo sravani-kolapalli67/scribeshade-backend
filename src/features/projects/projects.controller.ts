@@ -219,7 +219,9 @@ export async function generateProjects(
 
 /**
  * GET /api/projects/mine
- * Lists projects for the authenticated user — resolves identity via Bearer token.
+ * Lists projects for the authenticated user.
+ * Optional ?resumeId=xxx query param filters to only projects tied to that resume
+ * (plus legacy projects with no resumeId, so older records stay visible).
  */
 export async function listMyProjects(
   req: Request,
@@ -232,7 +234,10 @@ export async function listMyProjects(
       res.status(401).json({ error: "User not found — please sign in again" });
       return;
     }
-    const projects = await projectsService.getProjectsByUser(user.id);
+    const resumeId = typeof req.query.resumeId === "string" && req.query.resumeId
+      ? req.query.resumeId
+      : undefined;
+    const projects = await projectsService.getProjectsByUser(user.id, resumeId);
     res.json(projects);
   } catch (error) {
     console.error("[projects.controller] listMyProjects error:", error);

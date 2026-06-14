@@ -606,10 +606,17 @@ export async function saveProjectBatch(
 
 /**
  * Returns all stored projects for a given user.
+ * If resumeId is provided, only returns projects tied to that resume.
+ * Projects with no resumeId (legacy) are also included when resumeId is provided,
+ * so older projects remain visible.
  */
-export async function getProjectsByUser(userId: string) {
+export async function getProjectsByUser(userId: string, resumeId?: string) {
+  const where: any = { userId };
+  if (resumeId) {
+    where.OR = [{ resumeId }, { resumeId: null }];
+  }
   return prisma.project.findMany({
-    where: { userId },
+    where,
     orderBy: { createdAt: "desc" },
   });
 }

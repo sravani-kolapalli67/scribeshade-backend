@@ -509,7 +509,16 @@ export async function buildOptimizedContext(
       ? prisma.document.findUnique({ where: { id: session.documentId } }).catch(() => null)
       : Promise.resolve(null),
     includeProjects && session.projectIds && Array.isArray(session.projectIds) && (session.projectIds as string[]).length > 0
-      ? prisma.project.findMany({ where: { id: { in: session.projectIds as string[] } } }).catch(() => [])
+      ? prisma.project.findMany({
+          where: {
+            id: { in: session.projectIds as string[] },
+            // Defensive filter: only projects tied to the session's resume
+            // (or legacy projects with no resumeId) leak into answer context.
+            ...(session.resumeId
+              ? { OR: [{ resumeId: session.resumeId }, { resumeId: null }] }
+              : {}),
+          },
+        }).catch(() => [])
       : Promise.resolve([])
   ]);
 
