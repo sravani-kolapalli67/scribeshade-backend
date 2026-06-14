@@ -57,23 +57,22 @@ export async function handleWebhook(body: any, headers: any) {
   }
 
   console.log("Webhook received");
-  console.log(webhookSecret);
   const wh = new Webhook(webhookSecret);
-  console.log("Runnin111111g-?>>>>>>>>");
 
-  let event = body;
+  // svix.verify requires the RAW request body (Buffer or string) and svix headers.
+  // The /webhook route wires express.raw({type:'application/json'}) so req.body is a Buffer.
+  let event: any;
   try {
-    console.log(
-      `Running-?>>>>>>>>  headers = ${JSON.stringify(headers)}`,
-      body,
-    );
-    // event = wh.verify(body, {
-    //   "svix-id": headers["svix-id"] as string,
-    //   "svix-timestamp": headers["svix-timestamp"] as string,
-    //   "svix-signature": headers["svix-signature"] as string,
-    // });
+    const rawBody = Buffer.isBuffer(body)
+      ? body.toString("utf8")
+      : (typeof body === "string" ? body : JSON.stringify(body));
+    event = wh.verify(rawBody, {
+      "svix-id": headers["svix-id"] as string,
+      "svix-timestamp": headers["svix-timestamp"] as string,
+      "svix-signature": headers["svix-signature"] as string,
+    }) as any;
   } catch (error) {
-    console.error("Webhook verification failed:", error);
+    console.error("Webhook signature verification failed:", error);
     throw new Error("Invalid webhook signature");
   }
 

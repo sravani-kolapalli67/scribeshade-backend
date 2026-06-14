@@ -14,8 +14,10 @@ export const createApp: () => Express = () => {
   // Standard middleware
   app.use(morgan("dev"));
   app.use(cors({ origin: env.CORS_ORIGINS, credentials: true }));
-  app.use(express.json());
-  app.use(express.urlencoded({ extended: true }));
+  // 10 MB body limit — default is 100 KB which caused PayloadTooLargeError
+  // on long resume/JD pastes and large interview prompts.
+  app.use(express.json({ limit: "10mb" }));
+  app.use(express.urlencoded({ extended: true, limit: "10mb" }));
   app.use("/uploads", express.static("uploads"));
 
   // Transparently resolve Clerk IDs → internal DB UUIDs on every request
